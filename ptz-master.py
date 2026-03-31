@@ -7420,6 +7420,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     auto_accum    = 0.0
     _paused_by_us = False
     _first_draw    = True    # pierwsze rysowanie — pełne czyszczenie
+    _in_overlay    = False   # gdy True: _draw() jest wstrzymane (playlista, dialog)
     zoom_mode     = False   # [N] toggle — aktywuje panel zoom/pan
     zoom_val      = 0.0     # video-zoom: 0=1x, 1=2x, 2=4x
     pan_x         = 0.0     # video-pan-x: 0=centrum
@@ -8231,6 +8232,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         return f"{col}{chr(9608) * filled}{RST}{DIM}{chr(9617) * (width - filled)}{RST}"
 
     def _draw():
+        if _in_overlay:
+            return          # playlista / dialog ma ekran — nie nadpisuj
         _buf = []
         def _w(s): _buf.append(s)
 
@@ -8558,7 +8561,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     _mouse_on()
                 elif 58 <= c <= 60:                                      # [P]list
                     _mouse_off()
+                    _in_overlay = True
                     new_idx = _show_playlist(files, current_idx)
+                    _in_overlay = False
+                    _first_draw = True
                     if isinstance(new_idx, tuple) and new_idx[0] == "add":
                         # Plik wybrany z katalogu — dodaj do listy i przejdź
                         new_path = new_idx[1]
@@ -9007,11 +9013,16 @@ def _show_playlist(files, current_idx):
 
     def _btn_pos(text: str) -> dict:
         """Oblicz pozycje przycisków [X] w linii (bez kolorów ANSI).
-        Zwraca {label: (col_start, col_end)} — 1-indexed od początku linii."""
+        Zwraca {label: (col_start, col_end)} — 1-indexed od początku linii.
+        Złożone etykiety jak [Q/ESC] są mapowane pod każdym kluczem osobno.
+        """
         clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
         positions = {}
         for m in re.finditer(r'\[([^\]]+)\]', clean):
-            positions[m.group(1)] = (m.start() + 2, m.end() + 1)  # +2 za ║ i spację
+            span = (m.start() + 2, m.end() + 1)  # +2 za ║ i spację
+            for key in m.group(1).split('/'):
+                positions[key] = span
+                positions[key.lower()] = span
         return positions
 
     def _draw_playlist(sel, off):
