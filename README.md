@@ -20,5 +20,9 @@ To run this tool, ensure you have the following installed:
 ## 🚀 Quick Start
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/laostachowski-jpg/ptz-master.git](https://github.com/laostachowski-jpg/ptz-master.git)
+
+   git clone https://github.com/laostachowski-jpg/ptz-master.git
+
    cd ptz-master
+
+   ./ptz-master.py
