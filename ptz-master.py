@@ -24,27 +24,6 @@ VERSION = "9.0.7"
 #-###====== End Info_data - 🎯 🛡 🎥 ✨ ↑/↓ ←/→ 🔄 🎮 ======###-#
 """
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-
-if not os.path.exists(LOG_DIR):
-    try:
-        os.makedirs(LOG_DIR)
-    except Exception:
-        LOG_DIR = "/tmp"
-
-LOG_FILE = os.path.join(LOG_DIR, "ptz_master_debug.log")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        # logging.StreamHandler() # Odkomentuj, jeśli chcesz logi też w terminalu
-    ]
-)
-logger = logging.getLogger(__name__)
-
 import hashlib
 import base64
 import datetime
@@ -84,6 +63,28 @@ try:
     RETRY_AVAILABLE = True
 except ImportError:
     RETRY_AVAILABLE = False
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+if not os.path.exists(LOG_DIR):
+    try:
+        os.makedirs(LOG_DIR)
+    except Exception:
+        LOG_DIR = "/tmp"
+
+LOG_FILE = os.path.join(LOG_DIR, "ptz_master_debug.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        # logging.StreamHandler() # Odkomentuj, jeśli chcesz logi też w terminalu
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # GLOBAL CONFIGURATION
