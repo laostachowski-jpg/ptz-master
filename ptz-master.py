@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+VERSION = "9.0.7"
 """
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
 #                   Designed for Linux systems 🎯 🛡️ 🎥 ✨ ▶️
-# ⚙️   Version:      9.0.4
+# ⚙️   Version:      """ + VERSION + """
 # 👨‍💻  Author:       Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
 # 🎯  Purpose:      Interactive TUI for IP camera control via mpv
-#                   Supports RTSP, V4L2, FILE and USB camera types
+#                   Supports RTSP, V4L2, USB camera and play video files
 #
-# 🚀  Usage:        python3 ptz-master-v9_0_6.py
-#                   ptz-master-v9_0_6.py --help
-#                   ptz-master-v9_0_6.py -r
-#                   ptz-master-v9_0_6.py -p <video_file>
+# 🚀  Usage:        python3 ptz-master.py
+#                   ./ptz-master.py --help
+#                   ptz-master.py -r
+#                   ptz-master.py -p <video_file>
 #
 # 🔧  Dependencies: mpv, ffprobe, Python 3.6+
 #                   Optional: xdotool (Qt player positioning)
@@ -23,6 +23,27 @@
 #
 #-###====== End Info_data - 🎯 🛡 🎥 ✨ ↑/↓ ←/→ 🔄 🎮 ======###-#
 """
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+if not os.path.exists(LOG_DIR):
+    try:
+        os.makedirs(LOG_DIR)
+    except Exception:
+        LOG_DIR = "/tmp"
+
+LOG_FILE = os.path.join(LOG_DIR, "ptz_master_debug.log")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        # logging.StreamHandler() # Odkomentuj, jeśli chcesz logi też w terminalu
+    ]
+)
+logger = logging.getLogger(__name__)
 
 import hashlib
 import base64
@@ -68,7 +89,6 @@ except ImportError:
 # GLOBAL CONFIGURATION
 # =============================================================================
 
-VERSION = "9.0.7"
 DEFAULT_CONFIG = "ptz_master_config.json"
 LOG_FILE = "ptz_master.log"
 
