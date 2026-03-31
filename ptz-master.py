@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 VERSION = "9.0.7"
-
 """
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -25,7 +23,6 @@ VERSION = "9.0.7"
 #
 #-###====== End Info_data - 🎯 🛡 🎥 ✨ ↑/↓ ←/→ 🔄 🎮 ======###-#
 """
-
 import hashlib
 import base64
 import datetime
@@ -58,42 +55,30 @@ from contextlib import contextmanager
 from typing import Optional, Dict, List, Tuple, Any, Union
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from requests.adapters import HTTPAdapter
 try:
     from urllib3.util.retry import Retry
     RETRY_AVAILABLE = True
 except ImportError:
     RETRY_AVAILABLE = False
-
 # --- Inicjalizacja ścieżek i logowania ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-
+LOG_DIR  = os.path.join(BASE_DIR, "logs")
 if not os.path.exists(LOG_DIR):
     try:
         os.makedirs(LOG_DIR)
     except Exception:
         LOG_DIR = "/tmp"
-
 LOG_FILE = os.path.join(LOG_DIR, "ptz_master_debug.log")
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(LOG_FILE, encoding='utf-8'),
-        # logging.StreamHandler() # Odkomentuj, jeśli chcesz logi też w terminalu
     ]
 )
 logger = logging.getLogger(__name__)
-
-# =============================================================================
-# GLOBAL CONFIGURATION
-# =============================================================================
-
 DEFAULT_CONFIG = "ptz_master_config.json"
-LOG_FILE = "ptz_master.log"
 
 class Colors:
     GREEN = "\033[92m"
@@ -180,7 +165,8 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
 
     args = sys.argv[1:]
     i = 0
-    player_mode = False
+    player_mode   = False
+    playlist_mode = False
     while i < len(args):
         arg = args[i]
         if arg in ('--debug', '-d'):
@@ -191,7 +177,7 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
             player_mode = True
         elif arg in ('-pl', '--player-loop'):
             # specjalna obsługa playlisty
-            player_mode = True
+            player_mode   = True
             playlist_mode = True
         elif arg in ('-c', '--camera') and i + 1 < len(args):
             start_index = args[i + 1]; i += 1
@@ -211,9 +197,9 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
                 config_file = arg
         i += 1
 
-    return config_file, debug_mode, restore_mode, start_index, start_mac, player_files
+    return config_file, debug_mode, restore_mode, start_index, start_mac, player_files, playlist_mode
 
-CONFIG_FILE, DEBUG_MODE, RESTORE_MODE, START_CAMERA, START_MAC, PLAYER_FILES = parse_arguments()
+CONFIG_FILE, DEBUG_MODE, RESTORE_MODE, START_CAMERA, START_MAC, PLAYER_FILES, PLAYLIST_LOOP = parse_arguments()
 
 # =============================================================================
 # DATA STRUCTURES
@@ -9019,6 +9005,15 @@ def _show_playlist(files, current_idx):
             return sel - page_size + 1
         return offset
 
+    def _btn_pos(text: str) -> dict:
+        """Oblicz pozycje przycisków [X] w linii (bez kolorów ANSI).
+        Zwraca {label: (col_start, col_end)} — 1-indexed od początku linii."""
+        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+        positions = {}
+        for m in re.finditer(r'\[([^\]]+)\]', clean):
+            positions[m.group(1)] = (m.start() + 2, m.end() + 1)  # +2 za ║ i spację
+        return positions
+
     def _draw_playlist(sel, off):
         out("\033[2J\033[H\033[?25l")
         out(f"\r{BLU}╔{'═'*W}╗{RST}\r\n")
@@ -9181,11 +9176,36 @@ def _show_playlist(files, current_idx):
                     off = 0
                 elif isinstance(key, MouseEvent) and not key.release:
                     r, c = key.row, key.col
-                    # r2: header — klik [D] katalog, [F] filtr, [ESC] anuluj
+                    # Oblicz pozycje przycisków dynamicznie z tekstu nagłówka
+                    # ' 📋 Playlista (N) — [↑↓] nawigacja  [D] katalog  [F] filtr  [ESC] wróć'
+                    # Liczymy od col 2 (po ║)
                     if r == 2:
-                        if   55 <= c <= 57: mode = "dir"; dir_entries = _scan_dir(cwd, show_hidden, filter_str); dir_sel = 0  # [D]
-                        elif 67 <= c <= 69: pass          # [F] — TODO inline
-                        elif 73 <= c <= 77: return -1     # [ESC]
+                        # [D] katalog — znajdź "[D]" w nagłówku
+                        hdr = f" 📋 Playlista ({len(files)}) — [↑↓] nawigacja  [D] katalog  [F] filtr  [ESC] wróć"
+                        _col = 2
+                        _btn = {}
+                        for _i, _ch in enumerate(hdr):
+                            for _k, _t in [('D','[D]'),('F','[F]'),('ESC','[ESC]')]:
+                                if hdr[_i:_i+len(_t)] == _t and _k not in _btn:
+                                    _btn[_k] = (_col, _col+len(_t)-1)
+                            _col += 2 if ord(_ch) >= 0x1F000 else 1
+                        if   'D'   in _btn and _btn['D'][0]   <= c <= _btn['D'][1]:
+                            mode = "dir"; dir_entries = _scan_dir(cwd, show_hidden, filter_str); dir_sel = 0
+                        elif 'F'   in _btn and _btn['F'][0]   <= c <= _btn['F'][1]:
+                            # Uruchom filtr klawiszowy
+                            filter_str = ""
+                            _draw_playlist(selected, off)
+                            tty.setcbreak(fd)
+                            out(f"\033[3;10H{YLW}Filtr:{RST} ")
+                            while True:
+                                _fc = sys.stdin.read(1)
+                                if _fc in ("\r","\n","\x1b"): break
+                                elif _fc == "\x7f": filter_str = filter_str[:-1]
+                                else: filter_str += _fc
+                                out(f"\033[3;18H{filter_str}{DIM}█{RST}   ")
+                            tty.setraw(fd)
+                        elif 'ESC' in _btn and _btn['ESC'][0] <= c <= _btn['ESC'][1]:
+                            return -1
                     # r3+: lista plików
                     else:
                         header_rows = 4 if filter_str else 3
@@ -9199,13 +9219,13 @@ def _show_playlist(files, current_idx):
                                 selected = clicked
                                 off = _page_offset(selected, off, len(files))
                         elif r == nav_row:
-                            # [↑↓PgUp/Dn] [ENTER] wybierz  [D] katalog  [Q/ESC] anuluj
-                            if   2 <= c <= 12:  # [↑↓PgUp/Dn]
-                                pass  # handled by keys
-                            elif 14 <= c <= 20: return selected  # [ENTER]
-                            elif 30 <= c <= 32:  # [D]
+                            _pg   = f"{selected+1}/{len(files)}"
+                            _nav  = f" [↑↓PgUp/Dn] [ENTER] wybierz  [D] katalog  [Q/ESC] anuluj  {_pg}"
+                            _bp   = _btn_pos(_nav)
+                            if   'ENTER' in _bp and _bp['ENTER'][0] <= c <= _bp['ENTER'][1]: return selected
+                            elif 'D'     in _bp and _bp['D'][0]     <= c <= _bp['D'][1]:
                                 mode = "dir"; dir_entries = _scan_dir(cwd, show_hidden, filter_str); dir_sel = 0
-                            elif 44 <= c <= 50: return -1  # [Q/ESC]
+                            elif 'Q/ESC' in _bp and _bp['Q/ESC'][0] <= c <= _bp['Q/ESC'][1]: return -1
 
             # ── DIR mode ──────────────────────────────────────────
             else:
@@ -9283,6 +9303,47 @@ def _show_playlist(files, current_idx):
                 elif key in ("\x1b", Key.ESC):
                     mode = "playlist"
                     filter_str = ""
+                elif isinstance(key, MouseEvent) and not key.release:
+                    _r, _c = key.row, key.col
+                    # r4..r15: lista plików (vis_rows=12, zaczyna od r5)
+                    _list_r0 = 5
+                    _vis = 12
+                    if _list_r0 <= _r <= _list_r0 + _vis - 1:
+                        _row_in = _r - _list_r0
+                        _col_in = max(0, (_c - 1) // max(1, col_w))
+                        if orientation == "V":
+                            _idx = _col_in * rows + _row_in
+                        else:
+                            _idx = _row_in * cols + _col_in
+                        if 0 <= _idx < n:
+                            if _idx == dir_sel:
+                                # podwójny klik = enter
+                                e = dir_entries[dir_sel]
+                                if e["is_dir"]:
+                                    cwd = e["path"]
+                                    dir_entries = _scan_dir(cwd, show_hidden, filter_str)
+                                    dir_sel = 0
+                                else:
+                                    return ("add", e["path"])
+                            else:
+                                dir_sel = _idx
+                    # r7 (hint): dynamiczne pozycje
+                    elif _r == _list_r0 + _vis + 2:
+                        _hint = f" [ENTER] otwórz  [F2] kolumny  [F3] V/H  [F4] ukryte  [F] filtr  [ESC] lista"
+                        _bp = _btn_pos(_hint)
+                        if   'ENTER' in _bp and _bp['ENTER'][0] <= _c <= _bp['ENTER'][1]:
+                            if 0 <= dir_sel < n:
+                                e = dir_entries[dir_sel]
+                                if e["is_dir"]: cwd = e["path"]; dir_entries = _scan_dir(cwd, show_hidden, filter_str); dir_sel = 0
+                                else: return ("add", e["path"])
+                        elif 'F2'    in _bp and _bp['F2'][0]    <= _c <= _bp['F2'][1]:
+                            columns = (columns % 4) + 1; dir_entries = _scan_dir(cwd, show_hidden, filter_str)
+                        elif 'F3'    in _bp and _bp['F3'][0]    <= _c <= _bp['F3'][1]:
+                            orientation = "H" if orientation == "V" else "V"
+                        elif 'F4'    in _bp and _bp['F4'][0]    <= _c <= _bp['F4'][1]:
+                            show_hidden = not show_hidden; dir_entries = _scan_dir(cwd, show_hidden, filter_str); dir_sel = 0
+                        elif 'ESC'   in _bp and _bp['ESC'][0]   <= _c <= _bp['ESC'][1]:
+                            mode = "playlist"; filter_str = ""
 
     finally:
         sys.stdout.write("\033[?1000l\033[?1002l\033[?1006l")
@@ -9302,7 +9363,7 @@ def main():
     if PLAYER_FILES:
         logger.info(f"Player mode: {len(PLAYER_FILES)} file(s)")
         config_mgr = ConfigManager(CONFIG_FILE)
-        loop_mode = '-pl' in sys.argv or '--player-loop' in sys.argv
+        loop_mode = PLAYLIST_LOOP
         app = PlayerModeApp(PLAYER_FILES, config_mgr, start_idx=0, loop_mode=loop_mode)
         app.run()
     else:

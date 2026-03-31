@@ -1,0 +1,20 @@
+2026-03-31 16:20:49,160 - INFO - ============================================================
+2026-03-31 16:20:49,160 - INFO - PTZ Master v9.0.7 starting – 2026-03-31 16:20:49
+2026-03-31 16:20:49,160 - INFO - ============================================================
+2026-03-31 16:20:49,160 - INFO - Player mode: 1 file(s)
+2026-03-31 16:20:49,161 - WARNING - Config file ptz_master_config.json not found, creating new
+2026-03-31 16:20:49,170 - INFO - Terminal window ID: 54525965
+2026-03-31 16:20:49,210 - INFO - FILE mpv command: mpv /home/test/Wideo/CrazyfrogPopCornClip.wmv --geometry=640x360+100+100 --title=FILE:CrazyfrogPopCornClip.wmv --no-border --input-ipc-server=/tmp/mpv-CrazyfrogPopCornClip.wmv-8556 --speed=1.00
+2026-03-31 16:20:49,212 - INFO - FILE player PID: 8661
+2026-03-31 16:20:59,420 - INFO - Watchdog timer started for CrazyfrogPopCornClip.wmv (PID 8661)
+2026-03-31 16:21:01,423 - INFO - Watchdog: CrazyfrogPopCornClip.wmv streaming OK, reset restart counter
+2026-03-31 16:21:16,120 - INFO - FILE mpv command: mpv /home/test/Wideo/5.1 Channel Audio Test-_TX--Fku9NQ.remuxed.mp4 --geometry=640x360+100+100 --title=FILE:5.1_Channel_Audio_Test-_TX--Fku9NQ.remuxed.mp4 --no-border --input-ipc-server=/tmp/mpv-5.1_Channel_Audio_Test-_TX--Fku9NQ.remuxed.mp4-8556 --speed=1.00
+2026-03-31 16:21:16,124 - INFO - FILE player PID: 18221
+2026-03-31 16:21:26,332 - INFO - Watchdog timer started for 5.1 Channel Audio Test-_TX--Fku9NQ.remuxed.mp4 (PID 18221)
+2026-03-31 16:21:28,335 - INFO - Watchdog: 5.1 Channel Audio Test-_TX--Fku9NQ.remuxed.mp4 streaming OK, reset restart counter
+2026-03-31 16:24:12,499 - INFO - Watchdog restarting player for 5.1 Channel Audio Test-_TX--Fku9NQ.remuxed.mp4 (attempt 1/10, delay 1s)
+2026-03-31 16:24:13,375 - INFO - IPC ✗ ['get_property', 'pid']: [Errno 111] Connection refused
+2026-03-31 16:24:13,375 - INFO - IPC ← None (no response found) for ['get_property', 'pid']
+2026-03-31 16:24:13,500 - INFO - FILE mpv command: mpv /home/test/Wideo/5.1 Channel Audio Test-_TX--Fku9NQ.remuxed.mp4 --geometry=640x360+100+100 --title=FILE:5.1_Channel_Audio_Test-_TX--Fku9NQ.remuxed.mp4 --no-border --input-ipc-server=/tmp/mpv-5.1_Channel_Audio_Test-_TX--Fku9NQ.remuxed.mp4-8556 --speed=1.00
+2026-03-31 16:24:13,502 - INFO - FILE player PID: 14976
+2026-03-31 16:24:14,379 - INFO - Killed mpv process 14976
