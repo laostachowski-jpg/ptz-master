@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 VERSION = "9.0.7"
+
 """
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -12,8 +14,8 @@ VERSION = "9.0.7"
 #
 # 🚀  Usage:        python3 ptz-master.py
 #                   ./ptz-master.py --help
-#                   ptz-master.py -r
-#                   ptz-master.py -p <video_file>
+#                   python3 ptz-master.py -r
+#                   python3 ptz-master.py -p <video_file>
 #
 # 🔧  Dependencies: mpv, ffprobe, Python 3.6+
 #                   Optional: xdotool (Qt player positioning)
@@ -64,6 +66,7 @@ try:
 except ImportError:
     RETRY_AVAILABLE = False
 
+# --- Inicjalizacja ścieżek i logowania ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 
@@ -84,7 +87,6 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-
 
 # =============================================================================
 # GLOBAL CONFIGURATION
