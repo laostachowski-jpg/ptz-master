@@ -10,9 +10,10 @@
 # 🎯  Purpose:      Interactive TUI for IP camera control via mpv
 #                   Supports RTSP, V4L2, FILE and USB camera types
 #
-# 🚀  Usage:        ptz-master-v9_0_0.py
-#                   ptz-master-v9_0_0.py --help
-#                   ptz-master-v9_0_0.py -p <video_file>
+# 🚀  Usage:        python3 ptz-master-v9_0_6.py
+#                   ptz-master-v9_0_6.py --help
+#                   ptz-master-v9_0_6.py -r
+#                   ptz-master-v9_0_6.py -p <video_file>
 #
 # 🔧  Dependencies: mpv, ffprobe, Python 3.6+
 #                   Optional: xdotool (Qt player positioning)
@@ -67,7 +68,7 @@ except ImportError:
 # GLOBAL CONFIGURATION
 # =============================================================================
 
-VERSION = "9.0.6"
+VERSION = "9.0.7"
 DEFAULT_CONFIG = "ptz_master_config.json"
 LOG_FILE = "ptz_master.log"
 
