@@ -470,13 +470,15 @@ class Logger:
     def _setup(self):
         self.logger = logging.getLogger("PTZMaster")
         self.logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.INFO)
-        
-        file_handler = logging.FileHandler(LOG_FILE)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        self.logger.addHandler(file_handler)
-        
-        if DEBUG_MODE:
-            file_handler.setLevel(logging.DEBUG)
+        # Nie dodawaj handlera jeśli już istnieje (zapobiega duplikatom)
+        if not self.logger.handlers:
+            file_handler = logging.FileHandler(LOG_FILE)
+            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            if DEBUG_MODE:
+                file_handler.setLevel(logging.DEBUG)
+            self.logger.addHandler(file_handler)
+        # Wyłącz propagację do root loggera (który już loguje do tego samego pliku)
+        self.logger.propagate = False
     
     def debug(self, msg, **kwargs):
         self.logger.debug(msg, **kwargs)
@@ -570,6 +572,20 @@ def rlinput(prompt: str, default: str = '') -> str:
 # =============================================================================
 # HELPERS
 # =============================================================================
+
+def _is_wayland() -> bool:
+    """Zwraca True jeśli sesja działa na Wayland."""
+    return (os.environ.get('WAYLAND_DISPLAY') is not None or
+            os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland')
+
+def _wayland_compositor() -> str:
+    """Wykryj compositor Wayland: 'hyprland', 'sway', 'wlroots', 'kwin', 'unknown'."""
+    if os.environ.get('HYPRLAND_INSTANCE_SIGNATURE'):  return 'hyprland'
+    if os.environ.get('SWAYSOCK'):                      return 'sway'
+    if shutil.which('swaymsg'):                         return 'sway'
+    if shutil.which('hyprctl'):                         return 'hyprland'
+    if shutil.which('kwin_wayland') or shutil.which('kwin_x11'): return 'kwin'
+    return 'unknown'
 
 class Terminal:
     _window_id = None
@@ -6168,113 +6184,186 @@ class PTZMasterApp:
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         print(f"{CYN}╔══════════════════════════════════════════════════════════╗{RST}")
         print(f"{CYN}║              SAVE WINDOW LAYOUT                          ║{RST}")
-        print(f"{CYN}╚══════════════════════════════════════════════════════════╝{RST}\n")
-        
-        if not shutil.which('xdotool'):
-            print(f"{RED}xdotool not found{RST}")
-            print(f"\n{YLW}Press any key...{RST}")
-            self._wait_click_or_key()
-            return
-        
-        try:
-            out = subprocess.check_output(
-                ["xdotool", "search", "--name", "^LIVE:"],
-                universal_newlines=True,
-                timeout=2
-            )
-            windows = [w for w in out.strip().split('\n') if w]
-        except Exception as e:
-            logger.debug(f"xdotool search error: {e}")
-            windows = []
-        
-        if not windows:
-            print(f"{YLW}No mpv windows found{RST}")
-            print(f"\n{YLW}Press any key...{RST}")
-            self._wait_click_or_key()
-            return
-        
-        print(f"{GRN}Found {len(windows)} mpv window(s){RST}\n")
-        
-        saved = 0
-        for wid in windows:
+        print(f"{CYN}╚══════════════════════════════════════════════════════════╝\n{RST}")
+
+        wayland = _is_wayland()
+        compositor = _wayland_compositor() if wayland else 'x11'
+        print(f"  Session: {YLW}{'Wayland/' + compositor if wayland else 'X11'}{RST}")
+
+        def _geom_via_ipc(prof) -> dict:
+            """Pobierz rozmiar okna mpv przez IPC (pozycja niedostępna na Wayland)."""
             try:
-                name_out = subprocess.check_output(
-                    ["xdotool", "getwindowname", wid],
-                    universal_newlines=True,
-                    timeout=1
-                ).strip()
-                
-                if not name_out.startswith("LIVE:"):
-                    continue
-                
-                cam_name = name_out[5:].split('[')[0]
-                
+                ctrl = prof.get_mpv()
+                if not ctrl or not ctrl.is_alive(): return {}
+                w = ctrl.get_property("osd-width")
+                h = ctrl.get_property("osd-height")
+                if w and h and int(w) > 0 and int(h) > 0:
+                    # Pozycja przez IPC niedostępna — zwróć tylko rozmiar
+                    return {"WIDTH": int(w), "HEIGHT": int(h)}
+            except Exception as e:
+                logger.debug(f"IPC geom error: {e}")
+            return {}
+
+        def _geom_kwin(pid) -> dict:
+            """KWin/Plasma: użyj qdbus lub xdotool przez XWayland."""
+            # Próba 1: qdbus/qdbus6 (KDE Plasma)
+            for qdbus in ('qdbus6', 'qdbus'):
+                if not shutil.which(qdbus): continue
+                try:
+                    # Pobierz listę okien przez KWin scripting
+                    out = subprocess.check_output(
+                        [qdbus, 'org.kde.KWin', '/KWin', 'queryWindowInfo'],
+                        universal_newlines=True, timeout=2, stderr=subprocess.DEVNULL)
+                    logger.debug(f"qdbus queryWindowInfo: {out[:200]}")
+                except Exception as e:
+                    logger.debug(f"{qdbus} error: {e}")
+            # Próba 2: xdotool przez XWayland (KDE często ma XWayland)
+            if shutil.which('xdotool'):
+                try:
+                    import os as _os
+                    env = dict(_os.environ)
+                    if not env.get('DISPLAY'): env['DISPLAY'] = ':0'
+                    # Szukaj przez PID
+                    wids = subprocess.check_output(
+                        ["xdotool", "search", "--pid", str(pid)],
+                        universal_newlines=True, timeout=2,
+                        stderr=subprocess.DEVNULL, env=env).strip().split()
+                    # Fallback: szukaj przez tytuł okna LIVE:*
+                    if not wids:
+                        wids = subprocess.check_output(
+                            ["xdotool", "search", "--name", "^LIVE:"],
+                            universal_newlines=True, timeout=2,
+                            stderr=subprocess.DEVNULL, env=env).strip().split()
+                        logger.debug(f"xdotool search --name LIVE: found {wids}")
+                    if wids:
+                        geom_out = subprocess.check_output(
+                            ["xdotool", "getwindowgeometry", "--shell", wids[0]],
+                            universal_newlines=True, timeout=1, env=env)
+                        geom = {}
+                        for line in geom_out.split("\n"):
+                            if "=" in line:
+                                k, v = line.split("=", 1)
+                                try: geom[k] = int(v)
+                                except ValueError: pass
+                        logger.debug(f"xdotool geom for pid={pid}: {geom}")
+                        if all(k in geom for k in ["X","Y","WIDTH","HEIGHT"]):
+                            return geom
+                except Exception as e:
+                    logger.debug(f"xdotool/XWayland error: {e}")
+            # Próba 3: wmctrl (może działać przez XWayland)
+            if shutil.which('wmctrl'):
+                try:
+                    out = subprocess.check_output(
+                        ["wmctrl", "-lGp"], universal_newlines=True, timeout=2)
+                    for line in out.splitlines():
+                        parts = line.split()
+                        if len(parts) >= 7 and parts[2] == str(pid):
+                            return {"X": int(parts[3]), "Y": int(parts[4]),
+                                    "WIDTH": int(parts[5]), "HEIGHT": int(parts[6])}
+                except Exception as e:
+                    logger.debug(f"wmctrl error: {e}")
+            return {}
+
+        def _geom_xdotool(wid) -> dict:
+            try:
                 geom_out = subprocess.check_output(
                     ["xdotool", "getwindowgeometry", "--shell", wid],
-                    universal_newlines=True,
-                    timeout=1
-                )
-                
+                    universal_newlines=True, timeout=1)
                 geom = {}
-                for line in geom_out.split('\n'):
-                    if '=' in line:
-                        k, v = line.split('=', 1)
-                        geom[k] = int(v)
-                
-                if not all(k in geom for k in ['X', 'Y', 'WIDTH', 'HEIGHT']):
+                for line in geom_out.split("\n"):
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        try: geom[k] = int(v)
+                        except ValueError: pass
+                return geom
+            except Exception:
+                return {}
+
+        def _geom_hyprland(pid) -> dict:
+            """Pobierz geometrię okna przez hyprctl clients."""
+            try:
+                import json as _j
+                out = subprocess.check_output(
+                    ["hyprctl", "clients", "-j"],
+                    universal_newlines=True, timeout=2)
+                clients = _j.loads(out)
+                for cl in clients:
+                    if cl.get("pid") == pid:
+                        at = cl.get("at", [0,0])
+                        sz = cl.get("size", [640,360])
+                        return {"X": at[0], "Y": at[1], "WIDTH": sz[0], "HEIGHT": sz[1]}
+            except Exception as e:
+                logger.debug(f"hyprctl error: {e}")
+            return {}
+
+        def _geom_sway(pid) -> dict:
+            """Pobierz geometrię okna przez swaymsg."""
+            try:
+                import json as _j
+                out = subprocess.check_output(
+                    ["swaymsg", "-t", "get_tree"],
+                    universal_newlines=True, timeout=2)
+                def _find(node):
+                    if node.get("pid") == pid:
+                        r = node.get("rect", {})
+                        return {"X": r.get("x",0), "Y": r.get("y",0),
+                                "WIDTH": r.get("width",640), "HEIGHT": r.get("height",360)}
+                    for ch in node.get("nodes", []) + node.get("floating_nodes", []):
+                        res = _find(ch)
+                        if res: return res
+                    return None
+                return _find(_j.loads(out)) or {}
+            except Exception as e:
+                logger.debug(f"swaymsg error: {e}")
+            return {}
+
+        saved = 0
+        for cam in self.config.cameras:
+            for prof in cam.profiles:
+                if not prof.pid or not ProcessManager.is_running(prof.pid):
                     continue
-                
-                found = None
-                for cam in self.config.cameras:
-                    if cam.name.replace(' ', '_') == cam_name:
-                        found = cam
-                        break
-                
-                if found:
-                    found.layout = WindowLayout(
-                        x=geom['X'], y=geom['Y'],
-                        w=geom['WIDTH'], h=geom['HEIGHT']
-                    )
-                    print(f"  {GRN}✓{RST} {found.name}")
+                # Próbuj w kolejności: IPC → compositor-specific → xdotool (X11)
+                geom = _geom_via_ipc(prof)
+                if not geom and compositor == 'hyprland' and shutil.which('hyprctl'):
+                    geom = _geom_hyprland(prof.pid)
+                if not geom and compositor == 'sway' and shutil.which('swaymsg'):
+                    geom = _geom_sway(prof.pid)
+                if not geom and not wayland and shutil.which('xdotool'):
+                    # X11 fallback przez xdotool search --pid
+                    try:
+                        wids = subprocess.check_output(
+                            ["xdotool", "search", "--pid", str(prof.pid)],
+                            universal_newlines=True, timeout=2).strip().split()
+                        if wids:
+                            geom = _geom_xdotool(wids[0])
+                    except Exception:
+                        pass
+                if geom and all(k in geom for k in ["X","Y","WIDTH","HEIGHT"]):
+                    cam.layout = WindowLayout(
+                        x=geom["X"], y=geom["Y"],
+                        w=geom["WIDTH"], h=geom["HEIGHT"])
+                    print(f"  {GRN}✓{RST} {cam.name}  {geom['X']},{geom['Y']} {geom['WIDTH']}x{geom['HEIGHT']}")
                     saved += 1
                 else:
-                    print(f"  {YLW}?{RST} {name_out} - no match")
-                    
-            except Exception as e:
-                logger.debug(f"Error reading window {wid}: {e}")
-        
-        if Terminal._window_id:
-            try:
-                geom_out = subprocess.check_output(
-                    ["xdotool", "getwindowgeometry", "--shell", Terminal._window_id],
-                    universal_newlines=True,
-                    timeout=1
-                )
-                geom = {}
-                for line in geom_out.split('\n'):
-                    if '=' in line:
-                        k, v = line.split('=', 1)
-                        geom[k] = int(v)
-                
-                if all(k in geom for k in ['X', 'Y', 'WIDTH', 'HEIGHT']):
-                    self.config.layout["terminal"] = WindowLayout(
-                        x=geom['X'], y=geom['Y'],
-                        w=geom['WIDTH'], h=geom['HEIGHT']
-                    )
-                    print(f"  {GRN}✓{RST} Terminal position saved")
-            except Exception as e:
-                logger.debug(f"Terminal geometry error: {e}")
-        
-        if saved > 0:
-            self._save_session_state()
-            self.config_mgr.save()
-            print(f"\n{GRN}Saved layout for {saved} camera(s) and session state!{RST}")
+                    # Pokaż co udało się zebrać
+                    ctrl = prof.get_mpv()
+                    ipc_ok = ctrl and ctrl.is_alive()
+                    print(f"  {YLW}?{RST} {cam.name} [{prof.name}] pid={prof.pid}"
+                          f" ipc={'✓' if ipc_ok else '✗'} — geometria niedostępna")
+
+        if saved == 0:
+            print(f"\n{YLW}Nie znaleziono aktywnych okien mpv.{RST}")
+            if wayland:
+                print(f"{DIM}Wayland: spróbuj uruchomić kamery i powtórzyć.{RST}")
+                if compositor == 'unknown':
+                    print(f"{DIM}Compositor nieznany — zainstaluj hyprctl lub swaymsg.{RST}")
         else:
-            print(f"\n{YLW}No windows matched{RST}")
-        
+            self.config_mgr.save()
+            print(f"\n{GRN}Zapisano {saved} layout(ów).{RST}")
+
         print(f"\n{YLW}Press any key...{RST}")
         self._wait_click_or_key()
-    
+
     def _batch_menu(self):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         W = 57
