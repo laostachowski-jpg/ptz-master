@@ -4715,6 +4715,14 @@ class PTZMasterApp:
         last_msg = "Waiting..."
         is_file  = cam.type == CameraType.FILE
 
+        # Zoom/pan software (mpv video-zoom / video-pan-x/y)
+        zoom_mode = False
+        zoom_val  = 0.0      # log2 skali: 0=1x, 1=2x, 2=4x
+        pan_x     = 0.0      # -0.5..+0.5
+        pan_y     = 0.0
+        ZOOM_STEP = 0.5
+        PAN_STEP  = 0.1
+
         stream_info = "📊 Video=— Audio=—"
 
         def _fetch_stream_info():
@@ -4796,6 +4804,54 @@ class PTZMasterApp:
             }
             self.config_mgr.save()
             last_msg = "💾 Settings saved"
+
+        def _zoom_apply():
+            if not ctrl or not ctrl.is_alive(): return
+            ctrl.set_property("video-zoom",  zoom_val)
+            ctrl.set_property("video-pan-x", pan_x)
+            ctrl.set_property("video-pan-y", pan_y)
+
+        def _zoom_in():
+            nonlocal zoom_val, zoom_mode, last_msg
+            zoom_val = min(zoom_val + ZOOM_STEP, 4.0)
+            zoom_mode = True; _zoom_apply()
+            last_msg = f"🔍 Zoom {2.0**zoom_val:.2f}x"
+
+        def _zoom_out():
+            nonlocal zoom_val, zoom_mode, last_msg
+            zoom_val = max(zoom_val - ZOOM_STEP, 0.0)
+            zoom_mode = (zoom_val > 0.0); _zoom_apply()
+            last_msg = f"🔍 Zoom {2.0**zoom_val:.2f}x"
+
+        def _zoom_reset():
+            nonlocal zoom_val, zoom_mode, pan_x, pan_y, last_msg
+            zoom_val = 0.0; zoom_mode = False; pan_x = 0.0; pan_y = 0.0
+            _zoom_apply(); last_msg = "🔍 Zoom reset"
+
+        def _pan(dx, dy):
+            nonlocal pan_x, pan_y, last_msg
+            if not zoom_mode: return
+            pan_x = max(-0.5, min(0.5, pan_x + dx))
+            pan_y = max(-0.5, min(0.5, pan_y + dy))
+            _zoom_apply()
+            last_msg = f"🔍 Pan {pan_x:+.2f}/{pan_y:+.2f}"
+
+        def _edit_zoom_cs():
+            import math as _math
+            nonlocal zoom_val, zoom_mode, last_msg
+            cur_x = f"{2.0**zoom_val:.2f}"
+            prompt = f"Zoom ({cur_x}x) [1.0..16.0]: "
+            last_msg = prompt + "█"; _draw()
+            try:
+                with _cooked_input(fd):
+                    sys.stdout.write(f"\033[{STATUS_ROW_CS};{2+len(prompt)}H")
+                    sys.stdout.flush()
+                    entered = input().strip()
+                mult = max(1.0, min(16.0, float(entered)))
+                zoom_val = _math.log2(mult); zoom_mode = (zoom_val > 0.0)
+                _zoom_apply(); last_msg = f"🔍 Zoom → {mult:.2f}x"
+            except (EOFError, KeyboardInterrupt, ValueError):
+                last_msg = "OK"
 
         def _toggle_mute():
             nonlocal muted, last_msg
@@ -4919,6 +4975,12 @@ class PTZMasterApp:
             last_msg = "Screenshot OK" if ok else "Screenshot ERR"
 
         def _draw():
+            _tw_d, _th_d = _term_size_cs()
+            if _th_d < MIN_H_CS or _tw_d < MIN_W_CS:
+                sys.stdout.write(f"\033[2J\033[H\033[?25l\r{YLW}⚠ Terminal za mały: {_tw_d}x{_th_d}  (min {MIN_W_CS}x{MIN_H_CS}){RST}\033[K\r\n")
+                sys.stdout.write(f"\r{DIM}Powiększ okno terminala{RST}\033[K\r\n")
+                sys.stdout.flush()
+                return
             W   = 79
             src = cam.file_path if is_file else (
                   cam.device   if cam.type == CameraType.V4L2 else
@@ -5031,7 +5093,22 @@ class PTZMasterApp:
             row(f" {YLW}[D]{RST} Reset  "
                 f"{YLW}[T]{RST} Screenshot  "
                 f"{YLW}[R]{RST} Save  "
+                f"{YLW}[N]{RST} Zoom  "
                 f"{YLW}[Q]{RST} / ESC Quit")
+            # Linia zoom/pan
+            if zoom_mode:
+                _zm   = f"{GRN}📺{RST}"
+                _zvl  = f"{GRN}{2.0**zoom_val:.1f}x{RST}"
+                _pstr = f"Pan:{pan_x:+.2f}/{pan_y:+.2f}"
+                z_line = (f" {_zm} Zoom {YLW}[+]{RST}{YLW}[-]{RST} {_zvl}"
+                          f"  {DIM}{_pstr}{RST}"
+                          f"  {YLW}[↑↓←→]{RST} pan"
+                          f"  {YLW}[0]{RST} reset")
+            else:
+                z_line = (f" {DIM}🔍{RST} Zoom off"
+                          f"  {YLW}[N]{RST} toggle"
+                          f"  {YLW}[+][-]{RST} zoom in/out")
+            row(z_line)
             msg_col = GRN if ("OK" in last_msg or "✓" in last_msg) else (RED if ("ERR" in last_msg or "FAIL" in last_msg or "✗" in last_msg) else DIM)
             ipc_short = (prof.ipc_path or "—")
             ipc_short = ipc_short[-28:] if len(ipc_short) > 28 else ipc_short
@@ -5049,9 +5126,18 @@ class PTZMasterApp:
             ctrl.set_property("mute",   muted)
         _fetch_all()
 
-        import tty, termios, select
+        import tty, termios, select, shutil as _sh_cs
         fd   = sys.stdin.fileno()
         old  = termios.tcgetattr(fd)
+        MIN_H_CS = 20
+        MIN_W_CS = 81  # ║ + 79 treści + ║
+        STATUS_ROW_CS = 18  # wiersz 🔔 w ramce _mpv_control_screen
+        def _term_size_cs():
+            try:
+                sz = _sh_cs.get_terminal_size()
+                return sz.columns, sz.lines
+            except Exception:
+                return 80, 24
 
         def _handle_mouse(r, c):
             nonlocal sel, running, auto_dir, paused, step
@@ -5182,6 +5268,9 @@ class PTZMasterApp:
                 if not rlist:
                     continue
 
+                _tw_cs, _th_cs = _term_size_cs()
+                _term_ok_cs = (_th_cs >= MIN_H_CS and _tw_cs >= MIN_W_CS)
+
                 ch = sys.stdin.read(1)
                 if ch == '\x1b':
                     ch2 = sys.stdin.read(1)
@@ -5210,13 +5299,21 @@ class PTZMasterApp:
                                             ctrl._send(["seek", -5, "relative"])
                                         last_msg = "⏪ -5s"
                                     elif btn_n == 0:
-                                        _handle_mouse(m_row, m_col)
+                                        if _term_ok_cs:
+                                            _handle_mouse(m_row, m_col)
                             except (ValueError, IndexError):
                                 pass
-                        elif ch3 == 'A':   sel = (sel - 1) % len(PARAMS)
-                        elif ch3 == 'B': sel = (sel + 1) % len(PARAMS)
+                        elif ch3 == 'A':
+                            if zoom_mode: _pan(0, -PAN_STEP)
+                            else:         sel = (sel - 1) % len(PARAMS)
+                        elif ch3 == 'B':
+                            if zoom_mode: _pan(0, +PAN_STEP)
+                            else:         sel = (sel + 1) % len(PARAMS)
                         elif ch3 in ('C', 'D'):
-                            forward = (ch3 == 'C')
+                            if zoom_mode:
+                                _pan(+PAN_STEP if ch3=='C' else -PAN_STEP, 0)
+                            else:
+                                forward = (ch3 == 'C')
                             if paused:
                                 auto_dir = forward
                                 _frame_step(forward=forward)
@@ -5264,8 +5361,18 @@ class PTZMasterApp:
                 elif ch == '<':              step = max(1, step - 1)
                 elif ch == '>':              step = min(20, step + 1)
                 elif ch in ('d', 'D'):       _set_speed(-0.25)
+                elif ch in ('f', 'F'):       _set_speed(+0.25)
                 elif ch in ('t', 'T'):       _screenshot()
                 elif ch in ('r', 'R'):       _save_image_params()
+                elif ch in ('n', 'N'):
+                    # Toggle zoom mode / zoom in
+                    if not zoom_mode:
+                        _zoom_in()
+                    else:
+                        _edit_zoom_cs()
+                elif ch in ('0',):           _zoom_reset()
+                elif ch == '+' and zoom_mode: _zoom_in()
+                elif ch == '-' and zoom_mode: _zoom_out()
                 elif is_file and ch in ('a', 'A'):  _seek(-3600)
         finally:
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
@@ -7373,13 +7480,33 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 save_as_camera_fn=None, config_mgr=None,
                                 loop_mode=False):
     import select as _sel
+    import signal as _sig
+    import shutil as _sh2
 
     fd   = sys.stdin.fileno()
     W    = 78
+    # Minimalna wymagana wysokość terminala (liczba wierszy ramki + 1 na kursor)
+    FRAME_H    = 21
     # Wiersz linii statusu (🔔) w ramce TUI — aktualizuj gdy zmienia się liczba linii
     # r1=╔ r2=nagłówek r3=stream r4=╠ r5=czas r6=bitrate r7=kontrolki r8=╠
     # r9=Select r10-r15=params r16=╠ r17=Prev/Next r18=🔔status r19=╚
     STATUS_ROW = 18
+
+    def _term_size():
+        try:
+            sz = _sh2.get_terminal_size()
+            return sz.columns, sz.lines
+        except Exception:
+            return 80, 24
+
+    # Flaga wymuszająca pełne odświeżenie po SIGWINCH
+    _sigwinch_flag = [False]
+    def _sigwinch(sig, frame):
+        _sigwinch_flag[0] = True
+    try:
+        _old_sigwinch = _sig.signal(_sig.SIGWINCH, _sigwinch)
+    except Exception:
+        _old_sigwinch = None
 
     GRN = Colors.GREEN; RED = Colors.RED; YLW = Colors.YELLOW
     CYN = Colors.CYAN;  DIM = Colors.DIM; RST = Colors.RESET
@@ -8231,6 +8358,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             else:           col = RED
         return f"{col}{chr(9608) * filled}{RST}{DIM}{chr(9617) * (width - filled)}{RST}"
 
+    # Minimalna wysokość i szerokość ramki TUI
+    # Ramka: ║ + 78 znaków treści + ║ = 80 kolumn; 19 linii ramki + ╚ = 20 wierszy
+    MIN_H = 20
+    MIN_W = 80
+
     def _draw():
         if _in_overlay:
             return          # playlista / dialog ma ekran — nie nadpisuj
@@ -8238,6 +8370,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         def _w(s): _buf.append(s)
 
         nonlocal _first_draw, last_msg, _last_msg_t
+
+        # Sprawdź rozmiar terminala
+        _tw, _th = _term_size()
+        if _th < MIN_H or _tw < MIN_W:
+            _w("\033[2J\033[H\033[?25l")
+            _w(f"\r{YLW}⚠ Terminal za mały: {_tw}x{_th}  (min {MIN_W}x{MIN_H}){RST}\033[K\r\n")
+            _w(f"\r{DIM}Powiększ okno terminala{RST}\033[K\r\n")
+            sys.stdout.write("".join(_buf))
+            sys.stdout.flush()
+            return
         _w("\033[?25l")          # ukryj kursor
         if _first_draw:
             _w("\033[2J\033[H")  # pierwsze — pełne czyszczenie
@@ -8294,7 +8436,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if ab_active:
             ab_right = f" Loop {_A_fix}{RED}{_fmt_time(ab_a)}{RST}↔{GRN}[B]{RST}{RED}{_fmt_time(ab_b)}{RST}"
         elif ab_a >= 0 and ab_b < 0:
-            ab_right = f" Set {_A_fix}{YLW}{_fmt_time(ab_a)}{RST}─{_A_blink}{DIM}···{RST} end"
+            # Faza 2: pierwszy [A]+czas stały (ustawiony), drugi [A] miga (czeka)
+            ab_right = f" Set {DIM}[A]{RST}{YLW}{_fmt_time(ab_a)}{RST}─{_A_blink}{DIM}···{RST} end"
         else:
             ab_right = f" Set {_A_fix}{DIM}···{RST} loop start"
 
@@ -8334,9 +8477,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _RR = f"{DIM}[R]{RST}"
 
         if ab_active:
-            rec_right = f" {rec_dot}{_RR}EC / {YLW}Clear[A]{RST} Loop"
+            rec_right = f" {rec_dot} {_RR}EC / {YLW}Clear[A]{RST} Loop"
         else:
-            rec_right = f" {rec_dot}{_RR}EC"
+            rec_right = f" {rec_dot} {_RR}EC"
 
         l2_left = f" 🚀 {br_val:.1f}Mb [{DIM}{spark16}{RST}]{buf_str}"
         row(f"{pad(l2_left, _L)}{BLU}║{RST}{pad(rec_right, _R)}")
@@ -8542,6 +8685,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
+        sys.stdout.write('\033[?1049h')          # wejście w alternate screen buffer
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         running = True
@@ -8594,25 +8738,38 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     if ctrl and ctrl.is_alive():
                         ctrl._send(["seek", target, "absolute"])
                     last_msg = f"seek {target:.1f}s"
-                # Prawa strona ║ (col 50+) — AB loop
-                # ' Loop [A]0:33↔[B]0:42  ' od col 51
-                # [A]=col57-59, tA=col60-64, [B]=col65-67, tB=col68-72
+                # Prawa strona ║ (col 50+) — AB loop, pozycje zależne od fazy
+                # Faza 1: ' Set [A]···  loop start'
+                #   [A]=56-58, ···=59-61
+                # Faza 2: ' Set [A]0:06─[A]···  end'
+                #   [A]1=56-58, tA=59-62, [A]2=64-66, ···=67-69
+                # Faza 3: ' Loop [A]0:06↔[B]0:20'
+                #   [A]=57-59, tA=60-63, [B]=65-67, tB=68-71
                 elif c >= 50:
-                    if   57 <= c <= 59:
-                        if ab_a < 0:    _ab_set_a()
-                        elif ab_b < 0:  _ab_set_b()
-                        else:           _ab_clear()
-                    elif 60 <= c <= 64 and ab_a >= 0:  _ab_edit_a()
-                    elif 65 <= c <= 67 and ab_active:  _ab_clear()
-                    elif 68 <= c <= 72 and ab_active:  _ab_edit_b()
+                    if ab_active:
+                        # Faza 3
+                        if   57 <= c <= 59:  _ab_clear()          # [A] → clear
+                        elif 60 <= c <= 63:  _ab_edit_a()         # czas A
+                        elif 65 <= c <= 67:  _ab_clear()          # [B] → clear
+                        elif 68 <= c <= 71:  _ab_edit_b()         # czas B
+                    elif ab_a >= 0 and ab_b < 0:
+                        # Faza 2: pierwszy [A]=56-58 (edit A), drugi [A]=64-66 (set B)
+                        if   56 <= c <= 58:  _ab_edit_a()         # [A] stały → edytuj A
+                        elif 59 <= c <= 63:  _ab_edit_a()         # czas A → edytuj A
+                        elif 64 <= c <= 66:  _ab_set_b()          # [A] migający → ustaw B
+                        elif 67 <= c <= 69:  _ab_set_b()          # ··· → ustaw B
+                    else:
+                        # Faza 1
+                        if   56 <= c <= 58:  _ab_set_a()          # [A] → ustaw A
+                        elif 59 <= c <= 61:  _ab_set_a()          # ··· → ustaw A
 
             elif r == 6:
-                # Prawa strona ║ — ●[R]EC i Clear[A]
-                # ' ●[R]EC / Clear[A] Loop' od col 51
-                # [R]=col52-54, [A]=col64-66
-                if   c >= 50:
-                    if   52 <= c <= 54:  _extract_clip_current()         # [R]
-                    elif 64 <= c <= 66 and ab_active: _ab_clear()        # Clear[A]
+                # Prawa strona ║ — ● [R]EC i Clear[A]
+                # ' ● [R]EC / Clear[A] Loop' od col 51
+                # ●=51, [R]=53-55, Clear[A]=65-71
+                if c >= 50:
+                    if   53 <= c <= 55:  _extract_clip_current()
+                    elif 65 <= c <= 71 and ab_active: _ab_clear()
 
             elif r == 7:
                 if    3 <= c <= 11:                                       # [SPACE] toggle
@@ -8751,7 +8908,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         result = "eof_next"; running = False; break
 
             if not rlist:
+                # Sprawdź SIGWINCH i wymuszony redraw
+                if _sigwinch_flag[0]:
+                    _sigwinch_flag[0] = False
+                    _first_draw = True
                 continue
+
+            # Zignoruj mysz gdy terminal za mały — pozycje wierszy byłyby błędne
+            _tw, _th = _term_size()
+            _term_ok = (_th >= MIN_H and _tw >= MIN_W)
 
             ch = sys.stdin.read(1)
             if ch == '\x1b':
@@ -8780,7 +8945,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                                         ctrl._send(["seek", -5, "relative"])
                                     last_msg = "⏪ -5s"
                                 elif btn_n == 0:
-                                    _handle_mouse_p(m_row, m_col)
+                                    if _term_ok:
+                                        _handle_mouse_p(m_row, m_col)
                         except (ValueError, IndexError):
                             pass
                     elif ch3 in ('C', 'D'):
