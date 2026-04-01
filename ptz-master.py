@@ -1755,7 +1755,7 @@ class ONVIFClient:
     def _get_auth_header(self) -> str:
         nonce = os.urandom(16)
         nonce_b64 = base64.b64encode(nonce).decode()
-        created = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        created = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         
         sha = hashlib.sha1()
         sha.update(nonce + created.encode() + self.cam.password.encode())
