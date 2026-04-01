@@ -6191,18 +6191,63 @@ class PTZMasterApp:
         print(f"  Session: {YLW}{'Wayland/' + compositor if wayland else 'X11'}{RST}")
 
         def _geom_via_ipc(prof) -> dict:
-            """Pobierz rozmiar okna mpv przez IPC (pozycja niedostępna na Wayland)."""
+            """Pobierz rozmiar z IPC + pozycję przez xdotool/window-pos."""
             try:
                 ctrl = prof.get_mpv()
                 if not ctrl or not ctrl.is_alive(): return {}
                 w = ctrl.get_property("osd-width")
                 h = ctrl.get_property("osd-height")
-                if w and h and int(w) > 0 and int(h) > 0:
-                    # Pozycja przez IPC niedostępna — zwróć tylko rozmiar
-                    return {"WIDTH": int(w), "HEIGHT": int(h)}
+                if not w or not h or int(w) <= 0: return {}
+                w, h = int(w), int(h)
+                # Pozycja przez window-pos-x/y (nowsze mpv)
+                x = ctrl.get_property("window-pos-x")
+                y = ctrl.get_property("window-pos-y")
+                if x is not None and y is not None:
+                    logger.debug(f"IPC window-pos: {x},{y} {w}x{h}")
+                    return {"X": int(x), "Y": int(y), "WIDTH": w, "HEIGHT": h}
+                # Pozycja przez xdotool (X11 + XWayland)
+                if shutil.which("xdotool"):
+                    import os as _os
+                    env = dict(_os.environ)
+                    if not env.get("DISPLAY"): env["DISPLAY"] = ":0"
+                    # Kolejność prób: nazwa okna → PID → ^LIVE:
+                    cam_title = None
+                    if prof.ipc_path:
+                        try:
+                            part = prof.ipc_path.split("mpv-")[1].rsplit("-", 1)[0]
+                            cam_title = f"LIVE:{part}"
+                        except Exception:
+                            pass
+                    searches = []
+                    if cam_title: searches.append(["--name", cam_title])
+                    searches.append(["--pid", str(prof.pid)])
+                    searches.append(["--name", "^LIVE:"])
+                    for sarg in searches:
+                        try:
+                            wids = subprocess.check_output(
+                                ["xdotool", "search"] + sarg,
+                                universal_newlines=True, timeout=2,
+                                stderr=subprocess.DEVNULL, env=env).strip().split()
+                            if not wids: continue
+                            go = subprocess.check_output(
+                                ["xdotool", "getwindowgeometry", "--shell", wids[0]],
+                                universal_newlines=True, timeout=1, env=env)
+                            gd = {}
+                            for line in go.split("\n"):
+                                if "=" in line:
+                                    k, v = line.split("=", 1)
+                                    try: gd[k] = int(v)
+                                    except ValueError: pass
+                            if "X" in gd and "Y" in gd:
+                                logger.debug(f"xdotool {sarg}: {gd['X']},{gd['Y']} {w}x{h}")
+                                return {"X": gd["X"], "Y": gd["Y"], "WIDTH": w, "HEIGHT": h}
+                        except Exception as e:
+                            logger.debug(f"xdotool {sarg}: {e}")
+                logger.debug(f"IPC: size {w}x{h} OK but position unknown")
             except Exception as e:
                 logger.debug(f"IPC geom error: {e}")
             return {}
+
 
         def _geom_kwin(pid) -> dict:
             """KWin/Plasma: użyj qdbus lub xdotool przez XWayland."""
