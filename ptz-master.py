@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.7"
-"""
+VERSION = "9.0.8"
+__doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
 #                   Designed for Linux systems 🎯 🛡️ 🎥 ✨ ▶️
-# ⚙️   Version:      """ + VERSION + """
+# ⚙️  Version:      {VERSION}
 # 👨‍💻  Author:       Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
 # 🎯  Purpose:      Interactive TUI for IP camera control via mpv
 #                   Supports RTSP, V4L2, USB camera and play video files
@@ -14,9 +14,11 @@ VERSION = "9.0.7"
 #                   ./ptz-master.py --help
 #                   python3 ptz-master.py -r
 #                   python3 ptz-master.py -p <video_file>
+#                   python3 ptz-master.py -pl <video_files>  # playlist with loop
 #
-# 🔧  Dependencies: mpv, ffprobe, Python 3.6+
-#                   Optional: xdotool (Qt player positioning)
+# 🔧  Dependencies: Python 3.6+, mpv, ffprobe, ffmpeg
+#                   xdotool (X11 player positioning)
+#                   kdotool (Wayland/KDE player positioning)
 #
 # 📄  License:      Free software. Modify and redistribute under GPL v2.
 #                   Authors provide NO WARRANTY.
@@ -990,6 +992,20 @@ def ansilen(s: str) -> int:
 
 def pad(text: str, length: int) -> str:
     return text + (" " * max(0, length - ansilen(text)))
+
+def btn_pos(text: str, offset: int = 0) -> dict:
+    """Oblicz pozycje przycisków [X] w tekście (bez kolorów ANSI).
+    Zwraca {label: (col_start, col_end)} 1-indexed, z opcjonalnym offset.
+    Złożone etykiety jak [Q/ESC] są mapowane pod każdym kluczem osobno.
+    """
+    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
+    positions = {}
+    for m in re.finditer(r'\[([^\]]+)\]', clean):
+        span = (m.start() + 1 + offset, m.end() + offset)
+        for key in m.group(1).split('/'):
+            positions[key] = span
+            positions[key.lower()] = span
+    return positions
 
 @contextmanager
 def _cooked_input(fd: int):
@@ -6429,7 +6445,7 @@ class PTZMasterApp:
 
 
         def _geom_kwin(pid) -> dict:
-            """KWin/Plasma: kdotool → qdbus → xdotool/XWayland."""
+            """KWin/Plasma: kdotool, qdbus, xdotool/XWayland."""
             # Próba 0: kdotool (xdotool dla KDE Wayland)
             # pip install kdotool  lub  yay -S kdotool (AUR)
             if shutil.which('kdotool'):
@@ -6584,12 +6600,17 @@ class PTZMasterApp:
             for prof in cam.profiles:
                 if not prof.pid or not ProcessManager.is_running(prof.pid):
                     continue
-                # Próbuj w kolejności: IPC → compositor-specific → xdotool (X11)
+                # Próbuj w kolejności: IPC → compositor-specific → kdotool → xdotool (X11)
                 geom = _geom_via_ipc(prof)
                 if not geom and compositor == 'hyprland' and shutil.which('hyprctl'):
                     geom = _geom_hyprland(prof.pid)
                 if not geom and compositor == 'sway' and shutil.which('swaymsg'):
                     geom = _geom_sway(prof.pid)
+                if not geom and compositor == 'kwin':
+                    geom = _geom_kwin(prof.pid)
+                if not geom and shutil.which('kdotool'):
+                    # kdotool działa na X11 i Wayland/KDE — próbuj zawsze gdy dostępne
+                    geom = _geom_kwin(prof.pid)
                 if not geom and not wayland and shutil.which('xdotool'):
                     # X11 fallback przez xdotool search --pid
                     try:
@@ -9566,19 +9587,7 @@ def _show_playlist(files, current_idx):
             return sel - page_size + 1
         return offset
 
-    def _btn_pos(text: str) -> dict:
-        """Oblicz pozycje przycisków [X] w linii (bez kolorów ANSI).
-        Zwraca {label: (col_start, col_end)} — 1-indexed od początku linii.
-        Złożone etykiety jak [Q/ESC] są mapowane pod każdym kluczem osobno.
-        """
-        clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
-        positions = {}
-        for m in re.finditer(r'\[([^\]]+)\]', clean):
-            span = (m.start() + 2, m.end() + 1)  # +2 za ║ i spację
-            for key in m.group(1).split('/'):
-                positions[key] = span
-                positions[key.lower()] = span
-        return positions
+    _btn_pos = lambda text: btn_pos(text, offset=1)  # +1 za ║
 
     def _draw_playlist(sel, off):
         out("\033[2J\033[H\033[?25l")
