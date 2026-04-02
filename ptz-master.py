@@ -505,30 +505,166 @@ logger = Logger()
 # =============================================================================
 
 REQUIRED_CRITICAL = ['mpv', 'ffprobe']
-REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat']
+REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat',
+                     'ffmpeg', 'kdotool']
+
+def _detect_distro() -> tuple:
+    """Zwraca (os_id, pretty_name) na podstawie /etc/os-release."""
+    os_id, pretty = "unknown", "Unknown Linux"
+    try:
+        with open('/etc/os-release') as f:
+            info = {}
+            for line in f:
+                line = line.strip()
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    info[k] = v.strip('"')
+        # ID_LIKE daje rodzinę (np. "opensuse" dla Tumbleweed)
+        os_id   = info.get('ID_LIKE', info.get('ID', 'unknown')).lower()
+        pretty  = info.get('PRETTY_NAME', os_id)
+    except Exception:
+        pass
+    return os_id, pretty
 
 def check_dependencies() -> None:
-    missing_critical = []
-    missing_optional = []
-    
-    for cmd in REQUIRED_CRITICAL:
-        if not shutil.which(cmd):
-            missing_critical.append(cmd)
-    
-    for cmd in REQUIRED_OPTIONAL:
-        if not shutil.which(cmd):
-            missing_optional.append(cmd)
-    
+    """Sprawdź zależności i wypisz instrukcje instalacji dla wykrytego distro."""
+    os_id, pretty_name = _detect_distro()
+
+    # Wykryj rodzinę dystrybucji
+    is_debian = any(k in os_id for k in ('debian','ubuntu','mint','pop','kali','raspbian'))
+    is_arch   = any(k in os_id for k in ('arch','manjaro','cachyos','endeavour','garuda','biglinux'))
+    is_suse   = any(k in os_id for k in ('suse','opensuse'))
+    is_fedora = any(k in os_id for k in ('fedora','rhel','centos','rocky','alma'))
+
+    # Kolory dla distro — podświetl wykryte, przyciemnij pozostałe
+    C_ACT = f"{YLW}\033[1m"   # aktywne — żółty bold
+    C_DIM = f"{DIM}"           # nieaktywne — przyciemnione
+
+    C_DEB = C_ACT if is_debian else C_DIM
+    C_ARC = C_ACT if is_arch   else C_DIM
+    C_SUS = C_ACT if is_suse   else C_DIM
+    C_FED = C_ACT if is_fedora else C_DIM
+
+    # Komendy instalacji dla każdego narzędzia
+    INSTALL = {
+        'mpv': {
+            'desc': 'Media player (WYMAGANY)',
+            'deb': 'sudo apt install mpv',
+            'arc': 'sudo pacman -S mpv',
+            'sus': 'sudo zypper install mpv',
+            'fed': 'sudo dnf install mpv',
+        },
+        'ffprobe': {
+            'desc': 'Analiza strumieni wideo (WYMAGANY — część ffmpeg)',
+            'deb': 'sudo apt install ffmpeg',
+            'arc': 'sudo pacman -S ffmpeg',
+            'sus': 'sudo zypper install ffmpeg',
+            'fed': 'sudo dnf install ffmpeg',
+        },
+        'ffmpeg': {
+            'desc': 'Ekstrakcja klipów [R]EC',
+            'deb': 'sudo apt install ffmpeg',
+            'arc': 'sudo pacman -S ffmpeg',
+            'sus': 'sudo zypper install ffmpeg',
+            'fed': 'sudo dnf install ffmpeg',
+        },
+        'ping': {
+            'desc': 'Test dostępności kamer w sieci',
+            'deb': 'sudo apt install iputils-ping',
+            'arc': 'sudo pacman -S iputils',
+            'sus': 'sudo zypper install iputils',
+            'fed': 'sudo dnf install iputils',
+        },
+        'ip': {
+            'desc': 'Wykrywanie kamer (MAC→IP)',
+            'deb': 'sudo apt install iproute2',
+            'arc': 'sudo pacman -S iproute2',
+            'sus': 'sudo zypper install iproute2',
+            'fed': 'sudo dnf install iproute2',
+        },
+        'xdotool': {
+            'desc': 'Pozycjonowanie okien mpv (X11)',
+            'deb': 'sudo apt install xdotool',
+            'arc': 'sudo pacman -S xdotool',
+            'sus': 'sudo zypper install xdotool',
+            'fed': 'sudo dnf install xdotool',
+        },
+        'wmctrl': {
+            'desc': 'Zarządzanie oknami (X11, alternatywa)',
+            'deb': 'sudo apt install wmctrl',
+            'arc': 'sudo pacman -S wmctrl',
+            'sus': 'sudo zypper install wmctrl',
+            'fed': 'sudo dnf install wmctrl',
+        },
+        'kdotool': {
+            'desc': 'Pozycjonowanie okien mpv (KDE/Wayland)',
+            'deb': 'pip install kdotool',
+            'arc': 'yay -S kdotool  # lub: pip install kdotool',
+            'sus': 'pip install kdotool',
+            'fed': 'pip install kdotool',
+        },
+        'v4l2-ctl': {
+            'desc': 'Obsługa kamer V4L2/USB',
+            'deb': 'sudo apt install v4l-utils',
+            'arc': 'sudo pacman -S v4l-utils',
+            'sus': 'sudo zypper install v4l2-utils',
+            'fed': 'sudo dnf install v4l-utils',
+        },
+        'socat': {
+            'desc': 'Diagnostyka połączeń sieciowych',
+            'deb': 'sudo apt install socat',
+            'arc': 'sudo pacman -S socat',
+            'sus': 'sudo zypper install socat',
+            'fed': 'sudo dnf install socat',
+        },
+    }
+
+    missing_critical = [c for c in REQUIRED_CRITICAL if not shutil.which(c)]
+    missing_optional = [c for c in REQUIRED_OPTIONAL
+                        if c not in REQUIRED_CRITICAL and not shutil.which(c)]
+
+    # Nic nie brakuje — cicho
+    if not missing_critical and not missing_optional:
+        return
+
+    W = 72
+    def _bar(ch='═'): print(f"{BLU}{'═'*W}{RST}")
+
+    _bar()
+    print(f"{BLU}  PTZ Master — sprawdzanie zależności{RST}"
+          f"  {DIM}{pretty_name}{RST}")
+    _bar()
+
+    def _install_row(cmd):
+        info  = INSTALL.get(cmd, {})
+        desc  = info.get('desc', '')
+        print(f"\n  {YLW}▸ {cmd}{RST}  {DIM}{desc}{RST}")
+        if info:
+            print(f"    {C_DEB}Debian/Ubuntu : {info['deb']}{RST}")
+            print(f"    {C_ARC}Arch/CachyOS  : {info['arc']}{RST}")
+            print(f"    {C_SUS}openSUSE      : {info['sus']}{RST}")
+            print(f"    {C_FED}Fedora/RHEL   : {info['fed']}{RST}")
+
     if missing_critical:
-        print(f"{RED}Fatal error: Missing required programs: {', '.join(missing_critical)}{RST}")
-        print(f"{YLW}Install mpv and ffprobe:{RST}")
-        print("  openSUSE: sudo zypper install mpv ffmpeg")
-        print("  Ubuntu/Debian: sudo apt install mpv ffmpeg")
-        print("  Fedora: sudo dnf install mpv ffmpeg")
+        print(f"\n  {RED}✗ BRAKUJĄCE WYMAGANE — program nie uruchomi się:{RST}")
+        for cmd in missing_critical:
+            _install_row(cmd)
+        _bar()
+        print(f"\n{RED}Zainstaluj brakujące programy i uruchom ponownie.{RST}\n")
         sys.exit(1)
-    
-    if missing_optional and DEBUG_MODE:
-        logger.warning(f"Missing optional tools: {', '.join(missing_optional)}")
+
+    if missing_optional:
+        print(f"\n  {YLW}○ Opcjonalne — niektóre funkcje będą niedostępne:{RST}")
+        for cmd in missing_optional:
+            _install_row(cmd)
+        _bar()
+        print(f"  {DIM}Naciśnij ENTER aby kontynuować...{RST}", end='', flush=True)
+        try:
+            input()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        print()
+
 
 # =============================================================================
 # READLINE SUPPORT
@@ -6250,7 +6386,45 @@ class PTZMasterApp:
 
 
         def _geom_kwin(pid) -> dict:
-            """KWin/Plasma: użyj qdbus lub xdotool przez XWayland."""
+            """KWin/Plasma: kdotool → qdbus → xdotool/XWayland."""
+            # Próba 0: kdotool (xdotool dla KDE Wayland)
+            # pip install kdotool  lub  yay -S kdotool (AUR)
+            if shutil.which('kdotool'):
+                try:
+                    import re as _re
+                    # Szukaj po dokładnym tytule okna (LIVE:Cam_101 itp.)
+                    # ipc_path: /tmp/mpv-Cam_101-7262 → cam_name = Cam_101
+                    cam_name = None
+                    if prof.ipc_path:
+                        m = _re.search(r'mpv-(.+)-\d+$', prof.ipc_path)
+                        if m: cam_name = m[1]
+                    searches = []
+                    if cam_name: searches.append(f'LIVE:{cam_name}')
+                    searches.append('LIVE:')  # fallback — weź pierwszy
+                    for title in searches:
+                        try:
+                            wids = subprocess.check_output(
+                                ['kdotool', 'search', '--name', title],
+                                universal_newlines=True, timeout=3,
+                                stderr=subprocess.DEVNULL).strip().split()
+                            if not wids: continue
+                            go = subprocess.check_output(
+                                ['kdotool', 'getwindowgeometry', wids[0]],
+                                universal_newlines=True, timeout=2)
+                            # Format:
+                            # Window {uuid}
+                            # Position: 340.23,68.49
+                            # Geometry: 768x864
+                            m_pos  = _re.search(r'Position:\s*([\d.]+),([\d.]+)', go)
+                            m_size = _re.search(r'Geometry:\s*(\d+)x(\d+)', go)
+                            if m_pos and m_size:
+                                logger.debug(f"kdotool '{title}': {go.strip()}")
+                                return {"X": int(float(m_pos[1])), "Y": int(float(m_pos[2])),
+                                        "WIDTH": int(m_size[1]), "HEIGHT": int(m_size[2])}
+                        except Exception as e:
+                            logger.debug(f"kdotool '{title}': {e}")
+                except Exception as e:
+                    logger.debug(f"kdotool error: {e}")
             # Próba 1: qdbus/qdbus6 (KDE Plasma)
             for qdbus in ('qdbus6', 'qdbus'):
                 if not shutil.which(qdbus): continue
@@ -6396,13 +6570,51 @@ class PTZMasterApp:
                     print(f"  {YLW}?{RST} {cam.name} [{prof.name}] pid={prof.pid}"
                           f" ipc={'✓' if ipc_ok else '✗'} — geometria niedostępna")
 
-        if saved == 0:
+        if saved == 0 and wayland:
+            # Na Wayland automatyczna detekcja niemożliwa — zaproponuj ręczne wpisanie
+            print(f"\n{YLW}Wayland: automatyczna detekcja pozycji okien niedostępna.{RST}")
+            print(f"{DIM}Aby włączyć automatyczny zapis na KDE/KWin zainstaluj kdotool:{RST}")
+            print(f"{DIM}  pip install kdotool   lub   yay -S kdotool{RST}")
+            print(f"{DIM}Możesz wpisać pozycje ręcznie (x y) lub ENTER aby pominąć.{RST}")
+            print(f"{DIM}Wskazówka: PPM na tytuł okna mpv → Więcej → Geometria.{RST}\n")
+            import tty as _tty2, termios as _termios2
+            _fd2 = sys.stdin.fileno()
+            _old2 = _termios2.tcgetattr(_fd2)
+            try:
+                cooked = _termios2.tcgetattr(_fd2)
+                cooked[3] |= _termios2.ECHO | _termios2.ICANON
+                _termios2.tcsetattr(_fd2, _termios2.TCSADRAIN, cooked)
+                for cam in self.config.cameras:
+                    for prof in cam.profiles:
+                        if not prof.pid or not ProcessManager.is_running(prof.pid):
+                            continue
+                        ctrl = prof.get_mpv()
+                        w = h = None
+                        if ctrl and ctrl.is_alive():
+                            w = ctrl.get_property("osd-width")
+                            h = ctrl.get_property("osd-height")
+                        w = int(w) if w else (cam.layout.w if cam.layout else 640)
+                        h = int(h) if h else (cam.layout.h if cam.layout else 360)
+                        print(f"  {CYN}{cam.name}{RST} [{prof.name}]"
+                              f"  rozmiar={w}x{h}"
+                              f"  obecna_poz={cam.layout.x},{cam.layout.y if cam.layout else '?'}")
+                        try:
+                            ans = input(f"    Wpisz 'x y' lub ENTER aby zachować obecną: ").strip()
+                            if ans:
+                                parts = ans.split()
+                                if len(parts) >= 2:
+                                    nx, ny = int(parts[0]), int(parts[1])
+                                    cam.layout = WindowLayout(x=nx, y=ny, w=w, h=h)
+                                    print(f"    {GRN}✓{RST} Zapisano {nx},{ny} {w}x{h}")
+                                    saved += 1
+                        except (ValueError, EOFError):
+                            pass
+            finally:
+                _termios2.tcsetattr(_fd2, _termios2.TCSADRAIN, _old2)
+        elif saved == 0:
             print(f"\n{YLW}Nie znaleziono aktywnych okien mpv.{RST}")
-            if wayland:
-                print(f"{DIM}Wayland: spróbuj uruchomić kamery i powtórzyć.{RST}")
-                if compositor == 'unknown':
-                    print(f"{DIM}Compositor nieznany — zainstaluj hyprctl lub swaymsg.{RST}")
-        else:
+
+        if saved > 0:
             self.config_mgr.save()
             print(f"\n{GRN}Zapisano {saved} layout(ów).{RST}")
 
