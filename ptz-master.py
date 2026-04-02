@@ -508,6 +508,10 @@ REQUIRED_CRITICAL = ['mpv', 'ffprobe']
 REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat',
                      'ffmpeg', 'kdotool']
 
+def _win_tool_available() -> bool:
+    """Zwraca True jeśli dostępne jest jakiekolwiek narzędzie do zarządzania oknami."""
+    return any(shutil.which(t) for t in ('xdotool', 'kdotool', 'wmctrl'))
+
 def _detect_distro() -> tuple:
     """Zwraca (os_id, pretty_name) na podstawie /etc/os-release."""
     os_id, pretty = "unknown", "Unknown Linux"
@@ -620,8 +624,19 @@ def check_dependencies() -> None:
     }
 
     missing_critical = [c for c in REQUIRED_CRITICAL if not shutil.which(c)]
-    missing_optional = [c for c in REQUIRED_OPTIONAL
-                        if c not in REQUIRED_CRITICAL and not shutil.which(c)]
+
+    # Narzędzia do okien: xdotool/wmctrl/kdotool są alternatywami
+    # — narzekaj tylko gdy ŻADNE nie jest dostępne
+    _win_tools    = ['xdotool', 'wmctrl', 'kdotool']
+    _win_missing  = all(not shutil.which(t) for t in _win_tools)
+    _win_report   = ['xdotool'] if _win_missing else []   # reprezentant grupy
+
+    missing_optional = _win_report + [
+        c for c in REQUIRED_OPTIONAL
+        if c not in REQUIRED_CRITICAL
+        and c not in _win_tools
+        and not shutil.which(c)
+    ]
 
     # Nic nie brakuje — cicho
     if not missing_critical and not missing_optional:
@@ -638,6 +653,16 @@ def check_dependencies() -> None:
     def _install_row(cmd):
         info  = INSTALL.get(cmd, {})
         desc  = info.get('desc', '')
+        # Specjalny przypadek: xdotool jako reprezentant grupy narzędzi okienkowych
+        if cmd == 'xdotool' and _win_missing:
+            print(f"\n  {YLW}▸ Narzędzia do pozycjonowania okien mpv{RST}"
+                  f"  {DIM}(brak xdotool / wmctrl / kdotool){RST}")
+            print(f"    {C_DEB}Debian/Ubuntu : sudo apt install xdotool{RST}")
+            print(f"    {C_ARC}Arch/CachyOS  : sudo pacman -S xdotool  {DIM}lub{RST}{C_ARC}  yay -S kdotool{RST}")
+            print(f"    {C_SUS}openSUSE      : sudo zypper install xdotool  {DIM}lub{RST}{C_SUS}  kdotool (AUR/pip){RST}")
+            print(f"    {C_FED}Fedora/RHEL   : sudo dnf install xdotool{RST}")
+            print(f"    {DIM}KDE/Wayland   : pip install kdotool  {GRN}(najlepsza opcja na KWin){RST}")
+            return
         print(f"\n  {YLW}▸ {cmd}{RST}  {DIM}{desc}{RST}")
         if info:
             print(f"    {C_DEB}Debian/Ubuntu : {info['deb']}{RST}")
@@ -725,32 +750,49 @@ def _wayland_compositor() -> str:
 
 class Terminal:
     _window_id = None
-    
+    _win_tool  = None   # 'xdotool' lub 'kdotool'
+
+    @classmethod
+    def _get_win_tool(cls) -> Optional[str]:
+        """Zwraca dostępne narzędzie do zarządzania oknami."""
+        if cls._win_tool:
+            return cls._win_tool
+        for t in ('xdotool', 'kdotool'):
+            if shutil.which(t):
+                cls._win_tool = t
+                return t
+        return None
+
     @classmethod
     def capture_window_id(cls):
-        if platform.system() == "Linux" and os.environ.get('DISPLAY') and shutil.which('xdotool'):
-            try:
-                cls._window_id = subprocess.check_output(
-                    ["xdotool", "getactivewindow"],
-                    universal_newlines=True,
-                    stderr=subprocess.DEVNULL,
-                    timeout=1
-                ).strip()
-                logger.info(f"Terminal window ID: {cls._window_id}")
-            except Exception as e:
-                logger.warning(f"Could not capture terminal window ID: {e}")
-    
+        tool = cls._get_win_tool()
+        if not tool or platform.system() != "Linux":
+            return
+        # xdotool wymaga DISPLAY, kdotool działa też na Wayland
+        if tool == 'xdotool' and not os.environ.get('DISPLAY'):
+            return
+        try:
+            cmd = ["xdotool", "getactivewindow"] if tool == 'xdotool' else \
+                  ["kdotool", "getactivewindow"]
+            cls._window_id = subprocess.check_output(
+                cmd, universal_newlines=True,
+                stderr=subprocess.DEVNULL, timeout=1).strip()
+            logger.info(f"Terminal window ID: {cls._window_id} (via {tool})")
+        except Exception as e:
+            logger.warning(f"Could not capture terminal window ID: {e}")
+
     @classmethod
     def restore_focus(cls, mpv_pid: int = 0,
                       mpv_pids: Optional[List[int]] = None) -> bool:
-        if not cls._window_id or not shutil.which('xdotool'):
+        tool = cls._get_win_tool()
+        if not cls._window_id or not tool:
             return False
 
         def _wait_for_pid(pid: int, deadline: float) -> None:
             while time.time() < deadline:
                 try:
                     r = subprocess.run(
-                        ["xdotool", "search", "--pid", str(pid)],
+                        [tool, "search", "--pid", str(pid)],
                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         timeout=1.0)
                     if r.returncode == 0 and r.stdout.strip():
@@ -768,7 +810,7 @@ class Terminal:
                 time.sleep(0.15)
 
             subprocess.run(
-                ["xdotool", "windowactivate", "--sync", str(cls._window_id)],
+                [tool, "windowactivate", "--sync", str(cls._window_id)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=2.0
             )
@@ -780,16 +822,17 @@ class Terminal:
     
     @classmethod
     def setup_layout(cls, cfg: 'Config', fast: bool = False):
-        if platform.system() != "Linux" or not os.environ.get('DISPLAY'):
+        tool = cls._get_win_tool()
+        if not tool:
             return
-        
-        if not shutil.which('xdotool') and not shutil.which('wmctrl'):
+        # xdotool wymaga DISPLAY; kdotool działa bez
+        if tool == 'xdotool' and (platform.system() != "Linux" or not os.environ.get('DISPLAY')):
             return
-        
+
         if fast:
             cls.restore_focus()
             return
-        
+
         if not cls._window_id:
             return
         
@@ -797,21 +840,21 @@ class Terminal:
         
         try:
             subprocess.run(
-                ["xdotool", "windowactivate", cls._window_id],
+                [tool, "windowactivate", cls._window_id],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=0.5
             )
             
             subprocess.run(
-                ["xdotool", "windowmove", cls._window_id, str(layout.x), str(layout.y)],
+                [tool, "windowmove", cls._window_id, str(layout.x), str(layout.y)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=0.5
             )
             
             subprocess.run(
-                ["xdotool", "windowsize", cls._window_id, str(layout.w), str(layout.h)],
+                [tool, "windowsize", cls._window_id, str(layout.w), str(layout.h)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=0.5
