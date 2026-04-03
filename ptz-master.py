@@ -797,6 +797,46 @@ class Terminal:
             logger.warning(f"Could not capture terminal window ID: {e}")
 
     @classmethod
+    def reposition_mpv_window(cls, title: str, layout: 'WindowLayout',
+                               max_wait: float = 5.0) -> bool:
+        """Po starcie mpv wymuś pozycję/rozmiar przez xdotool lub kdotool.
+        Czeka aż okno się pojawi (max max_wait sekund).
+        Zwraca True jeśli udało się ustawić pozycję.
+        """
+        tool = cls._get_win_tool()
+        if not tool:
+            return False
+        deadline = time.time() + max_wait
+        while time.time() < deadline:
+            try:
+                wids = subprocess.check_output(
+                    [tool, 'search', '--name', title],
+                    universal_newlines=True,
+                    stderr=subprocess.DEVNULL, timeout=1).strip().split()
+                if wids:
+                    wid = wids[0]
+                    subprocess.run(
+                        [tool, 'windowmove', wid,
+                         str(layout.x), str(layout.y)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=2)
+                    subprocess.run(
+                        [tool, 'windowsize', wid,
+                         str(layout.w), str(layout.h)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, timeout=2)
+                    logger.debug(
+                        f"reposition '{title}' → "
+                        f"{layout.x},{layout.y} {layout.w}x{layout.h} "
+                        f"via {tool}")
+                    return True
+            except Exception as e:
+                logger.debug(f"reposition '{title}': {e}")
+            time.sleep(0.2)
+        logger.debug(f"reposition '{title}': window not found after {max_wait}s")
+        return False
+
+    @classmethod
     def restore_focus(cls, mpv_pid: int = 0,
                       mpv_pids: Optional[List[int]] = None) -> bool:
         tool = cls._get_win_tool()
@@ -3417,6 +3457,13 @@ class Player:
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
 
+        # Wymuś pozycję przez kdotool/xdotool w tle
+        if _win_tool_available() and cam.layout:
+            _title = f"FILE:{cam.name.replace(' ', '_')}"
+            threading.Thread(
+                target=Terminal.reposition_mpv_window,
+                args=(_title, layout), daemon=True).start()
+
         return True
 
     @staticmethod
@@ -3499,6 +3546,13 @@ class Player:
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
 
+        # Wymuś pozycję przez kdotool/xdotool w tle
+        if _win_tool_available() and cam.layout:
+            _title = f"LIVE:{cam.name.replace(' ', '_')}"
+            threading.Thread(
+                target=Terminal.reposition_mpv_window,
+                args=(_title, layout), daemon=True).start()
+
         return True
 
     @staticmethod
@@ -3552,6 +3606,13 @@ class Player:
 
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
+
+        # Wymuś pozycję przez kdotool/xdotool w tle (Wayland ignoruje --geometry)
+        if _win_tool_available() and cam.layout:
+            _title = f"LIVE:{name_safe}"
+            threading.Thread(
+                target=Terminal.reposition_mpv_window,
+                args=(_title, layout), daemon=True).start()
 
         return True
 
