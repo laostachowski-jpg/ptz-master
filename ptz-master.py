@@ -171,7 +171,19 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
     playlist_mode = False
     while i < len(args):
         arg = args[i]
-        if arg in ('--debug', '-d'):
+        if arg in ('--help', '-h'):
+            print(__doc__)
+            print(f"  Version: {VERSION}")
+            print(f"\nOptions:")
+            print(f"  -h, --help          Show this help")
+            print(f"  -d, --debug         Enable debug logging")
+            print(f"  -r, --restore       Restore last session")
+            print(f"  -p, --player FILE   Play video file(s)")
+            print(f"  -pl, --player-loop  Play as looping playlist")
+            print(f"  -c N                Start on camera N")
+            print(f"  --mac MAC           Start on camera with MAC")
+            print(f"  CONFIG              Use config file (default: {DEFAULT_CONFIG})")
+            sys.exit(0)
             debug_mode = True
         elif arg in ('--restore', '-r'):
             restore_mode = True
@@ -511,8 +523,8 @@ REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat',
                      'ffmpeg', 'kdotool']
 
 def _win_tool_available() -> bool:
-    """Zwraca True jeśli dostępne jest jakiekolwiek narzędzie do zarządzania oknami."""
-    return any(shutil.which(t) for t in ('xdotool', 'kdotool', 'wmctrl'))
+    """Zwraca True jeśli dostępne narzędzie do zapisu/odczytu geometrii okien."""
+    return any(shutil.which(t) for t in ('xdotool', 'kdotool'))
 
 def _detect_distro() -> tuple:
     """Zwraca (os_id, pretty_name) na podstawie /etc/os-release."""
@@ -627,16 +639,17 @@ def check_dependencies() -> None:
 
     missing_critical = [c for c in REQUIRED_CRITICAL if not shutil.which(c)]
 
-    # Narzędzia do okien: xdotool/wmctrl/kdotool są alternatywami
-    # — narzekaj tylko gdy ŻADNE nie jest dostępne
-    _win_tools    = ['xdotool', 'wmctrl', 'kdotool']
-    _win_missing  = all(not shutil.which(t) for t in _win_tools)
-    _win_report   = ['xdotool'] if _win_missing else []   # reprezentant grupy
+    # Narzędzia do zarządzania oknami mpv:
+    # — xdotool lub kdotool potrzebne do ZAPISU pozycji (getwindowgeometry)
+    # — wmctrl tylko do sterowania (nie umie czytać geometrii przez PID)
+    _geom_tools   = ['xdotool', 'kdotool']   # do zapisu layoutu
+    _geom_missing = all(not shutil.which(t) for t in _geom_tools)
+    _win_report   = ['xdotool'] if _geom_missing else []   # reprezentant grupy
 
     missing_optional = _win_report + [
         c for c in REQUIRED_OPTIONAL
         if c not in REQUIRED_CRITICAL
-        and c not in _win_tools
+        and c not in _geom_tools + ['wmctrl']
         and not shutil.which(c)
     ]
 
@@ -656,7 +669,7 @@ def check_dependencies() -> None:
         info  = INSTALL.get(cmd, {})
         desc  = info.get('desc', '')
         # Specjalny przypadek: xdotool jako reprezentant grupy narzędzi okienkowych
-        if cmd == 'xdotool' and _win_missing:
+        if cmd == 'xdotool' and _geom_missing:
             print(f"\n  {YLW}▸ Narzędzia do pozycjonowania okien mpv{RST}"
                   f"  {DIM}(brak xdotool / wmctrl / kdotool){RST}")
             print(f"    {C_DEB}Debian/Ubuntu : sudo apt install xdotool{RST}")
@@ -4327,7 +4340,6 @@ class PTZMasterApp:
             return new_val
     
     def run(self):
-        check_dependencies()
         Terminal.capture_window_id()
         Terminal.setup_layout(self.config)
         
@@ -9934,6 +9946,9 @@ def main():
     logger.info(f"{'='*60}")
     logger.info(f"PTZ Master v{VERSION} starting – {time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"{'='*60}")
+
+    # Sprawdź zależności przed uruchomieniem — w każdym trybie
+    check_dependencies()
 
     if PLAYER_FILES:
         logger.info(f"Player mode: {len(PLAYER_FILES)} file(s)")

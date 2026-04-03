@@ -26,3 +26,7 @@ To run this tool, ensure you have the following installed:
    cd ptz-master
 
    ./ptz-master.py
+   
+   or
+   
+   wget https://raw.githubusercontent.com/laostachowski-jpg/ptz-master/refs/heads/main/ptz-master.py
