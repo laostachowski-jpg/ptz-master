@@ -15,7 +15,8 @@ To run this tool, ensure you have the following installed:
 - **Python 3.6+**
 - **mpv** (video player)
 - **ffprobe** (for stream analysis)
-- **xdotool** (optional, for advanced window positioning)
+- **xdotool** (optional, for X11 advanced window positioning)
+- **Kdotool** (optional, for Wayland advanced window positioning)
 
 ## 🚀 Quick Start
 1. Clone the repository:
