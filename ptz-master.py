@@ -806,33 +806,24 @@ class Terminal:
         tool = cls._get_win_tool()
         if not tool:
             return False
+        x, y, w, h = str(layout.x), str(layout.y), str(layout.w), str(layout.h)
         deadline = time.time() + max_wait
         while time.time() < deadline:
             try:
-                wids = subprocess.check_output(
-                    [tool, 'search', '--name', title],
-                    universal_newlines=True,
-                    stderr=subprocess.DEVNULL, timeout=1).strip().split()
-                if wids:
-                    wid = wids[0]
-                    subprocess.run(
-                        [tool, 'windowmove', wid,
-                         str(layout.x), str(layout.y)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, timeout=2)
-                    subprocess.run(
-                        [tool, 'windowsize', wid,
-                         str(layout.w), str(layout.h)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL, timeout=2)
+                # Jedna komenda: search + move + size (atomowa)
+                result = subprocess.run(
+                    [tool, 'search', '--name', title,
+                     'windowmove', x, y,
+                     'windowsize', w, h],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=3)
+                if result.returncode == 0:
                     logger.debug(
-                        f"reposition '{title}' → "
-                        f"{layout.x},{layout.y} {layout.w}x{layout.h} "
-                        f"via {tool}")
+                        f"reposition '{title}' → {x},{y} {w}x{h} via {tool}")
                     return True
             except Exception as e:
                 logger.debug(f"reposition '{title}': {e}")
-            time.sleep(0.2)
+            time.sleep(0.3)
         logger.debug(f"reposition '{title}': window not found after {max_wait}s")
         return False
 
@@ -6750,6 +6741,43 @@ class PTZMasterApp:
                 _termios2.tcsetattr(_fd2, _termios2.TCSADRAIN, _old2)
         elif saved == 0:
             print(f"\n{YLW}Nie znaleziono aktywnych okien mpv.{RST}")
+
+        if saved > 0 or True:  # zawsze próbuj zapisać terminal
+            # Zapisz pozycję okna terminala
+            term_geom = {}
+            if Terminal._window_id:
+                tool = Terminal._get_win_tool()
+                if tool:
+                    try:
+                        go = subprocess.check_output(
+                            [tool, 'getwindowgeometry' if tool == 'xdotool' else 'getwindowgeometry',
+                             Terminal._window_id],
+                            universal_newlines=True, timeout=2,
+                            stderr=subprocess.DEVNULL)
+                        import re as _re2
+                        if tool == 'xdotool':
+                            # FORMAT: Position: X,Y\nGeometry: WxH
+                            mp = _re2.search(r'Position:\s*(\d+),(\d+)', go)
+                            ms = _re2.search(r'Geometry:\s*(\d+)x(\d+)', go)
+                        else:  # kdotool
+                            mp = _re2.search(r'Position:\s*([\d.]+),([\d.]+)', go)
+                            ms = _re2.search(r'Geometry:\s*(\d+)x(\d+)', go)
+                        if mp and ms:
+                            term_geom = {"X": int(float(mp[1])), "Y": int(float(mp[2])),
+                                         "WIDTH": int(ms[1]), "HEIGHT": int(ms[2])}
+                    except Exception as e:
+                        logger.debug(f"terminal geom error: {e}")
+
+            if term_geom:
+                self.config.layout["terminal"] = WindowLayout(
+                    x=term_geom["X"], y=term_geom["Y"],
+                    w=term_geom["WIDTH"], h=term_geom["HEIGHT"])
+                print(f"  {GRN}✓{RST} Terminal  "
+                      f"{term_geom['X']},{term_geom['Y']} "
+                      f"{term_geom['WIDTH']}x{term_geom['HEIGHT']}")
+                saved += 1
+            else:
+                print(f"  {DIM}? Terminal — pozycja niedostępna{RST}")
 
         if saved > 0:
             self.config_mgr.save()
