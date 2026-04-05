@@ -4935,10 +4935,11 @@ class PTZMasterApp:
                 break
             result, _ = _mpv_control_screen_player(
                 cam, prof,
-                files=cameras,        # lista kamer zamiast plików
+                files=cameras,
                 current_idx=idx,
-                save_as_camera_fn=None,  # <--- BŁĄD BYŁ TUTAJ (zamienione na None)
+                save_as_camera_fn=None,
                 config_mgr=self.config_mgr,
+                loop_mode=False,
                 cam_mode=True,
                 all_cameras=cameras,
             )
@@ -8856,6 +8857,27 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _clipping = True
             codec_tag = f" [{opts['codec']}]" if opts["codec"] != "copy" else ""
             last_msg = f"🎬{codec_tag} {_fmt_time(ab_a)}–{_fmt_time(ab_b)} → clip_{int(ab_a)}_{int(ab_b)}.mp4"
+            # Wątek monitorujący ffmpeg — resetuje _clipping gdy zakończy
+            import threading as _thr
+            def _monitor_clip():
+                nonlocal _clipping, last_msg
+                import time as _t3
+                clip_log = f"{fp}_clip_{int(ab_a)}_{int(ab_b)}.mp4.ffmpeg.log"
+                # Czekaj aż log przestanie rosnąć (ffmpeg zakończył)
+                prev_size = -1
+                for _ in range(120):  # max 60s
+                    _t3.sleep(0.5)
+                    try:
+                        cur_size = os.path.getsize(clip_log)
+                        if cur_size == prev_size and cur_size > 0:
+                            break
+                        prev_size = cur_size
+                    except OSError:
+                        break
+                _clipping = False
+                last_msg = f"🎬 Gotowe: clip_{int(ab_a)}_{int(ab_b)}.mp4"
+                logger.info("_monitor_clip: ffmpeg finished, _clipping=False")
+            _thr.Thread(target=_monitor_clip, daemon=True).start()
         else:
             last_msg = "🎬 Clip extraction failed"
 
