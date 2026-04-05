@@ -1,7 +1,8 @@
 # 🎥 PTZ Master
 
 Professional TUI (Terminal User Interface) in Python for Linux to control PTZ IP cameras.
-Developed by Leszek Ostachowski with Gemini AI assistance.
+
+Developed by Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
 
 ## ✨ Key Features
 * **Multi-source support:** Streams via RTSP, V4L2 (USB cameras), and local video files.
