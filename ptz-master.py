@@ -9058,63 +9058,31 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         idx_pad  = f"{idx_str:>5}"
         nav_idx  = f"{DIM}{idx_pad}{RST}"
 
-# --- CAŁKOWICIE POPRAWIONY BLOK W _draw() ---
-        INNER_WIDTH = 78
+# --- NAJPROSTSZE: STAŁA SZEROKOŚĆ LEWEJ CZĘŚCI ---
 
         if cam_mode:
-            # TRYB KAMER
-            cur_cam   = (all_cameras or files)[current_idx]
-            cam_name  = getattr(cur_cam, 'name', str(files[current_idx]))
-            cam_ip    = getattr(cur_cam, 'ip', '')
+            cur_cam = (all_cameras or files)[current_idx]
+            cam_name = getattr(cur_cam, 'name', str(files[current_idx]))
+            cam_ip = getattr(cur_cam, 'ip', '')
+            fname = f"{cam_name} [{cam_ip}]"
+            loop_char = "🔁" if loop_mode_local else "⏹ "
 
-            left_nav  = f"{nav_prev} {idx_str} "
-            right_nav = f" {nav_next} "
-            ip_tag    = f" {DIM}[{cam_ip}]{RST}" if cam_ip else ""
-            controls  = f"{YLW}[P]{RST}TZ  {YLW}[L]{RST}⏹  {YLW}[K>]{RST}🎥"
+            # LEWA CZĘŚĆ - zawsze 15 znaków (dostosuj raz)
+            lewa_czesc = f" 🎥 {nav_prev} {idx_str}".ljust(15)
 
-            prefix = f" 🎥 {left_nav}"
-            suffix = f"{ip_tag}{right_nav}{controls}"
-
-            available = INNER_WIDTH - vlen(prefix) - vlen(suffix)
-            if vlen(cam_name) > available:
-                cam_name = cam_name[:available-1] + "…"
-
-            padding = max(0, INNER_WIDTH - vlen(prefix) - vlen(cam_name) - vlen(suffix))
-            full_line = f"{prefix}{cam_name}{' ' * padding}{suffix}"
+            if len(fname) > 36:
+                fname = fname[:33] + "..."
+            row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}T{YLW}[Z]{RST} {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
 
         else:
-            # TRYB PLIKU - ZACHOWUJE ROZSZERZENIE (np. .mpg)
-            full_filename = os.path.basename(files[current_idx])
-            loop_indicator = "🔁" if loop_mode_local else "⏹"
+            fname = os.path.basename(files[current_idx])
+            loop_char = "🔁" if loop_mode_local else "⏹ "
 
-            left_nav  = f"{nav_prev} {idx_str} "
-            right_nav = f" {nav_next} "
-            # [P]l zamiast [P]list, by zyskać miejsce
-            controls  = f"{YLW}[P]{RST}l {YLW}[L]{RST}{loop_indicator} {YLW}[K>]{RST}🎥"
+            lewa_czesc = f" 🎬 {nav_prev} {idx_str}".ljust(15)
 
-            prefix = f" 🎬 {left_nav}"
-            suffix = f"{right_nav}{controls}"
-
-            # Obliczamy ile mamy miejsca na samą nazwę
-            taken_width = vlen(prefix) + vlen(suffix)
-            available = INNER_WIDTH - taken_width
-
-            name_to_show = full_filename
-            if vlen(full_filename) > available:
-                # INTELIGENTNE SKRACANIE: zachowaj 6 znaków końcówki (np. ".video")
-                # Wycinamy środek, żeby było widać początek i rozszerzenie
-                keep_ext = 6
-                head_len = available - keep_ext - 2 # -2 na wielokropek ".."
-                if head_len > 0:
-                    name_to_show = full_filename[:head_len] + ".." + full_filename[-keep_ext:]
-                else:
-                    name_to_show = full_filename[:available-1] + "…"
-
-            # Padding wypycha suffix (kontrolki) do prawej krawędzi ramki
-            padding_count = max(0, INNER_WIDTH - vlen(prefix) - vlen(name_to_show) - vlen(suffix))
-            full_line = f"{prefix}{name_to_show}{' ' * padding_count}{suffix}"
-
-        row(full_line)
+            if len(fname) > 36:
+                fname = fname[:33] + "..."
+            row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}list {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
 
         row(f" {stream_info}")
         sep()
@@ -9396,11 +9364,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     _mouse_off()
                     result = "prev"; running = False
                     _mouse_on()
-                elif 53 <= c <= 56:                                      # [.►] next
+                elif 54 <= c <= 57:                                      # [.►] next
                     _mouse_off()
                     result = "next"; running = False
                     _mouse_on()
-                elif 58 <= c <= 60:                                      # [P]list / [P]TZ
+                elif 59 <= c <= 61:                                      # [P]list / [P]T[Z]
                     if cam_mode:
                         # Tryb kamer — otwórz panel PTZ
                         _mouse_off()
@@ -9426,15 +9394,22 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             result = ("goto", new_idx)
                             running = False
                         _mouse_on()
-                elif 66 <= c <= 68:                                      # [L] loop
+                elif 63 <= c <= 65:                                      # [Z]63-65
+                    if cam_mode:
+                      pass  # TODO
+
+                elif 67 <= c <= 71:                                      # [L] loop
                     loop_mode_local = not loop_mode_local
                     if ctrl and ctrl.is_alive():
                         ctrl._send(["set_property", "loop-file",
                                     "inf" if loop_mode_local else "no"])
                     last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
-                elif 72 <= c <= 75:                                      # [K>] mpv ctrl
+                elif 73 <= c <= 78:                                      # [K>] mpv ctrl
                     pass  # TODO
-
+                # Emoji 🎥 na końcu - kolumny 79-80 (opcjonalnie)
+                elif 79 <= c <= 80:
+                    # TODO np. pokaż info o klipie
+                    pass
             elif r == 5 and dur_f > 0:
                 BAR_START, BAR_LEN = 5, 22
                 if BAR_START <= c <= BAR_START + BAR_LEN:
