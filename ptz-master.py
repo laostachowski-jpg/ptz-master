@@ -3983,7 +3983,7 @@ class PTZMasterApp:
             if S+1 <= c <= S+3:
                 self._mouse_off(); self._play_stream(); self._mouse_on(); self.ui.draw(); return
             if S+10 <= c <= S+12:
-                self._mouse_off(); self._mpv_control_screen(); self._mouse_on(); self.ui.draw(); return
+                self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on(); self.ui.draw(); return
             if S+20 <= c <= S+22:
                 self._mouse_off()
                 self.config.player_cmd = self._edit_param("PLAYER CMD", self.config.player_cmd)
@@ -4555,7 +4555,7 @@ class PTZMasterApp:
                     self._mouse_off(); self._play_stream(); self._mouse_on()
                     self.ui.draw()
                 elif key.lower() == 'x':
-                    self._mouse_off(); self._mpv_control_screen(); self._mouse_on()
+                    self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on()
                     self.ui.draw()
                 elif key.lower() == 'k':
                     cam = self.ui.current_camera
@@ -4916,6 +4916,44 @@ class PTZMasterApp:
     # --------------------------------------------------------------------------
     # MPV LIVE CONTROL SCREEN  (key: x)
     # --------------------------------------------------------------------------
+    def _mpv_control_screen_cam(self):
+        """Unified player TUI dla kamer — reużywa _mpv_control_screen_player w cam_mode."""
+        cameras = self.config.cameras
+        if not cameras:
+            notify("Brak kamer", "warning"); return
+        idx = self.ui.current_idx
+        cam = cameras[idx]
+        prof = self.ui.current_profile
+        if not prof or not ProcessManager.is_running(prof.pid or 0):
+            notify("mpv nie gra — uruchom kamerę najpierw", "warning"); return
+
+        # Pętla przełączania kamer (jak PlayerModeApp dla plików)
+        while 0 <= idx < len(cameras):
+            cam  = cameras[idx]
+            prof = cam.profiles[cam.active_profile] if cam.profiles else None
+            if not prof:
+                break
+            result, _ = _mpv_control_screen_player(
+                cam, prof,
+                files=cameras,        # lista kamer zamiast plików
+                current_idx=idx,
+                save_as_camera_fn=None,  # <--- BŁĄD BYŁ TUTAJ (zamienione na None)
+                config_mgr=self.config_mgr,
+                cam_mode=True,
+                all_cameras=cameras,
+            )
+            if isinstance(result, tuple) and result[0] == "goto":
+                idx = result[1]
+                self.ui.current_idx = idx
+            elif result == "next":
+                idx = (idx + 1) % len(cameras)
+                self.ui.current_idx = idx
+            elif result == "prev":
+                idx = (idx - 1) % len(cameras)
+                self.ui.current_idx = idx
+            else:
+                break
+
     def _mpv_control_screen(self):
         """Full-screen TUI panel for live mpv control via IPC."""
         cam  = self.ui.current_camera
@@ -7989,7 +8027,13 @@ class PlayerModeApp:
 
 def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 save_as_camera_fn=None, config_mgr=None,
-                                loop_mode=False):
+                                loop_mode=False, cam_mode=False,
+                                all_cameras=None):
+    """
+    cam_mode=True  — tryb kamer: files=lista kamer, current_idx=aktywna kamera
+    cam_mode=False — tryb pliku: files=lista plików wideo
+    all_cameras    — lista Camera[] do przełączania w cam_mode
+    """
     import select as _sel
     import signal as _sig
     import shutil as _sh2
@@ -8435,6 +8479,107 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         else:
             zoom_mode = True
             last_msg  = "🔍 Zoom mode ON — strzałki = pan"
+
+    def _open_ptz_panel():
+        """Mini panel PTZ — strzałki kierunku + zoom dla aktywnej kamery."""
+        nonlocal last_msg, _first_draw
+        if not cam or not cam.type in (CameraType.ONVIF, CameraType.DVRIP):
+            last_msg = "⚠ PTZ niedostępne dla tej kamery"
+            return
+
+        # Pobierz klienta PTZ
+        try:
+            from contextlib import suppress
+            _ptz_speed = 0.3
+            _ptz_active = True
+
+            def _ptz_draw():
+                out = sys.stdout.write
+                out("\033[2J\033[H\033[?25l")
+                W2 = 57
+                def _row(s): out(f"\r{BLU}║{RST}{pad(s, W2)}{BLU}║{RST}\r\n")
+                def _sep():  out(f"\r{BLU}╠{'═'*W2}╣{RST}\r\n")
+                out(f"\r{BLU}╔{'═'*W2}╗{RST}\r\n")
+                _row(f" 🎥 PTZ: {CYN}{cam.name}{RST}  {DIM}{cam.ip}{RST}")
+                _sep()
+                _row(f"         {YLW}[↑]{RST} Góra")
+                _row(f"  {YLW}[←]{RST} Lewo   {YLW}[■]{RST} Stop   {YLW}[→]{RST} Prawo")
+                _row(f"         {YLW}[↓]{RST} Dół")
+                _sep()
+                _row(f"  {YLW}[+]{RST} Zoom IN    {YLW}[-]{RST} Zoom OUT")
+                _row(f"  Prędkość: {YLW}[<]{RST} {_ptz_speed:.1f} {YLW}[>]{RST}")
+                _sep()
+                _row(f"  {YLW}[1-9]{RST} Preset    {YLW}[S]{RST} Zapisz preset")
+                _row(f"  {YLW}[ESC/Q]{RST} Powrót do podglądu")
+                out(f"\r{BLU}╚{'═'*W2}╝{RST}\r\n")
+                out("\033[?25h")
+                sys.stdout.flush()
+
+            _ptz_draw()
+
+            import tty as _tty_p
+            _old_p = termios.tcgetattr(fd)
+            _tty_p.setraw(fd)
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.flush()
+
+            while _ptz_active:
+                import select as _selp
+                rl, _, _ = _selp.select([sys.stdin], [], [], 0.1)
+                if not rl:
+                    continue
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'A':   # ↑
+                            ctrl._send(["move_up",    _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                            last_msg = "PTZ ↑"
+                        elif ch3 == 'B': # ↓
+                            ctrl._send(["move_down",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                            last_msg = "PTZ ↓"
+                        elif ch3 == 'C': # →
+                            ctrl._send(["move_right", _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                            last_msg = "PTZ →"
+                        elif ch3 == 'D': # ←
+                            ctrl._send(["move_left",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                            last_msg = "PTZ ←"
+                    elif ch2 == '\x1b' or ch2 == '':
+                        _ptz_active = False
+                elif ch in ('q', 'Q', '\x1b'):
+                    _ptz_active = False
+                elif ch == ' ':  # stop
+                    ctrl._send(["stop"]) if ctrl and ctrl.is_alive() else None
+                    last_msg = "PTZ ■ stop"
+                elif ch == '+':
+                    ctrl._send(["zoom_in",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                    last_msg = "PTZ zoom +"
+                elif ch == '-':
+                    ctrl._send(["zoom_out", _ptz_speed]) if ctrl and ctrl.is_alive() else None
+                    last_msg = "PTZ zoom -"
+                elif ch == '<':
+                    _ptz_speed = max(0.1, round(_ptz_speed - 0.1, 1))
+                    _ptz_draw()
+                elif ch == '>':
+                    _ptz_speed = min(1.0, round(_ptz_speed + 0.1, 1))
+                    _ptz_draw()
+                elif ch in '123456789':
+                    ctrl._send(["goto_preset", int(ch)]) if ctrl and ctrl.is_alive() else None
+                    last_msg = f"PTZ preset {ch}"
+                elif ch in ('s', 'S'):
+                    last_msg = "PTZ preset saved"
+
+        except Exception as e:
+            last_msg = f"PTZ error: {e}"
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, _old_p)
+                sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                sys.stdout.flush()
+            except Exception:
+                pass
+            _first_draw = True
 
     def _ab_set_a():
         nonlocal ab_a, ab_b, ab_active, last_msg
@@ -8903,31 +9048,72 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _w(f"\r{BLU}║{RST}{pad(content, W)}{BLU}║{RST}\033[K\r\n")
         def sep():
             _w(f"\r{BLU}╠{chr(9552)*W}╣{RST}\033[K\r\n")
-
-        name     = os.path.basename(files[current_idx])
+        if cam_mode:
+            name = files[current_idx].name
+        else:
+            name = os.path.basename(files[current_idx])
         nav_prev = f"{YLW}[◄,]{RST}"
         nav_next = f"{YLW}[.►]{RST}"
         idx_str  = f"{current_idx+1}/{len(files)}"
         idx_pad  = f"{idx_str:>5}"
         nav_idx  = f"{DIM}{idx_pad}{RST}"
 
-        # Przygotowanie nazwy pliku
-        MAX_NAME = 37
-        orig_name = os.path.basename(files[current_idx])
-        name = orig_name
-        if vlen(name) > MAX_NAME:
-            while vlen(name) > MAX_NAME - 1:
-                name = name[1:]
-            name = "…" + name
-        name_pad = name + " " * (MAX_NAME - vlen(name))
+# --- CAŁKOWICIE POPRAWIONY BLOK W _draw() ---
+        INNER_WIDTH = 78
 
-        # Indykator zapętlania
-        loop_indicator = "🔁" if loop_mode_local else "⏹ "
-        left_nav = f"{nav_prev} {idx_str} "
-        middle = name_pad
-        right_nav = f" {nav_next} "
-        controls = f"{YLW}[P]{RST}list {YLW}[L]{RST}{loop_indicator}{YLW} [K>]{RST}🎥"
-        full_line = f" 🎬 {left_nav}{middle}{right_nav}{controls}"
+        if cam_mode:
+            # TRYB KAMER
+            cur_cam   = (all_cameras or files)[current_idx]
+            cam_name  = getattr(cur_cam, 'name', str(files[current_idx]))
+            cam_ip    = getattr(cur_cam, 'ip', '')
+
+            left_nav  = f"{nav_prev} {idx_str} "
+            right_nav = f" {nav_next} "
+            ip_tag    = f" {DIM}[{cam_ip}]{RST}" if cam_ip else ""
+            controls  = f"{YLW}[P]{RST}TZ  {YLW}[L]{RST}⏹  {YLW}[K>]{RST}🎥"
+
+            prefix = f" 🎥 {left_nav}"
+            suffix = f"{ip_tag}{right_nav}{controls}"
+
+            available = INNER_WIDTH - vlen(prefix) - vlen(suffix)
+            if vlen(cam_name) > available:
+                cam_name = cam_name[:available-1] + "…"
+
+            padding = max(0, INNER_WIDTH - vlen(prefix) - vlen(cam_name) - vlen(suffix))
+            full_line = f"{prefix}{cam_name}{' ' * padding}{suffix}"
+
+        else:
+            # TRYB PLIKU - ZACHOWUJE ROZSZERZENIE (np. .mpg)
+            full_filename = os.path.basename(files[current_idx])
+            loop_indicator = "🔁" if loop_mode_local else "⏹"
+
+            left_nav  = f"{nav_prev} {idx_str} "
+            right_nav = f" {nav_next} "
+            # [P]l zamiast [P]list, by zyskać miejsce
+            controls  = f"{YLW}[P]{RST}l {YLW}[L]{RST}{loop_indicator} {YLW}[K>]{RST}🎥"
+
+            prefix = f" 🎬 {left_nav}"
+            suffix = f"{right_nav}{controls}"
+
+            # Obliczamy ile mamy miejsca na samą nazwę
+            taken_width = vlen(prefix) + vlen(suffix)
+            available = INNER_WIDTH - taken_width
+
+            name_to_show = full_filename
+            if vlen(full_filename) > available:
+                # INTELIGENTNE SKRACANIE: zachowaj 6 znaków końcówki (np. ".video")
+                # Wycinamy środek, żeby było widać początek i rozszerzenie
+                keep_ext = 6
+                head_len = available - keep_ext - 2 # -2 na wielokropek ".."
+                if head_len > 0:
+                    name_to_show = full_filename[:head_len] + ".." + full_filename[-keep_ext:]
+                else:
+                    name_to_show = full_filename[:available-1] + "…"
+
+            # Padding wypycha suffix (kontrolki) do prawej krawędzi ramki
+            padding_count = max(0, INNER_WIDTH - vlen(prefix) - vlen(name_to_show) - vlen(suffix))
+            full_line = f"{prefix}{name_to_show}{' ' * padding_count}{suffix}"
+
         row(full_line)
 
         row(f" {stream_info}")
@@ -9214,23 +9400,32 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     _mouse_off()
                     result = "next"; running = False
                     _mouse_on()
-                elif 58 <= c <= 60:                                      # [P]list
-                    _mouse_off()
-                    _in_overlay = True
-                    new_idx = _show_playlist(files, current_idx)
-                    _in_overlay = False
-                    _first_draw = True
-                    if isinstance(new_idx, tuple) and new_idx[0] == "add":
-                        # Plik wybrany z katalogu — dodaj do listy i przejdź
-                        new_path = new_idx[1]
-                        if new_path not in files:
-                            files.append(new_path)
-                        result = ("goto", files.index(new_path))
-                        running = False
-                    elif new_idx >= 0:
-                        result = ("goto", new_idx)
-                        running = False
-                    _mouse_on()
+                elif 58 <= c <= 60:                                      # [P]list / [P]TZ
+                    if cam_mode:
+                        # Tryb kamer — otwórz panel PTZ
+                        _mouse_off()
+                        _in_overlay = True
+                        _open_ptz_panel()
+                        _in_overlay = False
+                        _first_draw = True
+                        _mouse_on()
+                    else:
+                        # Tryb pliku — playlista
+                        _mouse_off()
+                        _in_overlay = True
+                        new_idx = _show_playlist(files, current_idx)
+                        _in_overlay = False
+                        _first_draw = True
+                        if isinstance(new_idx, tuple) and new_idx[0] == "add":
+                            new_path = new_idx[1]
+                            if new_path not in files:
+                                files.append(new_path)
+                            result = ("goto", files.index(new_path))
+                            running = False
+                        elif new_idx >= 0:
+                            result = ("goto", new_idx)
+                            running = False
+                        _mouse_on()
                 elif 66 <= c <= 68:                                      # [L] loop
                     loop_mode_local = not loop_mode_local
                     if ctrl and ctrl.is_alive():
@@ -9589,19 +9784,25 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 "inf" if loop_mode_local else "no"])
                 last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
             elif ch in ('p', 'P'):
-                new_idx = _show_playlist(files, current_idx)
-                if isinstance(new_idx, tuple) and new_idx[0] == 'add':
-                    new_path = new_idx[1]
-                    if new_path not in files:
-                        files.append(new_path)
-                    result = ('goto', files.index(new_path))
-                    running = False
-                elif new_idx >= 0 and new_idx != current_idx:
-                    result = ('goto', new_idx)
-                    running = False
+                if cam_mode:
+                    _in_overlay = True
+                    _open_ptz_panel()
+                    _in_overlay = False
+                    _first_draw = True
                 else:
-                    out('\033[2J\033[H')
-                    _draw()
+                    new_idx = _show_playlist(files, current_idx)
+                    if isinstance(new_idx, tuple) and new_idx[0] == 'add':
+                        new_path = new_idx[1]
+                        if new_path not in files:
+                            files.append(new_path)
+                        result = ('goto', files.index(new_path))
+                        running = False
+                    elif new_idx >= 0 and new_idx != current_idx:
+                        result = ('goto', new_idx)
+                        running = False
+                    else:
+                        out('\033[2J\033[H')
+                        _draw()
             elif ch == '<':
                 step = max(1, step - 1); last_msg = f"step={step}"
             elif ch == '>':
