@@ -8287,7 +8287,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             if _br_hist:
                 hi = max(_br_hist) or 1.0
                 spark = "".join(_SPARK[min(8, int(v / hi * 8))] for v in _br_hist)
-                br_str = f"  🚀 {_br_hist[-1]:.1f}Mb{buf_ms_str} {spark}"
+                # cam_mode: stream_info bez bitrate (jest w linii 🚀 poniżej)
+                if cam_mode:
+                    br_str = ""
+                else:
+                    br_str = f"  🚀 {_br_hist[-1]:.1f}Mb{buf_ms_str} {spark}"
             else:
                 br_str = ""
         stream_info = f"📊 {vs} {ws}x{hs}{fps_s}  🔊 {as_}{ar_s}{ach_s}{br_str}"
