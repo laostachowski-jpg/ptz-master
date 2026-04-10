@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.9"
+VERSION = "9.0.10"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -54,7 +54,7 @@ import threading
 import shlex
 import textwrap
 from contextlib import contextmanager
-from typing import Optional, Dict, List, Tuple, Any, Union
+from typing import Optional, Dict, List, Tuple
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
@@ -79,7 +79,6 @@ logging.basicConfig(
         logging.FileHandler(LOG_FILE, encoding='utf-8'),
     ]
 )
-logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = "ptz_master_config.json"
 
 class Colors:
@@ -184,7 +183,6 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
             print(f"  --mac MAC           Start on camera with MAC")
             print(f"  CONFIG              Use config file (default: {DEFAULT_CONFIG})")
             sys.exit(0)
-            debug_mode = True
         elif arg in ('--restore', '-r'):
             restore_mode = True
         elif arg in ('-p', '--player'):
@@ -284,7 +282,7 @@ class CameraProfile:
             token=data.get("token", "unknown"),
             uri=data.get("uri", ""),
             res=data.get("res", "N/A"),
-            pid=data.get("pid"),
+            pid=None,  # nie ładuj PID z pliku — przy starcie zawsze "not running"
             channel=data.get("channel", 0),
             fps=data.get("fps", 0),
             codec=data.get("codec", "")
@@ -2005,7 +2003,6 @@ class ONVIFClient:
         self.cam = cam
         NetworkUtils.resolve_ip(cam)
         self._session: Optional[requests.Session] = None
-        self._stop_timer = None  # For DVRIP compatibility
     
     def _get_auth_header(self) -> str:
         nonce = os.urandom(16)
@@ -5054,7 +5051,12 @@ class PTZMasterApp:
             notify("Invalid port format!", "error")
             return
         else:
-            cam.ports.onvif = new_port_int
+            if cam.type == CameraType.DVRIP:
+                cam.ports.dvrip = new_port_int
+            elif cam.type == CameraType.RTSP_ONLY:
+                cam.ports.rtsp = new_port_int
+            else:
+                cam.ports.onvif = new_port_int
 
         cam.user = self._edit_param("USER", cam.user)
         cam.password = self._edit_param("PASS", cam.password)
@@ -5097,7 +5099,12 @@ class PTZMasterApp:
             notify("Invalid port format!", "error")
             return
         else:
-            cam.ports.onvif = new_port_int
+            if cam.type == CameraType.DVRIP:
+                cam.ports.dvrip = new_port_int
+            elif cam.type == CameraType.RTSP_ONLY:
+                cam.ports.rtsp = new_port_int
+            else:
+                cam.ports.onvif = new_port_int
         
         if cam.ip != old_ip:
             cam.mac = "UNKNOWN"
@@ -6004,7 +6011,7 @@ class PTZMasterApp:
             print(f"{DIM}  pip install kdotool   lub   yay -S kdotool{RST}")
             print(f"{DIM}Możesz wpisać pozycje ręcznie (x y) lub ENTER aby pominąć.{RST}")
             print(f"{DIM}Wskazówka: PPM na tytuł okna mpv → Więcej → Geometria.{RST}\n")
-            import tty as _tty2, termios as _termios2
+            import termios as _termios2
             _fd2 = sys.stdin.fileno()
             _old2 = _termios2.tcgetattr(_fd2)
             try:
@@ -7307,7 +7314,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     import shutil as _sh2
     import time as _time
     import os as _os
-    import math as _math
     import threading as _thr
 
     fd   = sys.stdin.fileno()
@@ -8148,12 +8154,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             tty.setraw(fd)
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
-    # --------------------------------------------------------------------------
-    # Główna funkcja rysująca
-    # --------------------------------------------------------------------------
-    def _draw():
-        ...
-
     # --------------------------------------------------------------------------
     # Główna funkcja rysująca
     # --------------------------------------------------------------------------
