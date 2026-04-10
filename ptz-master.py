@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.8"
+VERSION = "9.0.9"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4914,10 +4914,10 @@ class PTZMasterApp:
                 self._wait_click_or_key()
     
     # --------------------------------------------------------------------------
-    # MPV LIVE CONTROL SCREEN  (key: x)
+    # MPV LIVE CONTROL SCREEN  (key: x)  - wrapper dla trybu kamer
     # --------------------------------------------------------------------------
     def _mpv_control_screen_cam(self):
-        """Unified player TUI dla kamer — reużywa _mpv_control_screen_player w cam_mode."""
+        """Unified player TUI dla kamer — używa _mpv_control_screen_player w cam_mode."""
         cameras = self.config.cameras
         if not cameras:
             notify("Brak kamer", "warning"); return
@@ -4927,7 +4927,6 @@ class PTZMasterApp:
         if not prof or not ProcessManager.is_running(prof.pid or 0):
             notify("mpv nie gra — uruchom kamerę najpierw", "warning"); return
 
-        # Pętla przełączania kamer (jak PlayerModeApp dla plików)
         while 0 <= idx < len(cameras):
             cam  = cameras[idx]
             prof = cam.profiles[cam.active_profile] if cam.profiles else None
@@ -4955,745 +4954,6 @@ class PTZMasterApp:
             else:
                 break
 
-    def _mpv_control_screen(self):
-        """Full-screen TUI panel for live mpv control via IPC."""
-        cam  = self.ui.current_camera
-        prof = self.ui.current_profile
-        if not cam or not prof:
-            notify("No active camera", "warning"); return
-
-        ctrl = prof.get_mpv()
-        if not ctrl:
-            notify("mpv not playing – press (p) first", "warning"); return
-
-        # Safety check - if ctrl is None or socket dead, return
-        if not ctrl.is_alive():
-            notify("mpv process is dead", "error")
-            return
-
-        PARAMS   = ["BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA", "HUE", "VOL"]
-        PROP_MAP = {
-            "BRIGHTNESS": "brightness",
-            "CONTRAST":   "contrast",
-            "SATURATION": "saturation",
-            "GAMMA":      "gamma",
-            "HUE":        "hue",
-            "VOL":        "volume",
-        }
-        PARAM_RANGE = {
-            "BRIGHTNESS": (-100, 100),
-            "CONTRAST":   (-100, 100),
-            "SATURATION": (-100, 100),
-            "GAMMA":      (-100, 100),
-            "HUE":        (-100, 100),
-            "VOL":        (0, 150),
-        }
-        ICONS = {
-            "BRIGHTNESS": "💡",
-            "CONTRAST":   "🎭",
-            "SATURATION": "🌈",
-            "GAMMA":      "✨",
-            "HUE":        "🎨",
-            "VOL":        "🔊",
-        }
-        JUMP_KEY = {
-    'b': "BRIGHTNESS",
-    'c': "CONTRAST",
-    's': "SATURATION",
-    'g': "GAMMA",
-    'h': "HUE",
-    'v': "VOL",
-}
-        values   = {p: 0 for p in PARAMS}
-        ip = cam.image_params
-        values["BRIGHTNESS"] = ip.get("brightness", 0)
-        values["CONTRAST"]   = ip.get("contrast",   0)
-        values["SATURATION"] = ip.get("saturation", 0)
-        values["GAMMA"]      = ip.get("gamma",      0)
-        values["HUE"]        = ip.get("hue",        0)
-        values["VOL"]        = ip.get("volume",    100)
-        sel      = 0
-        speed    = ip.get("speed",  1.0)
-        muted    = ip.get("mute",   False)
-        paused   = False
-        pos_f    = 0.0
-        dur_f    = 0.0
-        fps      = 0.0
-        auto_fps    = 2.0
-        auto_dir    = True
-        auto_run    = False
-        auto_accum  = 0.0
-        last_step_dir = None
-
-        step     = 5
-        last_msg = "Waiting..."
-        is_file  = cam.type == CameraType.FILE
-
-        # Zoom/pan software (mpv video-zoom / video-pan-x/y)
-        zoom_mode = False
-        zoom_val  = 0.0      # log2 skali: 0=1x, 1=2x, 2=4x
-        pan_x     = 0.0      # -0.5..+0.5
-        pan_y     = 0.0
-        ZOOM_STEP = 0.5
-        PAN_STEP  = 0.1
-
-        stream_info = "📊 Video=— Audio=—"
-
-        def _fetch_stream_info():
-            nonlocal stream_info
-            if not ctrl or not ctrl.is_alive():
-                stream_info = "📊 mpv disconnected"
-                return
-            v_codec  = ctrl.get_property("video-codec")      or "—"
-            width    = ctrl.get_property("width")
-            height   = ctrl.get_property("height")
-            fps_val  = ctrl.get_property("estimated-vf-fps")
-            a_codec  = ctrl.get_property("audio-codec-name") or "—"
-            a_rate   = ctrl.get_property("audio-params/samplerate") or ctrl.get_property("audio-samplerate")
-            a_ch     = ctrl.get_property("audio-channels")
-            a_ch_real= ctrl.get_property("audio-params/channel-count")
-            v_short  = _codec_name(v_codec)
-            a_short  = _codec_name(a_codec)
-            w_s = str(int(width))  if width  else "—"
-            h_s = str(int(height)) if height else "—"
-            fps_s = f" {fps_val:.1f}fps" if fps_val else ""
-            a_r = f" {int(a_rate)//1000}kHz" if a_rate else ""
-            if a_ch_real:
-                try:    a_c = f" {int(a_ch_real)}ch"
-                except: a_c = ""
-            elif a_ch:
-                _ACH_MAP = {
-                    "mono": "1ch", "stereo": "2ch", "2.1": "2.1", "3.0": "3.0",
-                    "quad": "4ch", "4.0": "4ch",    "5.0": "5.0", "5.1": "5.1",
-                    "6.1": "6.1",  "7.1": "7.1",    "auto": "",   "auto-safe": "",
-                }
-                try:    a_c = f" {int(a_ch)}ch"
-                except: a_c = f" {_ACH_MAP.get(str(a_ch), '')}"
-            else:
-                a_c = ""
-            stream_info = (f"📊 {v_short} {w_s}x{h_s}{fps_s}"
-                           f"  🔊 {a_short}{a_r}{a_c}")
-
-        def _fetch_all():
-            nonlocal speed, pos_f, dur_f, fps, last_msg, values, paused
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            for p in PARAMS:
-                if p == "VOL":
-                    v = ctrl.get_property("volume")
-                    if v is not None:
-                        values["VOL"] = int(v)
-                else:
-                    v = ctrl.get_property(PROP_MAP[p])
-                    if v is not None:
-                        values[p] = int(v)
-            sp = ctrl.get_property("speed")
-            if sp is not None: speed = float(sp)
-            vo = ctrl.get_property("volume")
-            if vo is not None: values["VOL"] = int(vo)
-            pa = ctrl.get_property("pause")
-            if pa is not None: paused = bool(pa)
-            if is_file:
-                p2 = ctrl.get_property("time-pos")
-                d2 = ctrl.get_property("duration")
-                if p2 is not None: pos_f = float(p2)
-                if d2 is not None: dur_f = float(d2)
-                fp = ctrl.get_property("container-fps")
-                if fp and float(fp) > 0: fps = float(fp)
-            _fetch_stream_info()
-            last_msg = "OK"
-
-        def _save_image_params():
-            nonlocal last_msg
-            cam.image_params = {
-                "brightness": values["BRIGHTNESS"],
-                "contrast":   values["CONTRAST"],
-                "saturation": values["SATURATION"],
-                "gamma":      values["GAMMA"],
-                "hue":        values["HUE"],
-                "volume":     values["VOL"],
-                "mute":       muted,
-                "speed":      speed,
-            }
-            self.config_mgr.save()
-            last_msg = "💾 Settings saved"
-
-        def _zoom_apply():
-            if not ctrl or not ctrl.is_alive(): return
-            ctrl.set_property("video-zoom",  zoom_val)
-            ctrl.set_property("video-pan-x", pan_x)
-            ctrl.set_property("video-pan-y", pan_y)
-
-        def _zoom_in():
-            nonlocal zoom_val, zoom_mode, last_msg
-            zoom_val = min(zoom_val + ZOOM_STEP, 4.0)
-            zoom_mode = True; _zoom_apply()
-            last_msg = f"🔍 Zoom {2.0**zoom_val:.2f}x"
-
-        def _zoom_out():
-            nonlocal zoom_val, zoom_mode, last_msg
-            zoom_val = max(zoom_val - ZOOM_STEP, 0.0)
-            zoom_mode = (zoom_val > 0.0); _zoom_apply()
-            last_msg = f"🔍 Zoom {2.0**zoom_val:.2f}x"
-
-        def _zoom_reset():
-            nonlocal zoom_val, zoom_mode, pan_x, pan_y, last_msg
-            zoom_val = 0.0; zoom_mode = False; pan_x = 0.0; pan_y = 0.0
-            _zoom_apply(); last_msg = "🔍 Zoom reset"
-
-        def _pan(dx, dy):
-            nonlocal pan_x, pan_y, last_msg
-            if not zoom_mode: return
-            pan_x = max(-0.5, min(0.5, pan_x + dx))
-            pan_y = max(-0.5, min(0.5, pan_y + dy))
-            _zoom_apply()
-            last_msg = f"🔍 Pan {pan_x:+.2f}/{pan_y:+.2f}"
-
-        def _edit_zoom_cs():
-            import math as _math
-            nonlocal zoom_val, zoom_mode, last_msg
-            cur_x = f"{2.0**zoom_val:.2f}"
-            prompt = f"Zoom ({cur_x}x) [1.0..16.0]: "
-            last_msg = prompt + "█"; _draw()
-            try:
-                with _cooked_input(fd):
-                    sys.stdout.write(f"\033[{STATUS_ROW_CS};{2+len(prompt)}H")
-                    sys.stdout.flush()
-                    entered = input().strip()
-                mult = max(1.0, min(16.0, float(entered)))
-                zoom_val = _math.log2(mult); zoom_mode = (zoom_val > 0.0)
-                _zoom_apply(); last_msg = f"🔍 Zoom → {mult:.2f}x"
-            except (EOFError, KeyboardInterrupt, ValueError):
-                last_msg = "OK"
-
-        def _toggle_mute():
-            nonlocal muted, last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            muted = not muted
-            ctrl.set_property("mute", muted)
-            last_msg = f"Mute ({'ON' if muted else 'OFF'})"
-
-        def _set_val(param, delta):
-            nonlocal last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            mn, mx = PARAM_RANGE.get(param, (-100, 100))
-            values[param] = max(mn, min(mx, values[param] + delta))
-            if param == "VOL":
-                ok = ctrl.set_property("volume", values[param])
-            else:
-                ok = ctrl.set_property(PROP_MAP[param], values[param])
-            last_msg = f"{'OK' if ok else 'ERR'} {param}={values[param]:+d}"
-
-        def _set_speed(delta):
-            nonlocal speed, last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            speed = round(max(0.1, min(10.0, speed + delta)), 2)
-            ok = ctrl.set_property("speed", speed)
-            last_msg = f"{'OK' if ok else 'ERR'} speed={speed:.2f}"
-
-        def _seek(secs):
-            nonlocal last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            ok = ctrl._send(["seek", secs, "relative"])
-            last_msg = f"{'OK' if ok else 'ERR'} seek {secs:+}s"
-
-        def _frame_step(forward=True):
-            nonlocal last_msg, paused, last_step_dir, auto_run
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            if not paused:
-                ctrl.set_property("pause", True)
-                paused = True
-            EPSILON = 0.1
-            if forward and dur_f > 0 and pos_f >= dur_f - EPSILON:
-                last_msg = "⏭ end of file"
-                auto_run = False
-                return
-            if not forward and pos_f <= EPSILON:
-                last_msg = "⏮ start of file"
-                auto_run = False
-                return
-            cmd = ["frame-step"] if forward else ["frame-back-step"]
-            ok = ctrl._send(cmd)
-            last_step_dir = forward
-            last_msg = f"{'OK' if ok else 'ERR'} {'>>|' if forward else '|<<'}"
-
-        def _reset():
-            nonlocal speed, muted, last_msg, values
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            for p in PARAMS:
-                if p == "VOL":
-                    values[p] = 100
-                    ctrl.set_property("volume", 100)
-                else:
-                    values[p] = 0
-                    ctrl.set_property(PROP_MAP[p], 0)
-            speed = 1.0
-            ctrl.set_property("speed", 1.0)
-            muted = False
-            ctrl.set_property("mute", False)
-            last_msg = "Reset OK"
-
-        def _toggle_pause():
-            nonlocal paused, auto_run, last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            paused = not paused
-            if not paused:
-                auto_run = False
-            ok = ctrl.set_property("pause", paused)
-            last_msg = ("PAUSED" if paused else "PLAYING") + (" ✓" if ok else " ✗ IPC FAIL")
-            logger.info(f"mpv toggle_pause → pause={paused} IPC={'OK' if ok else 'FAIL'} cam={cam.name}")
-
-        def _auto_toggle_dir():
-            nonlocal auto_dir, last_msg
-            auto_dir = not auto_dir
-            last_msg = f"dir → {'►' if auto_dir else '◄'}"
-
-        def _auto_toggle_run():
-            nonlocal auto_run, auto_accum, last_msg
-            if not paused:
-                last_msg = "Pause first to use frame mode"
-                return
-            auto_run = not auto_run
-            auto_accum = 0.0
-            last_msg = f"AUTO {'START' if auto_run else 'STOP'} {'►' if auto_dir else '◄'} {auto_fps:.1f}fps"
-
-        def _auto_fps_change(delta):
-            nonlocal auto_fps, last_msg
-            steps = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 24.0]
-            idx = min(range(len(steps)), key=lambda i: abs(steps[i] - auto_fps))
-            idx = max(0, min(len(steps)-1, idx + (1 if delta > 0 else -1)))
-            auto_fps = steps[idx]
-            last_msg = f"auto fps → {auto_fps:.1f}"
-
-        def _screenshot():
-            nonlocal last_msg
-            if not ctrl or not ctrl.is_alive():
-                last_msg = "mpv disconnected"
-                return
-            ok = ctrl._send(["screenshot", "video"])
-            last_msg = "Screenshot OK" if ok else "Screenshot ERR"
-
-        def _draw():
-            _tw_d, _th_d = _term_size_cs()
-            if _th_d < MIN_H_CS or _tw_d < MIN_W_CS:
-                sys.stdout.write(f"\033[2J\033[H\033[?25l\r{YLW}⚠ Terminal za mały: {_tw_d}x{_th_d}  (min {MIN_W_CS}x{MIN_H_CS}){RST}\033[K\r\n")
-                sys.stdout.write(f"\r{DIM}Powiększ okno terminala{RST}\033[K\r\n")
-                sys.stdout.flush()
-                return
-            W   = 79
-            src = cam.file_path if is_file else (
-                  cam.device   if cam.type == CameraType.V4L2 else
-                  f"{cam.ip} [{cam.type.value}]")
-            src_short = src[-53:] if len(src) > 53 else src
-
-            play_state = f"{RED}⏸ PAUSED{RST}" if paused else f"{GRN}▶ PLAYING{RST}"
-            spd_color  = YLW if speed != 1.0 else GRN
-
-            def bar(param, width=20):
-                val = values[param]
-                if param == "VOL":
-                    filled = int(val / 150 * width)
-                    if val <= 0:   col = RED
-                    elif val <= 30: col = YLW
-                    elif val <= 100: col = GRN
-                    else: col = RED
-                else:
-                    filled = int((val + 100) / 200 * width)
-                    if val == 0:    col = GRN
-                    elif val < 0:   col = BLU
-                    elif val < 50:  col = YLW
-                    else:           col = RED
-                b = "█" * filled + "░" * (width - filled)
-                return f"{col}{b}{RST}"
-
-            out = sys.stdout.write
-            nl  = "\r\n"
-
-            out("\033[2J\033[H")
-
-            def row(content):
-                out(f"{BLU}║{RST}{pad(content, W)}{BLU}║{RST}{nl}")
-
-            def sep():
-                out(f"{BLU}╠{'═'*W}╣{RST}{nl}")
-
-            out(f"{BLU}╔{'═'*W}╗{RST}{nl}")
-            row(f" 🎥 MPV 🎬 {CYN}{src_short}{RST}")
-            si_short = stream_info[:W-2] if len(stream_info) > W-2 else stream_info
-            row(f" {DIM}{si_short}{RST}")
-            sep()
-
-            sp_line = (f" 🚀 SPEED: {spd_color}{speed:.2f}x{RST}"
-                       f"  {YLW}[G]{RST} -0.25  {YLW}[F]{RST} +0.25")
-            row(sp_line)
-
-            if is_file:
-                if dur_f > 0:
-                    filled = int(pos_f / dur_f * 30)
-                    prog_bar = f"{CYN}{'█' * filled}{'░' * (30 - filled)}{RST}"
-                    def fmt_t(s):
-                        s = int(s); h,m,sec = s//3600,(s%3600)//60,s%60
-                        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
-                    time_str = f"{GRN}{fmt_t(pos_f)}{RST} / {DIM}{fmt_t(dur_f)}{RST}"
-                    fps_tag = f"  {DIM}{fps:.2f}fps{RST}" if fps > 0 else ""
-                    row(f" ⏱ {prog_bar} {time_str}{fps_tag}")
-                if paused:
-                    if auto_run:
-                        indicator = f"{GRN}►{RST}" if auto_dir else f"{RED}◄{RST}"
-                    elif last_step_dir is True:
-                        indicator = f"{GRN}►{RST}"
-                    elif last_step_dir is False:
-                        indicator = f"{RED}◄{RST}"
-                    else:
-                        indicator = f"{RED}●{RST}"
-                    if auto_dir:
-                        x_label = f"{DIM}◄{RST}|{GRN}►{RST}"
-                    else:
-                        x_label = f"{RED}◄{RST}|{DIM}►{RST}"
-                    z_label = f"{GRN}▶ RUN/STOP{RST}" if not auto_run else f"{RED}■ RUN/STOP{RST}"
-                    row(f" {GRN}▶{RST} {YLW}[SPACE]{RST} {YLW}[←][→]{RST} "
-                        f"{indicator} {CYN}| FRAME MODE:{RST}"
-                        f" {YLW}[X]{RST} {x_label}"
-                        f" {YLW}[Z]{RST} {z_label}"
-                        f" {YLW}[+][-]{RST} {auto_fps:.1f}fps")
-                else:
-                    space_icon = f"{RED}⏸{RST}" if not paused else f"{GRN}▶{RST}"
-                    row(f" {space_icon} {YLW}[SPACE]{RST} {play_state}"
-                        f"  {YLW}[←]{RST} -30s  {YLW}[→]{RST} +30s"
-                        f"  {YLW}[A]{RST} start")
-            else:
-                space_icon = f"{RED}⏸{RST}" if not paused else f"{GRN}▶{RST}"
-                row(f" {space_icon} {YLW}[SPACE]{RST} {play_state}")
-            sep()
-
-            nav = (f" 🔧  Select: {YLW}[↑]{RST} {YLW}[↓]{RST} "
-                   f"{YLW}[B]{RST} {YLW}[C]{RST} {YLW}[S]{RST} {YLW}[G]{RST} {YLW}[H]{RST} {YLW}[V]{RST}  "
-                   f"Adjust {YLW}[+]{RST} {YLW}[-]{RST}  "
-                   f"Step {YLW}[<]{RST} {YLW}[>]{RST} {step}")
-            row(nav)
-
-            for i, p in enumerate(PARAMS):
-                v      = values[p]
-                icon   = ICONS[p]
-                b      = bar(p)
-                cursor = f"{YLW}►{RST}" if i == sel else " "
-                
-                if p == "VOL":
-                    vstr = f"{GRN if v==100 else YLW} {v:3d}%{RST}"
-                    padding = " " * 1
-                    mute_color = RED if muted else YLW
-                    mute_status = f"  {YLW}[{mute_color}M{RST}{YLW}]{RST} {mute_color}Mute ({'ON' if muted else 'OFF'}){RST}"
-                    row(f" {cursor}{icon}{MAG}{p:<11}{RST} {b}{padding}{vstr}{mute_status}")
-                else:
-                    vstr = f"{GRN if v==0 else (BLU if v<0 else (YLW if v<50 else RED))}{v:+4d}%{RST}"
-                    row(f" {cursor}{icon}{MAG}{p:<11}{RST} {b} {vstr}")
-
-            sep()
-            row(f" {YLW}[D]{RST} Reset  "
-                f"{YLW}[T]{RST} Screenshot  "
-                f"{YLW}[R]{RST} Save  "
-                f"{YLW}[N]{RST} Zoom  "
-                f"{YLW}[Q]{RST} / ESC Quit")
-            # Linia zoom/pan
-            if zoom_mode:
-                _zm   = f"{GRN}📺{RST}"
-                _zvl  = f"{GRN}{2.0**zoom_val:.1f}x{RST}"
-                _pstr = f"Pan:{pan_x:+.2f}/{pan_y:+.2f}"
-                z_line = (f" {_zm} Zoom {YLW}[+]{RST}{YLW}[-]{RST} {_zvl}"
-                          f"  {DIM}{_pstr}{RST}"
-                          f"  {YLW}[↑↓←→]{RST} pan"
-                          f"  {YLW}[0]{RST} reset")
-            else:
-                z_line = (f" {DIM}🔍{RST} Zoom off"
-                          f"  {YLW}[N]{RST} toggle"
-                          f"  {YLW}[+][-]{RST} zoom in/out")
-            row(z_line)
-            msg_col = GRN if ("OK" in last_msg or "✓" in last_msg) else (RED if ("ERR" in last_msg or "FAIL" in last_msg or "✗" in last_msg) else DIM)
-            ipc_short = (prof.ipc_path or "—")
-            ipc_short = ipc_short[-28:] if len(ipc_short) > 28 else ipc_short
-            row(f" 🔔 {msg_col}{last_msg}{RST}  🔌{DIM}{ipc_short}{RST}")
-            out(f"{BLU}╚{'═'*W}╝{RST}{nl}")
-            sys.stdout.flush()
-
-        if ctrl and ctrl.is_alive():
-            for p in PARAMS:
-                if p == "VOL":
-                    ctrl.set_property("volume", values[p])
-                else:
-                    ctrl.set_property(PROP_MAP[p], values[p])
-            ctrl.set_property("speed",  speed)
-            ctrl.set_property("mute",   muted)
-        _fetch_all()
-
-        import tty, termios, select, shutil as _sh_cs
-        fd   = sys.stdin.fileno()
-        old  = termios.tcgetattr(fd)
-        MIN_H_CS = 20
-        MIN_W_CS = 81  # ║ + 79 treści + ║
-        STATUS_ROW_CS = 18  # wiersz 🔔 w ramce _mpv_control_screen
-        def _term_size_cs():
-            try:
-                sz = _sh_cs.get_terminal_size()
-                return sz.columns, sz.lines
-            except Exception:
-                return 80, 24
-
-        def _handle_mouse(r, c):
-            nonlocal sel, running, auto_dir, paused, step
-            if is_file:
-                r5, r6, r7, r9, r10, r15, r17 = 5, 6, 7, 9, 10, 15, 17
-            else:
-                r5, r6, r7, r9, r10, r15, r17 = 5, None, 6, 8, 9, 14, 16
-
-            if r == r5:
-                if 20 <= c <= 22:   _set_speed(-0.25)
-                elif 31 <= c <= 33: _set_speed(+0.25)
-
-            elif r == r6 and r6 is not None and is_file and dur_f > 0:
-                BAR_START, BAR_LEN = 5, 30
-                if BAR_START <= c <= BAR_START + BAR_LEN:
-                    frac = (c - BAR_START) / BAR_LEN
-                    _seek(frac * dur_f - pos_f)
-
-            elif r == r7:
-                if 5 <= c <= 11:    _toggle_pause()
-                elif not paused:
-                    if   24 <= c <= 26: _seek(-30)
-                    elif 34 <= c <= 36: _seek(+30)
-                    elif 44 <= c <= 46: _seek(-3600)
-                elif paused:
-                    if   13 <= c <= 15: _frame_step(False)
-                    elif 16 <= c <= 18: _frame_step(True)
-                    elif 34 <= c <= 36: _auto_toggle_dir()
-                    elif 43 <= c <= 45: _auto_toggle_run()
-                    elif 54 <= c <= 56: _auto_fps_change(+1)
-                    elif 57 <= c <= 59: _auto_fps_change(-1)
-                    elif 69 <= c <= 71: _seek(-3600)
-
-            elif r == r9:
-                if   15 <= c <= 17: sel = (sel - 1) % len(PARAMS)
-                elif 19 <= c <= 21: sel = (sel + 1) % len(PARAMS)
-                elif 23 <= c <= 25: sel = 0
-                elif 27 <= c <= 29: sel = 1
-                elif 31 <= c <= 33: sel = 2
-                elif 35 <= c <= 37: sel = 3
-                elif 39 <= c <= 41: sel = 4
-                elif 43 <= c <= 45: sel = 5
-                elif 51 <= c <= 53: _set_val(PARAMS[sel], +step)
-                elif 55 <= c <= 57: _set_val(PARAMS[sel], -step)
-                elif 65 <= c <= 67: step = max(1, step - 1)
-                elif 69 <= c <= 71: step = min(20, step + 1)
-
-            elif r10 is not None and r10 <= r <= r10 + 5:
-                new_sel = r - r10
-                if sel == new_sel:
-                    BAR_S, BAR_E = 18, 37
-                    if BAR_S <= c <= BAR_E:
-                        param = PARAMS[sel]
-                        if param == "VOL":
-                            frac = (c - BAR_S) / (BAR_E - BAR_S)
-                            new_val = max(0, min(150, int(frac * 150)))
-                            values[param] = new_val
-                            if ctrl and ctrl.is_alive():
-                                ctrl.set_property("volume", new_val)
-                        else:
-                            frac = (c - BAR_S) / (BAR_E - BAR_S)
-                            new_val = max(-100, min(100, int((frac - 0.5) * 200)))
-                            if ctrl and ctrl.is_alive():
-                                ctrl.set_property(PROP_MAP[param], new_val)
-                            values[param] = new_val
-                else:
-                    sel = new_sel
-
-            elif r == r17:
-                if   3 <= c <= 5:   _reset()
-                elif 14 <= c <= 16: _screenshot()
-                elif 30 <= c <= 32: _save_image_params()
-                elif 42 <= c <= 44: running = False
-
-        running = True
-        try:
-            tty.setraw(fd)
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-            sys.stdout.flush()
-            import time as _time
-            last_tick = _time.monotonic()
-            while running:
-                # Check if mpv is still alive
-                if not ctrl or not ctrl.is_alive():
-                    last_msg = "mpv stopped"
-                    _draw()
-                    _time.sleep(1)
-                    running = False
-                    break
-
-                _draw()
-
-                if auto_run and paused:
-                    timeout = min(0.05, 1.0 / auto_fps)
-                elif paused:
-                    timeout = 0.3
-                else:
-                    timeout = 1.0
-
-                rlist, _, _ = select.select([sys.stdin], [], [], timeout)
-
-                now = _time.monotonic()
-                dt  = now - last_tick
-                last_tick = now
-                if auto_run and paused:
-                    auto_accum += dt
-                    step_interval = 1.0 / auto_fps
-                    while auto_accum >= step_interval:
-                        _frame_step(forward=auto_dir)
-                        auto_accum -= step_interval
-
-                if is_file:
-                    p2 = ctrl.get_property("time-pos")
-                    d2 = ctrl.get_property("duration")
-                    if p2 is not None: pos_f = float(p2)
-                    if d2 is not None: dur_f = float(d2)
-                    if p2 is None and d2 is None:
-                        if not ctrl.is_alive():
-                            running = False
-                            last_msg = "mpv stopped"
-                            continue
-                else:
-                    if not ctrl.is_alive():
-                        running = False
-                        last_msg = "mpv stopped"
-                        continue
-
-                if not rlist:
-                    continue
-
-                _tw_cs, _th_cs = _term_size_cs()
-                _term_ok_cs = (_th_cs >= MIN_H_CS and _tw_cs >= MIN_W_CS)
-
-                ch = sys.stdin.read(1)
-                if ch == '\x1b':
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == '<':
-                            buf = ''
-                            while True:
-                                c2 = sys.stdin.read(1)
-                                if c2 in ('M', 'm', ''):
-                                    release = (c2 == 'm')
-                                    break
-                                buf += c2
-                            try:
-                                parts = buf.split(';')
-                                btn_n = int(parts[0])
-                                m_col = int(parts[1])
-                                m_row = int(parts[2])
-                                if not release:
-                                    if btn_n == 64:
-                                        if ctrl and ctrl.is_alive():
-                                            ctrl._send(["seek", +5, "relative"])
-                                        last_msg = "⏩ +5s"
-                                    elif btn_n == 65:
-                                        if ctrl and ctrl.is_alive():
-                                            ctrl._send(["seek", -5, "relative"])
-                                        last_msg = "⏪ -5s"
-                                    elif btn_n == 0:
-                                        if _term_ok_cs:
-                                            _handle_mouse(m_row, m_col)
-                            except (ValueError, IndexError):
-                                pass
-                        elif ch3 == 'A':
-                            if zoom_mode: _pan(0, -PAN_STEP)
-                            else:         sel = (sel - 1) % len(PARAMS)
-                        elif ch3 == 'B':
-                            if zoom_mode: _pan(0, +PAN_STEP)
-                            else:         sel = (sel + 1) % len(PARAMS)
-                        elif ch3 in ('C', 'D'):
-                            if zoom_mode:
-                                _pan(+PAN_STEP if ch3=='C' else -PAN_STEP, 0)
-                            else:
-                                forward = (ch3 == 'C')
-                            if paused:
-                                auto_dir = forward
-                                _frame_step(forward=forward)
-                                while True:
-                                    r2, _, _ = select.select([sys.stdin], [], [], 0.02)
-                                    if not r2:
-                                        break
-                                    ahead = sys.stdin.read(1)
-                                    if ahead != '\x1b':
-                                        break
-                                    a2 = sys.stdin.read(1)
-                                    if a2 != '[':
-                                        break
-                                    a3 = sys.stdin.read(1)
-                                    if a3 == ch3:
-                                        _frame_step(forward=forward)
-                                    elif a3 in ('A', 'B'):
-                                        pass
-                                    else:
-                                        break
-                            elif is_file:
-                                _seek(+30 if forward else -30)
-                            else:
-                                _set_val(PARAMS[sel], +step if forward else -step)
-                        elif ch3 == '5': sys.stdin.read(1); _set_val(PARAMS[sel], +step)
-                        elif ch3 == '6': sys.stdin.read(1); _set_val(PARAMS[sel], -step)
-                    else:
-                        running = False
-                elif ch in ('q', 'Q'):       running = False
-                elif ch == ' ':              _toggle_pause()
-                elif ch in ('x', 'X'):
-                    if paused:               _auto_toggle_dir()
-                elif ch in ('z', 'Z'):
-                    if paused:               _auto_toggle_run()
-                elif ch in ('f', 'F'):       _set_speed(+0.25)
-                elif ch == '+':
-                    if paused:               _auto_fps_change(+1)
-                    else:                    _set_val(PARAMS[sel], +step)
-                elif ch == '-':
-                    if paused:               _auto_fps_change(-1)
-                    else:                    _set_val(PARAMS[sel], -step)
-                elif ch in ('m', 'M'):       _toggle_mute()
-                elif ch.lower() in JUMP_KEY:
-                    sel = PARAMS.index(JUMP_KEY[ch.lower()])
-                elif ch == '<':              step = max(1, step - 1)
-                elif ch == '>':              step = min(20, step + 1)
-                elif ch in ('d', 'D'):       _set_speed(-0.25)
-                elif ch in ('f', 'F'):       _set_speed(+0.25)
-                elif ch in ('t', 'T'):       _screenshot()
-                elif ch in ('r', 'R'):       _save_image_params()
-                elif ch in ('n', 'N'):
-                    # Toggle zoom mode / zoom in
-                    if not zoom_mode:
-                        _zoom_in()
-                    else:
-                        _edit_zoom_cs()
-                elif ch in ('0',):           _zoom_reset()
-                elif ch == '+' and zoom_mode: _zoom_in()
-                elif ch == '-' and zoom_mode: _zoom_out()
-                elif is_file and ch in ('a', 'A'):  _seek(-3600)
-        finally:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.flush()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            sys.stdout.write("\033[2J\033[H")
-            sys.stdout.flush()
 
     def _play_stream(self):
         cam = self.ui.current_camera
@@ -8026,27 +7286,43 @@ class PlayerModeApp:
             else:
                 break
 
+# =============================================================================
+# MPV CONTROL SCREEN PLAYER Start
+# =============================================================================
 def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 save_as_camera_fn=None, config_mgr=None,
                                 loop_mode=False, cam_mode=False,
                                 all_cameras=None):
     """
-    cam_mode=True  — tryb kamer: files=lista kamer, current_idx=aktywna kamera
-    cam_mode=False — tryb pliku: files=lista plików wideo
-    all_cameras    — lista Camera[] do przełączania w cam_mode
+    Uniwersalny ekran sterowania mpv.
+    - cam_mode=True  → tryb kamer: SELECT / PAN / PTZ
+    - cam_mode=False → tryb plików: SELECT / PAN
     """
+    def _edit_pan_x(): pass
+    def _edit_pan_y(): pass
+    def _zoom_toggle(): pass
+    def _edit_zoom(): pass
     import select as _sel
     import signal as _sig
     import shutil as _sh2
+    import time as _time
+    import os as _os
+    import math as _math
+    import threading as _thr
 
     fd   = sys.stdin.fileno()
-    W    = 78
-    # Minimalna wymagana wysokość terminala (liczba wierszy ramki + 1 na kursor)
-    FRAME_H    = 21
-    # Wiersz linii statusu (🔔) w ramce TUI — aktualizuj gdy zmienia się liczba linii
-    # r1=╔ r2=nagłówek r3=stream r4=╠ r5=czas r6=bitrate r7=kontrolki r8=╠
-    # r9=Select r10-r15=params r16=╠ r17=Prev/Next r18=🔔status r19=╚
     STATUS_ROW = 18
+    W    = 78
+    MIN_H = 20
+    MIN_W = 80
+
+    # --------------------------------------------------------------------------
+    # Tryb interfejsu – dla kamer: SELECT/PTZ/PAN, dla plików: SELECT/PAN
+    # --------------------------------------------------------------------------
+    if cam_mode:
+        ui_mode = "SELECT"   # SELECT, PTZ, PAN
+    else:
+        ui_mode_file = "SELECT"   # SELECT, PAN
 
     def _term_size():
         try:
@@ -8055,7 +7331,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         except Exception:
             return 80, 24
 
-    # Flaga wymuszająca pełne odświeżenie po SIGWINCH
     _sigwinch_flag = [False]
     def _sigwinch(sig, frame):
         _sigwinch_flag[0] = True
@@ -8068,53 +7343,48 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     CYN = Colors.CYAN;  DIM = Colors.DIM; RST = Colors.RESET
     BLU = Colors.BLUE;  WHT = Colors.WHITE; MAG = Colors.MAGENTA
 
-    # Lokalne aliasy funkcji globalnych widocznych w zagnieżdżonych funkcjach
     _mouse_off = mouse_off
     _mouse_on  = mouse_on
 
     def out(s): sys.stdout.write(s); sys.stdout.flush()
-    nl = "\n"
 
-    def vlen(s):
-        import unicodedata as _ud
-        total = 0
-        for c in s:
-            cp = ord(c)
-            ew = _ud.east_asian_width(c)
-            total += 2 if (ew in ('W', 'F') or cp >= 0x1F000) else 1
-        return total
-
-    # ctrl jest inicjalizowany lazy — socket może nie istnieć od razu po Popen
+    # --------------------------------------------------------------------------
+    # Inicjalizacja połączenia IPC
+    # --------------------------------------------------------------------------
     _ctrl_socket = prof.ipc_path if (prof and prof.ipc_path) else None
     ctrl = MpvController(_ctrl_socket) if _ctrl_socket else None
 
+    # --------------------------------------------------------------------------
+    # Zmienne stanu odtwarzacza i interfejsu
+    # --------------------------------------------------------------------------
     paused        = True
     pos_f         = 0.0
     dur_f         = 0.0
     fps           = 0.0
     stream_info   = "📊 —"
     last_msg      = "Player mode"
-    _last_msg_t   = 0.0      # čas poslednej správy (time.time())
-    _MSG_HOLD     = 3.0      # sekundy trzymania wiadomości przed powrotem do "OK"
+    _last_msg_t   = 0.0
+    _MSG_HOLD     = 3.0
     loop_mode_local = loop_mode
     auto_fps      = 2.0
     auto_dir      = True
     auto_run      = False
     auto_accum    = 0.0
-    _paused_by_us = False
-    _first_draw    = True    # pierwsze rysowanie — pełne czyszczenie
-    _in_overlay    = False   # gdy True: _draw() jest wstrzymane (playlista, dialog)
-    zoom_mode     = False   # [N] toggle — aktywuje panel zoom/pan
-    zoom_val      = 0.0     # video-zoom: 0=1x, 1=2x, 2=4x
-    pan_x         = 0.0     # video-pan-x: 0=centrum
-    pan_y         = 0.0     # video-pan-y: 0=centrum
-    ZOOM_STEP     = 0.5     # krok zoom in/out
-    PAN_STEP      = 0.1     # krok pan
-    _bitrate_hist: list = []   # historia bitrate RTSP (Mbps), max 8 próbek — alias dla _fetch_state._br_hist
-    ab_a          = -1.0    # ab-loop start (-1 = nie ustawiony)
-    ab_b          = -1.0    # ab-loop stop  (-1 = nie ustawiony)
-    ab_active     = False   # czy ab-loop jest aktywny w mpv
-    _clipping     = False   # czy trwa ekstrakcja klipu (miga ●REC)
+    _first_draw   = True
+    _in_overlay   = False
+    zoom_mode     = False
+    zoom_val      = 0.0
+    pan_x         = 0.0
+    pan_y         = 0.0
+    ZOOM_STEP     = 0.5
+    PAN_STEP      = 0.1
+    ab_a          = -1.0
+    ab_b          = -1.0
+    ab_active     = False
+    _clipping     = False
+    ptz_active = False          # czy trwa ruch PTZ
+    ptz_progress = 0.0          # postęp ruchu (0..1)
+    ptz_direction = ""          # opcjonalnie kierunek do wyświetlenia
     is_file_cam   = (cam is not None and cam.type == CameraType.FILE)
     last_step_dir = None
     _ip    = cam.image_params if hasattr(cam, 'image_params') else {}
@@ -8128,26 +7398,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         "VOL": "volume",
     }
     PARAM_RANGE = {
-        "BRIGHTNESS": (-100, 100),
-        "CONTRAST":   (-100, 100),
-        "SATURATION": (-100, 100),
-        "GAMMA":      (-100, 100),
-        "HUE":        (-100, 100),
-        "VOL":        (0, 150),
+        "BRIGHTNESS": (-100, 100), "CONTRAST": (-100, 100),
+        "SATURATION": (-100, 100), "GAMMA":    (-100, 100),
+        "HUE":        (-100, 100), "VOL":      (0, 150),
     }
-    ICONS    = {
+    ICONS = {
         "BRIGHTNESS": "💡", "CONTRAST": "🎭", "SATURATION": "🌈",
         "GAMMA": "✨", "HUE": "🎨", "VOL": "🔊",
     }
-    JUMP_KEY = {
-    "b": "BRIGHTNESS",
-    "c": "CONTRAST",
-    "s": "SATURATION",
-    "g": "GAMMA",
-    "h": "HUE",
-    "v": "VOL",
-}
-    values   = {
+    JUMP_KEY = {"b": 0, "c": 1, "s": 2, "g": 3, "h": 4, "v": 5}
+    values = {
         "BRIGHTNESS": _ip.get("brightness", 0),
         "CONTRAST":   _ip.get("contrast",   0),
         "SATURATION": _ip.get("saturation", 0),
@@ -8160,20 +7420,18 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     AUTO_FPS_STEPS = [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0, 15.0, 24.0]
 
+    # --------------------------------------------------------------------------
+    # Funkcje pomocnicze (seek, fetch, step, pause, itd.)
+    # --------------------------------------------------------------------------
     def _seek(secs):
         nonlocal last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         ok = ctrl._send(["seek", secs, "relative"])
         last_msg = f"{'OK' if ok else 'ERR'} seek {secs:+}s"
 
     def _fetch_state():
         nonlocal pos_f, dur_f, fps, stream_info, paused, speed, last_msg, values
-        if not ctrl: return
-        if not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         p  = ctrl.get_property("time-pos")
         d  = ctrl.get_property("duration")
         fp = ctrl.get_property("container-fps")
@@ -8185,27 +7443,46 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if fp and float(fp) > 0: fps = float(fp)
         if sp is not None: speed  = float(sp)
         if vo is not None: values["VOL"] = int(vo)
-        if pa is not None and not auto_run:
-            paused = bool(pa)
+        if pa is not None and not auto_run: paused = bool(pa)
         for pp in PARAMS:
-            if pp == "VOL":
-                continue
+            if pp == "VOL": continue
             v = ctrl.get_property(PROP_MAP[pp])
             if v is not None: values[pp] = int(v)
+        # Video info (bez zmian)
         vc = ctrl.get_property("video-codec") or "—"
-        w  = ctrl.get_property("width");  h = ctrl.get_property("height")
-        ac = ctrl.get_property("audio-codec-name") or "—"
-        # Zapamiętaj rzeczywiste wymiary dla crop w _extract_clip
+        w  = ctrl.get_property("width")
+        h  = ctrl.get_property("height")
         if w and h:
             _fetch_state._vid_w = int(w)
             _fetch_state._vid_h = int(h)
-        ar = ctrl.get_property("audio-params/samplerate") or ctrl.get_property("audio-samplerate")
-        ach= ctrl.get_property("audio-channels")
+
+        # Audio info – pobierane z track-list (działa dla RTSP i plików)
+        ac = None
+        ar = None
+        ach = None
+        track_list = ctrl._send(["get_property", "track-list"])
+        if track_list and track_list.get("error") == "success":
+            for track in track_list.get("data", []):
+                if track.get("type") == "audio" and track.get("selected"):
+                    ac = track.get("codec")
+                    ar = track.get("demux-samplerate") or track.get("samplerate")
+                    ach = track.get("demux-channel-count") or track.get("channels")
+                    break
+        # fallback do starych właściwości, gdyby track-list było puste
+        if not ac:
+            ac = ctrl.get_property("audio-codec-name") or ctrl.get_property("audio-codec")
+        if not ar:
+            ar = ctrl.get_property("audio-params/samplerate") or ctrl.get_property("audio-samplerate")
+        if not ach:
+            ach = ctrl.get_property("audio-channels")
+
         vs = _codec_name(vc)
-        as_ = _codec_name(ac)
-        ws = str(int(w)) if w else "—"; hs = str(int(h)) if h else "—"
+        as_ = _codec_name(ac) if ac else "—"
+        ws = str(int(w)) if w else "—"
+        hs = str(int(h)) if h else "—"
         fps_s = f" {fps:.1f}fps" if fps else ""
         ar_s  = f" {int(ar)//1000}kHz" if ar else ""
+        # ... reszta formatowania kanałów (ach_s) jak dotychczas
         ach_real = ctrl.get_property("audio-params/channel-count")
         if ach_real:
             try:    ach_s = f" {int(ach_real)}ch"
@@ -8220,31 +7497,24 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             except: ach_s = f" {_ACH_MAP.get(str(ach), '')}"
         else:
             ach_s = ""
-        # Bitrate + sparkline (demuxer buffer fill)
-        _SPARK = " ▁▂▃▄▅▆▇█"
-        buf_s  = ctrl.get_property("demuxer-cache-duration")  # sekundy float
+        buf_s = ctrl.get_property("demuxer-cache-duration")
         _fetch_state._buf_s_last = buf_s
 
         if is_file_cam:
-            # Dla plików: bitrate z ffprobe (raz przy starcie, potem z cache)
             if not hasattr(_fetch_state, "_ffprobe_br"):
                 try:
                     fp_path = files[current_idx] if files else (cam.file_path or "")
                     if fp_path:
                         import subprocess as _sp
                         def _try_br(args):
-                            r = _sp.run(args, stdout=_sp.PIPE, stderr=_sp.PIPE,
-                                        timeout=3)
+                            r = _sp.run(args, stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=3)
                             out = (r.stdout or b"").decode("utf-8", errors="replace").strip()
-                            logger.debug(f"ffprobe {args[-2]}={args[-1][:20]} → {repr(out[:40])}")
                             for line in out.splitlines():
                                 line = line.strip()
                                 try:
                                     v = int(float(line))
-                                    if v > 0:
-                                        return v / 1_000_000
-                                except (ValueError, TypeError):
-                                    pass
+                                    if v > 0: return v / 1_000_000
+                                except: pass
                             return None
                         br = _try_br(["ffprobe", "-v", "quiet",
                                       "-show_entries", "format=bit_rate",
@@ -8254,44 +7524,26 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                                           "-select_streams", "v:0",
                                           "-show_entries", "stream=bit_rate",
                                           "-of", "default=noprint_wrappers=1:nokey=1", fp_path])
-                        logger.debug(f"ffprobe final br={br} for {os.path.basename(fp_path)}")
                         _fetch_state._ffprobe_br = br
-                except Exception as e:
-                    logger.debug(f"ffprobe exception: {e}")
+                except Exception:
                     _fetch_state._ffprobe_br = None
             br_mbps = _fetch_state._ffprobe_br
-            if br_mbps:
-                br_str = f"  \U0001f3ac {br_mbps:.1f}Mb"
-            else:
-                br_str = ""
-            br_mbps = _fetch_state._ffprobe_br
-            if br_mbps:
-                br_str = f"  \U0001f3ac {br_mbps:.1f}Mb"
-            else:
-                br_str = ""
+            br_str = f"  \U0001f3ac {br_mbps:.1f}Mb" if br_mbps else ""
         else:
-            # RTSP/V4L2: live video-bitrate z IPC + sparkline bitrate
             br_raw = ctrl.get_property("video-bitrate")
             if br_raw and float(br_raw) > 0:
                 br_mbps = float(br_raw) / 1_000_000
                 _br_hist = getattr(_fetch_state, "_br_hist", [])
                 _br_hist.append(br_mbps)
-                if len(_br_hist) > 8:
-                    _br_hist.pop(0)
+                if len(_br_hist) > 8: _br_hist.pop(0)
                 _fetch_state._br_hist = _br_hist
             else:
                 _br_hist = getattr(_fetch_state, "_br_hist", [])
-            buf_ms_str = ""
-            if buf_s is not None:
-                buf_ms_str = f" Buf:{int(float(buf_s)*1000)}ms"
+            buf_ms_str = f" Buf:{int(float(buf_s)*1000)}ms" if buf_s is not None else ""
             if _br_hist:
                 hi = max(_br_hist) or 1.0
-                spark = "".join(_SPARK[min(8, int(v / hi * 8))] for v in _br_hist)
-                # cam_mode: stream_info bez bitrate (jest w linii 🚀 poniżej)
-                if cam_mode:
-                    br_str = ""
-                else:
-                    br_str = f"  🚀 {_br_hist[-1]:.1f}Mb{buf_ms_str} {spark}"
+                spark = "".join(" ▁▂▃▄▅▆▇█"[min(8, int(v / hi * 8))] for v in _br_hist)
+                br_str = "" if cam_mode else f"  🚀 {_br_hist[-1]:.1f}Mb{buf_ms_str} {spark}"
             else:
                 br_str = ""
         stream_info = f"📊 {vs} {ws}x{hs}{fps_s}  🔊 {as_}{ar_s}{ach_s}{br_str}"
@@ -8299,18 +7551,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _frame_step(forward=True):
         nonlocal last_msg, paused, last_step_dir, auto_run
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return None
-        if not paused:
-            ctrl.set_property("pause", True); paused = True
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return None
+        if not paused: ctrl.set_property("pause", True); paused = True
         EPSILON = 0.1
         if forward and dur_f > 0 and pos_f >= dur_f - EPSILON:
-            last_msg = "⏭ end of file"; auto_run = False
-            return "eof"
+            last_msg = "⏭ end of file"; auto_run = False; return "eof"
         if not forward and pos_f <= EPSILON:
-            last_msg = "⏮ start of file"; auto_run = False
-            return None
+            last_msg = "⏮ start of file"; auto_run = False; return None
         cmd = ["frame-step"] if forward else ["frame-back-step"]
         ctrl._send(cmd); last_step_dir = forward
         last_msg = f"{'>>|' if forward else '|<<'}"
@@ -8318,279 +7565,202 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _toggle_pause():
         nonlocal paused, auto_run, last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         paused = not paused
-        ctrl.set_property("pause", paused) if ctrl else None
+        ctrl.set_property("pause", paused)
         if not paused: auto_run = False
         last_msg = "⏸ PAUSED" if paused else "▶ PLAYING"
 
     def _auto_toggle_dir():
-        nonlocal auto_dir
-        auto_dir = not auto_dir
+        nonlocal auto_dir; auto_dir = not auto_dir
         last_msg = f"dir → {'►' if auto_dir else '◄'}"
 
     def _auto_toggle_run():
         nonlocal auto_run, auto_accum
-        if not paused:
-            last_msg = "Pause first"
-            return
-        auto_run = not auto_run
-        auto_accum = 0.0
+        if not paused: last_msg = "Pause first"; return
+        auto_run = not auto_run; auto_accum = 0.0
         last_msg = "▶ RUN" if auto_run else "■ STP"
 
     def _set_val(param, delta):
         nonlocal last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         mn, mx = PARAM_RANGE.get(param, (-100, 100))
         values[param] = max(mn, min(mx, values[param] + delta))
         if param == "VOL":
-            ok = ctrl.set_property("volume", values[param]) if ctrl else False
+            ok = ctrl.set_property("volume", values[param])
         else:
-            ok = ctrl.set_property(PROP_MAP[param], values[param]) if ctrl else False
+            ok = ctrl.set_property(PROP_MAP[param], values[param])
         last_msg = f"{'OK' if ok else 'ERR'} {param}={values[param]:+d}" if param != "VOL" else f"{'OK' if ok else 'ERR'} VOL={values[param]:3d}%"
 
-    def _reset():
+    def _reset_image_settings():
         nonlocal speed, muted, last_msg, values
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         for p in PARAMS:
-            if p == "VOL":
-                values[p] = 100
-                ctrl.set_property("volume", 100) if ctrl else None
-            else:
-                values[p] = 0
-                ctrl.set_property(PROP_MAP[p], 0) if ctrl else None
-        speed = 1.0
-        ctrl.set_property("speed", 1.0) if ctrl else None
-        muted = False
-        ctrl.set_property("mute", False) if ctrl else None
-        last_msg = "Reset OK"
+            if p == "VOL": values[p] = 100; ctrl.set_property("volume", 100)
+            else:          values[p] = 0;   ctrl.set_property(PROP_MAP[p], 0)
+        # speed = 1.0; ctrl.set_property("speed", 1.0)
+        # muted = False; ctrl.set_property("mute", False)
+        last_msg = "Reset image settings OK"
+
+    def _reset_all_settings():
+        nonlocal speed, muted, last_msg, values
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
+        for p in PARAMS:
+            if p == "VOL": values[p] = 100; ctrl.set_property("volume", 100)
+            else:          values[p] = 0;   ctrl.set_property(PROP_MAP[p], 0)
+        speed = 1.0; ctrl.set_property("speed", 1.0)
+        muted = False; ctrl.set_property("mute", False)
+        last_msg = "Reset all settings (image + speed)"
 
     def _set_speed(delta):
         nonlocal speed, last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
-        if delta == 0.0:
-            speed = 1.0  # reset
-        else:
-            speed = round(max(0.1, min(10.0, speed + delta)), 2)
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
+        speed = 1.0 if delta == 0.0 else round(max(0.1, min(10.0, speed + delta)), 2)
         ctrl.set_property("speed", speed)
         last_msg = f"speed={speed:.2f}x"
 
     def _toggle_mute():
         nonlocal muted, last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         muted = not muted
-        ctrl.set_property("mute", muted) if ctrl else None
+        ctrl.set_property("mute", muted)
         last_msg = f"Mute ({'ON' if muted else 'OFF'})"
 
     def _zoom_apply():
-        """Zastosuj zoom i pan przez IPC."""
         if not ctrl: return
-        # Sprawdź przez OS żeby nie blokować IPC
         _pid = prof.pid if prof else None
         if not (_pid and ProcessManager.is_running(_pid)): return
         ctrl.set_property("video-zoom",  zoom_val)
         ctrl.set_property("video-pan-x", pan_x)
         ctrl.set_property("video-pan-y", pan_y)
 
-
     def _zoom_in():
         nonlocal zoom_val, zoom_mode, last_msg
-        zoom_mode = True
-        zoom_val  = min(zoom_val + ZOOM_STEP, 4.0)
+        zoom_mode = True; zoom_val = min(zoom_val + ZOOM_STEP, 4.0)
         _zoom_apply()
         last_msg = f"🔍 Zoom: {2.0**zoom_val:.2f}x"
 
     def _zoom_out():
         nonlocal zoom_val, zoom_mode, last_msg
         zoom_val = max(zoom_val - ZOOM_STEP, 0.0)
-        if zoom_val == 0.0:
-            zoom_mode = False
-            _zoom_reset()
-            return
+        if zoom_val == 0.0: zoom_mode = False; _zoom_reset(); return
         _zoom_apply()
         last_msg = f"🔍 Zoom: {2.0**zoom_val:.2f}x"
 
     def _zoom_zero():
-        """[0] — zeruje tylko zoom, pan zostaje."""
         nonlocal zoom_val, zoom_mode, last_msg
-        zoom_val  = 0.0
-        zoom_mode = False
+        zoom_val = 0.0; zoom_mode = False
         _zoom_apply()
         last_msg = "🔍 Zoom → 1.0x"
 
-    def _edit_zoom():
-        """Klik na wartość zoom — wpisz mnożnik np. 2.5 (1.0..16.0)."""
-        import math as _math
-        nonlocal zoom_val, zoom_mode, last_msg
-        cur_x  = f"{2.0**zoom_val:.2f}"
-        prompt = f"Zoom ({cur_x}x) [1.0..16.0]: "
-        _draw()
-        _status_prompt(prompt)
-        try:
-            with _cooked_input(fd):
-                entered = input().strip()
-            mult = max(1.0, min(16.0, float(entered)))
-            zoom_val = _math.log2(mult)
-            zoom_mode = (zoom_val > 0.0)
-            _zoom_apply()
-            last_msg = f"🔍 Zoom → {mult:.2f}x"
-        except (EOFError, KeyboardInterrupt, ValueError):
-            last_msg = "OK"
-
-    def _pan_center():
-        """■ — centruje pan, zoom zostaje."""
-        nonlocal pan_x, pan_y, last_msg
-        pan_x = 0.0
-        pan_y = 0.0
-        _zoom_apply()
-        last_msg = "🔍 Pan → center"
-
     def _zoom_reset():
-        """Pełny reset: zoom + pan + wyłącz tryb."""
         nonlocal zoom_val, pan_x, pan_y, zoom_mode, last_msg
-        zoom_val  = 0.0
-        pan_x     = 0.0
-        pan_y     = 0.0
-        zoom_mode = False
+        zoom_val = 0.0; pan_x = 0.0; pan_y = 0.0; zoom_mode = False
         _zoom_apply()
-        last_msg  = "🔍 Zoom+Pan reset"
+        last_msg = "🔍 Zoom+Pan reset"
 
     def _pan(dx, dy):
         nonlocal pan_x, pan_y, zoom_mode, zoom_val, last_msg
         if not zoom_mode:
-            # Kliknięcie krzyża bez aktywnego zoom — auto-włącz zoom
-            if zoom_val == 0.0:
-                zoom_val = ZOOM_STEP   # włącz minimalny zoom żeby pan miał sens
+            if zoom_val == 0.0: zoom_val = ZOOM_STEP
             zoom_mode = True
         pan_x = max(-0.5, min(0.5, pan_x + dx))
         pan_y = max(-0.5, min(0.5, pan_y + dy))
         _zoom_apply()
         last_msg = f"🔍 Pan x:{pan_x:+.2f} y:{pan_y:+.2f}"
 
-    def _zoom_toggle():
-        nonlocal zoom_mode, last_msg
-        if zoom_mode:
-            _zoom_reset()
-        else:
-            zoom_mode = True
-            last_msg  = "🔍 Zoom mode ON — strzałki = pan"
+    def _pan_center():
+        nonlocal pan_x, pan_y, last_msg
+        pan_x = 0.0; pan_y = 0.0
+        _zoom_apply()
+        last_msg = "🔍 Pan → center"
 
-    def _open_ptz_panel():
-        """Mini panel PTZ — strzałki kierunku + zoom dla aktywnej kamery."""
-        nonlocal last_msg, _first_draw
-        if not cam or not cam.type in (CameraType.ONVIF, CameraType.DVRIP):
-            last_msg = "⚠ PTZ niedostępne dla tej kamery"
+    def _screenshot():
+        nonlocal last_msg
+        if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
+        ok = ctrl._send(["screenshot", "video"])
+        last_msg = "📸 screenshot OK" if ok else "screenshot ERR"
+
+    def _save_image_params():
+        nonlocal last_msg
+        if not cam: last_msg = "No camera"; return
+        ip = {
+            "brightness": values["BRIGHTNESS"], "contrast":   values["CONTRAST"],
+            "saturation": values["SATURATION"], "gamma":      values["GAMMA"],
+            "hue":        values["HUE"],        "volume":     values["VOL"],
+            "mute":       muted,                "speed":      speed,
+        }
+        cam.image_params = ip
+        if config_mgr: config_mgr.save()
+        last_msg = f"💾 Saved settings for {cam.name}"
+
+    def _restore_image_settings():
+        """Load saved image parameters, speed, and mute from cam.image_params."""
+        nonlocal values, speed, muted, last_msg
+        if not cam:
+            last_msg = "No camera"
             return
+        saved = cam.image_params.copy()
+        for p in PARAMS:
+            key = p.lower() if p != "VOL" else "volume"
+            val = saved.get(key, 0 if p != "VOL" else 100)
+            values[p] = val
+            if ctrl and ctrl.is_alive():
+                if p == "VOL":
+                    ctrl.set_property("volume", val)
+                else:
+                    ctrl.set_property(PROP_MAP[p], val)
+        speed = saved.get("speed", 1.0)
+        if ctrl and ctrl.is_alive():
+            ctrl.set_property("speed", speed)
+        muted = saved.get("mute", False)
+        if ctrl and ctrl.is_alive():
+            ctrl.set_property("mute", muted)
+        last_msg = f"Loaded saved settings for {cam.name}"
 
-        # Pobierz klienta PTZ
-        try:
-            from contextlib import suppress
-            _ptz_speed = 0.3
-            _ptz_active = True
+    def _fmt_time(s):
+        s = int(s); h, m, sec = s//3600, (s%3600)//60, s%60
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
 
-            def _ptz_draw():
-                out = sys.stdout.write
-                out("\033[2J\033[H\033[?25l")
-                W2 = 57
-                def _row(s): out(f"\r{BLU}║{RST}{pad(s, W2)}{BLU}║{RST}\r\n")
-                def _sep():  out(f"\r{BLU}╠{'═'*W2}╣{RST}\r\n")
-                out(f"\r{BLU}╔{'═'*W2}╗{RST}\r\n")
-                _row(f" 🎥 PTZ: {CYN}{cam.name}{RST}  {DIM}{cam.ip}{RST}")
-                _sep()
-                _row(f"         {YLW}[↑]{RST} Góra")
-                _row(f"  {YLW}[←]{RST} Lewo   {YLW}[■]{RST} Stop   {YLW}[→]{RST} Prawo")
-                _row(f"         {YLW}[↓]{RST} Dół")
-                _sep()
-                _row(f"  {YLW}[+]{RST} Zoom IN    {YLW}[-]{RST} Zoom OUT")
-                _row(f"  Prędkość: {YLW}[<]{RST} {_ptz_speed:.1f} {YLW}[>]{RST}")
-                _sep()
-                _row(f"  {YLW}[1-9]{RST} Preset    {YLW}[S]{RST} Zapisz preset")
-                _row(f"  {YLW}[ESC/Q]{RST} Powrót do podglądu")
-                out(f"\r{BLU}╚{'═'*W2}╝{RST}\r\n")
-                out("\033[?25h")
-                sys.stdout.flush()
+    def _prog_bar(pos, dur, width=22):
+        if dur <= 0: return f"{DIM}{'─' * width}{RST}"
+        cur = max(0, min(width-1, int(pos / dur * width)))
+        a_pos = max(0, min(width-1, int(ab_a / dur * width))) if (ab_a >= 0 and dur > 0) else -1
+        b_pos = max(0, min(width-1, int(ab_b / dur * width))) if (ab_b >= 0 and dur > 0) else -1
+        bar_chars = []
+        for j in range(width):
+            if   j == a_pos and j == b_pos: bar_chars.append(f"{YLW}⌂{RST}")
+            elif j == a_pos:                bar_chars.append(f"{GRN if ab_active else YLW}A{RST}")
+            elif j == b_pos:                bar_chars.append(f"{GRN if ab_active else YLW}B{RST}")
+            elif j < cur:
+                if ab_active and a_pos >= 0 and b_pos > a_pos and a_pos < j < b_pos:
+                    bar_chars.append(f"{GRN}▓{RST}")
+                else:
+                    bar_chars.append(f"{GRN}█{RST}")
+            else:
+                if ab_active and a_pos >= 0 and b_pos > a_pos and a_pos < j < b_pos:
+                    bar_chars.append(f"{GRN}░{RST}")
+                else:
+                    bar_chars.append(f"{DIM}─{RST}")
+        return "".join(bar_chars)
 
-            _ptz_draw()
+    def bar(param, width=20):
+        val = values[param]
+        if param == "VOL":
+            filled = int(val / 150 * width)
+            col = RED if val <= 0 else (YLW if val <= 30 else (GRN if val <= 100 else RED))
+        else:
+            filled = int((val + 100) / 200 * width)
+            col = GRN if val == 0 else (BLU if val < 0 else (YLW if val < 50 else RED))
+        return f"{col}{chr(9608) * filled}{RST}{DIM}{chr(9617) * (width - filled)}{RST}"
 
-            import tty as _tty_p
-            _old_p = termios.tcgetattr(fd)
-            _tty_p.setraw(fd)
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.flush()
-
-            while _ptz_active:
-                import select as _selp
-                rl, _, _ = _selp.select([sys.stdin], [], [], 0.1)
-                if not rl:
-                    continue
-                ch = sys.stdin.read(1)
-                if ch == '\x1b':
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == 'A':   # ↑
-                            ctrl._send(["move_up",    _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                            last_msg = "PTZ ↑"
-                        elif ch3 == 'B': # ↓
-                            ctrl._send(["move_down",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                            last_msg = "PTZ ↓"
-                        elif ch3 == 'C': # →
-                            ctrl._send(["move_right", _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                            last_msg = "PTZ →"
-                        elif ch3 == 'D': # ←
-                            ctrl._send(["move_left",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                            last_msg = "PTZ ←"
-                    elif ch2 == '\x1b' or ch2 == '':
-                        _ptz_active = False
-                elif ch in ('q', 'Q', '\x1b'):
-                    _ptz_active = False
-                elif ch == ' ':  # stop
-                    ctrl._send(["stop"]) if ctrl and ctrl.is_alive() else None
-                    last_msg = "PTZ ■ stop"
-                elif ch == '+':
-                    ctrl._send(["zoom_in",  _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                    last_msg = "PTZ zoom +"
-                elif ch == '-':
-                    ctrl._send(["zoom_out", _ptz_speed]) if ctrl and ctrl.is_alive() else None
-                    last_msg = "PTZ zoom -"
-                elif ch == '<':
-                    _ptz_speed = max(0.1, round(_ptz_speed - 0.1, 1))
-                    _ptz_draw()
-                elif ch == '>':
-                    _ptz_speed = min(1.0, round(_ptz_speed + 0.1, 1))
-                    _ptz_draw()
-                elif ch in '123456789':
-                    ctrl._send(["goto_preset", int(ch)]) if ctrl and ctrl.is_alive() else None
-                    last_msg = f"PTZ preset {ch}"
-                elif ch in ('s', 'S'):
-                    last_msg = "PTZ preset saved"
-
-        except Exception as e:
-            last_msg = f"PTZ error: {e}"
-        finally:
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, _old_p)
-                sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-                sys.stdout.flush()
-            except Exception:
-                pass
-            _first_draw = True
-
+    # --------------------------------------------------------------------------
+    # AB-Loop i funkcje pomocnicze dla klipów
+    # --------------------------------------------------------------------------
     def _ab_set_a():
         nonlocal ab_a, ab_b, ab_active, last_msg
         ab_a = pos_f
         ab_active = False
-        # Wyczyść poprzedni ab-loop w mpv
         if ctrl and ctrl.is_alive():
             ctrl._send(["set_property", "ab-loop-a", "no"])
             ctrl._send(["set_property", "ab-loop-b", "no"])
@@ -8609,8 +7779,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if ctrl and ctrl.is_alive():
             ctrl._send(["set_property", "ab-loop-a", ab_a])
             ctrl._send(["set_property", "ab-loop-b", ab_b])
-            ctrl._send(["seek", ab_a, "absolute"])   # skocz do A i zacznij loop
-            ctrl._send(["set_property", "pause", False])  # upewnij że gra
+            ctrl._send(["seek", ab_a, "absolute"])
+            ctrl._send(["set_property", "pause", False])
         last_msg = f"[a] loop: {_fmt_time(ab_a)}↔{_fmt_time(ab_b)}  — [a] aby wyczyścić"
 
     def _ab_clear():
@@ -8622,7 +7792,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         last_msg = "[a] loop wyłączony"
 
     def _parse_time(s: str) -> float:
-        """Parsuje '1:23' lub '83' → sekundy float. Zwraca -1 przy błędzie."""
         s = s.strip()
         try:
             if ':' in s:
@@ -8632,6 +7801,30 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 return float(s)
         except (ValueError, IndexError):
             return -1.0
+
+    def _status_prompt(prompt: str) -> None:
+        right = f"{CYN}v{VERSION}{RST}"
+        content = f" {prompt}\033[5m█\033[0m"
+        padding = " " * max(0, W - ansilen(content) - ansilen(right) - 2)
+        sys.stdout.write(
+            f"\033[{STATUS_ROW}H\r{BLU}║{RST}{content}{padding}{right}{BLU}║{RST}"
+        )
+        prompt_vis = len(re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', f" {prompt}"))
+        sys.stdout.write(f"\033[{STATUS_ROW};{2 + prompt_vis}H")
+        sys.stdout.flush()
+
+    def _ask_time_input(prompt: str) -> float:
+        nonlocal last_msg
+        _draw()
+        _status_prompt(prompt)
+        try:
+            with _cooked_input(fd):
+                entered = input()
+            return _parse_time(entered)
+        except (EOFError, KeyboardInterrupt):
+            return -1.0
+        finally:
+            last_msg = "OK"
 
     def _ab_edit_a():
         nonlocal ab_a, ab_b, ab_active, last_msg
@@ -8666,123 +7859,35 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             ctrl._send(["set_property", "pause", False])
         last_msg = f"[A]{_fmt_time(int(ab_a))}↔[B]{_fmt_time(int(ab_b))} loop ON"
 
-    def _status_prompt(prompt: str) -> None:
-        """Zastąp linię statusu samym promptem (bez CPU/RAM/HDD)."""
-        right   = f"\033[36mv{VERSION}\033[0m"
-        content = f" {prompt}\033[5m█\033[0m"
-        padding = " " * max(0, W - ansilen(content) - ansilen(right) - 2)
-        sys.stdout.write(
-            f"\033[{STATUS_ROW}H\r{BLU}║{RST}{content}{padding}{right}{BLU}║{RST}"
-        )
-        prompt_vis = len(re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', f" {prompt}"))
-        sys.stdout.write(f"\033[{STATUS_ROW};{2 + prompt_vis}H")
-        sys.stdout.flush()
-
-    def _ask_time_input(prompt: str) -> float:
-        """Pobierz czas od użytkownika w linii statusu."""
-        nonlocal last_msg
-        _draw()
-        _status_prompt(prompt)
-        try:
-            with _cooked_input(fd):
-                entered = input()
-            return _parse_time(entered)
-        except (EOFError, KeyboardInterrupt):
-            return -1.0
-        finally:
-            last_msg = "OK"
-
-    def _ask_pan_input(prompt: str) -> float:
-        """Pobierz wartość pan (-0.50..+0.50) od użytkownika."""
-        nonlocal last_msg
-        _draw()
-        _status_prompt(prompt)
-        try:
-            with _cooked_input(fd):
-                entered = input().strip()
-            return max(-0.5, min(0.5, float(entered)))
-        except (EOFError, KeyboardInterrupt, ValueError):
-            return None
-        finally:
-            last_msg = "OK"
-
-    def _edit_pan_x():
-        nonlocal pan_x, zoom_mode, last_msg
-        val = _ask_pan_input(f"Pan x ({pan_x:+.2f}) [-0.50..+0.50]: ")
-        if val is not None:
-            pan_x = val
-            if pan_x != 0.0 or pan_y != 0.0:
-                zoom_mode = True
-            _zoom_apply()
-            last_msg = f"Pan x:{pan_x:+.2f} y:{pan_y:+.2f}"
-
-    def _edit_pan_y():
-        nonlocal pan_y, zoom_mode, last_msg
-        val = _ask_pan_input(f"Pan y ({pan_y:+.2f}) [-0.50..+0.50]: ")
-        if val is not None:
-            pan_y = val
-            if pan_x != 0.0 or pan_y != 0.0:
-                zoom_mode = True
-            _zoom_apply()
-            last_msg = f"Pan x:{pan_x:+.2f} y:{pan_y:+.2f}"
-
-    def _screenshot():
-        nonlocal last_msg
-        if not ctrl or not ctrl.is_alive():
-            last_msg = "mpv disconnected"
-            return
-        ok = ctrl._send(["screenshot", "video"]) if ctrl else None
-        last_msg = "📸 screenshot OK" if ok else "screenshot ERR"
-
     def _ask_clip_options():
-        """Dialog opcji klipu w linii statusu (styl _ask_time_input)."""
         nonlocal last_msg
         opts = {"codec": "copy", "crf": 23, "use_pan_zoom": False}
-
         def _ask_inline(prompt, history=""):
-            """Prompt w linii statusu bez CPU/RAM prefix."""
             nonlocal last_msg
-            _prev_msg = last_msg
             _status_prompt(f"{history}{prompt}")
             try:
                 with _cooked_input(fd):
                     return input()
             except (EOFError, KeyboardInterrupt):
-                last_msg = _prev_msg
                 return None
-
-
         try:
-            # Pytanie 1: Codec
             ans = _ask_inline("Codec [1=copy 2=x264 3=x265 q=cancel]: ")
             if ans is None or ans.strip().lower() == 'q':
                 last_msg = "🎬 Cancelled"
                 return None
-            if ans.strip() == "2":
-                opts["codec"] = "x264"
-            elif ans.strip() == "3":
-                opts["codec"] = "x265"
+            if ans.strip() == "2": opts["codec"] = "x264"
+            elif ans.strip() == "3": opts["codec"] = "x265"
             hist = f"Codec={opts['codec']}  "
-
-            # Pytanie 2: CRF (tylko gdy nie copy)
             if opts["codec"] != "copy":
                 ans = _ask_inline("CRF [0-51, ENTER=23]: ", hist)
-                if ans is None:
-                    return None
-                try:
-                    opts["crf"] = max(0, min(51, int(ans.strip())))
-                except ValueError:
-                    pass
+                if ans is None: return None
+                try: opts["crf"] = max(0, min(51, int(ans.strip())))
+                except ValueError: pass
                 hist += f"CRF={opts['crf']}  "
-
-            # Pytanie 3: Pan/zoom (tylko gdy aktywny)
             if zoom_mode and (zoom_val != 0.0 or pan_x != 0.0 or pan_y != 0.0):
                 ans = _ask_inline("Pan/zoom mpv? [y/N]: ", hist)
-                if ans is None:
-                    return None
+                if ans is None: return None
                 opts["use_pan_zoom"] = (ans.strip().lower() == 'y')
-                hist += f"Pan={'yes' if opts['use_pan_zoom'] else 'no'}"
-
             last_msg = f"🎬 {hist.strip()}"
         except Exception:
             last_msg = "🎬 Cancelled"
@@ -8798,7 +7903,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if not fp:
             last_msg = "🎬 No file path"
             return
-        # Zapytaj o opcje tylko gdy są filtry lub zoom
         _has_filters = any(values.get(p, 0) != 0 for p in ["BRIGHTNESS","CONTRAST","SATURATION","GAMMA","HUE"])
         _has_zoom    = zoom_mode and (zoom_val != 0.0 or pan_x != 0.0 or pan_y != 0.0)
         if _has_filters or _has_zoom:
@@ -8809,15 +7913,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 return
         else:
             opts = {"codec": "copy", "crf": 23, "use_pan_zoom": False}
-
-        # Buduj vf dla pan/zoom jeśli wybrano
         extra_vf = None
         if opts["use_pan_zoom"] and _has_zoom:
-            # Pobierz rzeczywiste wymiary z IPC (zapamiętane w _fetch_state)
             _vid_w = getattr(_fetch_state, "_vid_w", None)
             _vid_h = getattr(_fetch_state, "_vid_h", None)
             if not _vid_w or not _vid_h:
-                # Fallback: ffprobe
                 try:
                     import subprocess as _sp2
                     _r = _sp2.run(
@@ -8829,23 +7929,17 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     _wh = _r.stdout.decode().strip().split(",")
                     _vid_w, _vid_h = int(_wh[0]), int(_wh[1])
                 except Exception:
-                    _vid_w, _vid_h = 320, 240  # ostateczny fallback
-            import math as _math
+                    _vid_w, _vid_h = 320, 240
             scale = 2.0 ** zoom_val
             w_src = max(2, int(_vid_w / scale))
             h_src = max(2, int(_vid_h / scale))
-            # Offset: pan_x/pan_y są w zakresie -0.5..+0.5 (procent szerokości)
             x_off = int((_vid_w - w_src) / 2 + pan_x * _vid_w)
             y_off = int((_vid_h - h_src) / 2 + pan_y * _vid_h)
-            # Clamp żeby crop nie wychodził poza obraz
             x_off = max(0, min(_vid_w - w_src, x_off))
             y_off = max(0, min(_vid_h - h_src, y_off))
             extra_vf = f"crop={w_src}:{h_src}:{x_off}:{y_off},scale={_vid_w}:{_vid_h}"
-            logger.info(f"crop: {_vid_w}x{_vid_h} → crop={w_src}:{h_src}:{x_off}:{y_off} zoom={scale:.2f}x pan={pan_x:+.2f}/{pan_y:+.2f}")
-
         codec_map = {"copy": None, "x264": "libx264", "x265": "libx265"}
         vcodec = codec_map.get(opts["codec"])
-
         ok = _extract_clip(
             fp, ab_a, ab_b,
             brightness=values.get("BRIGHTNESS", 0),
@@ -8861,16 +7955,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _clipping = True
             codec_tag = f" [{opts['codec']}]" if opts["codec"] != "copy" else ""
             last_msg = f"🎬{codec_tag} {_fmt_time(ab_a)}–{_fmt_time(ab_b)} → clip_{int(ab_a)}_{int(ab_b)}.mp4"
-            # Wątek monitorujący ffmpeg — resetuje _clipping gdy zakończy
-            import threading as _thr
             def _monitor_clip():
                 nonlocal _clipping, last_msg
-                import time as _t3
                 clip_log = f"{fp}_clip_{int(ab_a)}_{int(ab_b)}.mp4.ffmpeg.log"
-                # Czekaj aż log przestanie rosnąć (ffmpeg zakończył)
                 prev_size = -1
-                for _ in range(120):  # max 60s
-                    _t3.sleep(0.5)
+                for _ in range(120):
+                    _time.sleep(0.5)
                     try:
                         cur_size = os.path.getsize(clip_log)
                         if cur_size == prev_size and cur_size > 0:
@@ -8880,114 +7970,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         break
                 _clipping = False
                 last_msg = f"🎬 Gotowe: clip_{int(ab_a)}_{int(ab_b)}.mp4"
-                logger.info("_monitor_clip: ffmpeg finished, _clipping=False")
             _thr.Thread(target=_monitor_clip, daemon=True).start()
         else:
             last_msg = "🎬 Clip extraction failed"
-
-    def _save_image_params():
-        nonlocal last_msg
-        if not cam:
-            last_msg = "No camera"
-            return
-
-        ip = {
-            "brightness": values["BRIGHTNESS"],
-            "contrast":   values["CONTRAST"],
-            "saturation": values["SATURATION"],
-            "gamma":      values["GAMMA"],
-            "hue":        values["HUE"],
-            "volume":     values["VOL"],
-            "mute":       muted,
-            "speed":      speed,
-        }
-
-        import select as _sel
-
-        # 1. Wyłącz mysz + wyczerpaj bufor (odrzuć kliknięcie które wywołało tę funkcję)
-        sys.stdout.write('[?1000l[?1002l[?1006l')
-        sys.stdout.flush()
-        import time as _t; _t.sleep(0.05)
-        while _sel.select([sys.stdin], [], [], 0.0)[0]:
-            sys.stdin.read(1)
-
-        # 2. Pokaż pytanie w last_msg barze
-        #    Pozycje: [F]=19-21  [D]=35-37  [ESC]=54-58  (row=17 w player screen)
-        last_msg = f"💾 Save for: {YLW}[F]{RST} this file   {YLW}[D]{RST} default sets   {YLW}[ESC]{RST} cancel"
-        _draw()
-
-        # 3. Włącz pełną mysz (kliknięcia + ruch, SGR)
-        sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-        sys.stdout.flush()
-
-        def _commit(mode):
-            nonlocal last_msg
-            if mode == 'F':
-                cam.image_params = ip
-                if config_mgr:
-                    cfg = config_mgr.config
-                    existing = next(
-                        (c for c in cfg.cameras
-                         if c.type == CameraType.FILE and c.file_path == cam.file_path),
-                        None
-                    )
-                    if existing:
-                        existing.image_params = ip
-                    else:
-                        cfg.cameras.append(cam)
-                    config_mgr.save()
-                last_msg = f"💾 Saved for: {os.path.basename(cam.file_path or '')}"
-            elif mode == 'D':
-                Camera.DEFAULT_IMAGE_PARAMS = ip.copy()
-                if config_mgr:
-                    config_mgr.config.default_image_params = ip.copy()
-                    config_mgr.save()
-                last_msg = "💾 Saved as default (all new files)"
-            else:
-                last_msg = "Save cancelled"
-
-        choice = None
-        while choice is None:
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                ch2 = sys.stdin.read(1)
-                if ch2 != '[':
-                    choice = 'ESC'   # bare ESC
-                    continue
-                # ESC sequence — czytaj do litery
-                buf = ''
-                while True:
-                    c3 = sys.stdin.read(1)
-                    buf += c3
-                    if c3.isalpha(): break
-                if c3 in ('M', 'm'):  # SGR mouse: \033[<btn;col;rowM/m
-                    try:
-                        raw = buf[:-1].lstrip('<')  # odciąć '<' z SGR format
-                        parts = raw.split(';')
-                        btn_n = int(parts[0])
-                        m_col = int(parts[1])
-                        release = (c3 == 'm')
-                        if not release and btn_n < 32:  # btn>=32 = ruch myszy
-                            if   19 <= m_col <= 21: choice = 'F'
-                            elif 35 <= m_col <= 37: choice = 'D'
-                            elif 54 <= m_col <= 58: choice = 'ESC'
-                    except (ValueError, IndexError):
-                        pass
-                # inne escape — ignoruj
-            elif ch in ('f', 'F'): choice = 'F'
-            elif ch in ('d', 'D'): choice = 'D'
-            elif ch in ('q', 'Q', '\r'): choice = 'ESC'
-
-        # 4. Wyłącz mysz, wyczerpaj bufor, przywróć pełną mysz (ruch + klik)
-        sys.stdout.write('[?1000l[?1006l')
-        sys.stdout.flush()
-        _t.sleep(0.05)
-        while _sel.select([sys.stdin], [], [], 0.0)[0]:
-            sys.stdin.read(1)
-        sys.stdout.write('[?1000h[?1002h[?1006h')
-        sys.stdout.flush()
-
-        _commit(choice)
 
     def _auto_fps_change(delta):
         nonlocal auto_fps, last_msg
@@ -8997,201 +7982,283 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         auto_fps = AUTO_FPS_STEPS[aidx]
         last_msg = f"auto fps → {auto_fps:.1f}"
 
-    def _fmt_time(s):
-        s = int(s); h, m, sec = s//3600, (s%3600)//60, s%60
-        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+    def _ask_save_name():
+        name_default = os.path.splitext(os.path.basename(files[current_idx]))[0]
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            out(f"\033[2J\033[H {YLW}Camera name [{name_default}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            name = entered.strip() if entered.strip() else name_default
+            return name
+        finally:
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
 
-    def _prog_bar(pos, dur, width=22):
-        if dur <= 0: return f"{DIM}{'─' * width}{RST}"
-        cur   = max(0, min(width-1, int(pos / dur * width)))
-        a_pos = max(0, min(width-1, int(ab_a / dur * width))) if (ab_a >= 0 and dur > 0) else -1
-        b_pos = max(0, min(width-1, int(ab_b / dur * width))) if (ab_b >= 0 and dur > 0) else -1
-        bar_chars = []
-        for j in range(width):
-            if   j == a_pos and j == b_pos: bar_chars.append(f"{YLW}⌂{RST}")
-            elif j == a_pos:                bar_chars.append(f"{GRN if ab_active else YLW}A{RST}")
-            elif j == b_pos:                bar_chars.append(f"{GRN if ab_active else YLW}B{RST}")
-            elif j < cur:
-                if ab_active and a_pos >= 0 and b_pos > a_pos and a_pos < j < b_pos:
-                    bar_chars.append(f"{GRN}▓{RST}")
-                else:
-                    bar_chars.append(f"{GRN}█{RST}")
-            else:
-                if ab_active and a_pos >= 0 and b_pos > a_pos and a_pos < j < b_pos:
-                    bar_chars.append(f"{GRN}░{RST}")
-                else:
-                    bar_chars.append(f"{DIM}─{RST}")
-        return "".join(bar_chars)
+    def _ask_duration_input():
+        """Prompt user to enter new duration (0.1 .. 5.0)."""
+        nonlocal last_msg
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        # Wyłącz śledzenie myszy przed wejściem w cooked
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        # Opróżnij bufor wejściowy – usuń zalegające zdarzenia myszy/klawiszy
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            sys.stdout.write(f"\033[2J\033[H {YLW}New duration (0.1-5.0s) [{cam.duration:.1f}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            if entered.strip():
+                val = float(entered.strip())
+                return max(0.1, min(5.0, val))
+        except (ValueError, EOFError):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+        return None
 
+    def _ask_speed_input():
+        """Prompt user to enter new PTZ speed (0.1 .. 1.0)."""
+        nonlocal last_msg
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            sys.stdout.write(f"\033[2J\033[H {YLW}New PTZ speed (0.1-1.0) [{cam.speed:.1f}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            if entered.strip():
+                val = float(entered.strip())
+                return max(0.1, min(1.0, val))
+        except (ValueError, EOFError):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+        return None
 
-    def bar(param, width=20):
-        val = values[param]
-        if param == "VOL":
-            filled = int(val / 150 * width)
-            if val <= 0:   col = RED
-            elif val <= 30: col = YLW
-            elif val <= 100: col = GRN
-            else: col = RED
-        else:
-            filled = int((val + 100) / 200 * width)
-            if val == 0:    col = GRN
-            elif val < 0:   col = BLU
-            elif val < 50:  col = YLW
-            else:           col = RED
-        return f"{col}{chr(9608) * filled}{RST}{DIM}{chr(9617) * (width - filled)}{RST}"
+    def _edit_pan_x():
+        nonlocal pan_x, last_msg
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            sys.stdout.write(f"\033[2J\033[H {YLW}New pan X (-0.5..0.5) [{pan_x:+.2f}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            if entered.strip():
+                val = float(entered.strip())
+                pan_x = max(-0.5, min(0.5, val))
+                _zoom_apply()
+                last_msg = f"Pan X set to {pan_x:+.2f}"
+        except (ValueError, EOFError):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
 
-    # Minimalna wysokość i szerokość ramki TUI
-    # Ramka: ║ + 78 znaków treści + ║ = 80 kolumn; 19 linii ramki + ╚ = 20 wierszy
-    MIN_H = 20
-    MIN_W = 80
+    def _edit_pan_y():
+        nonlocal pan_y, last_msg
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            sys.stdout.write(f"\033[2J\033[H {YLW}New pan Y (-0.5..0.5) [{pan_y:+.2f}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            if entered.strip():
+                val = float(entered.strip())
+                pan_y = max(-0.5, min(0.5, val))
+                _zoom_apply()
+                last_msg = f"Pan Y set to {pan_y:+.2f}"
+        except (ValueError, EOFError):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
 
+    def _edit_zoom():
+        nonlocal zoom_val, last_msg
+        old = termios.tcgetattr(fd)
+        cooked = termios.tcgetattr(fd)
+        cooked[3] |= termios.ECHO | termios.ICANON
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except Exception:
+            pass
+        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+        try:
+            sys.stdout.write(f"\033[2J\033[H {YLW}New zoom level (0.0..4.0) [{zoom_val:.1f}]: {RST}")
+            sys.stdout.flush()
+            entered = input()
+            if entered.strip():
+                val = float(entered.strip())
+                zoom_val = max(0.0, min(4.0, val))
+                _zoom_apply()
+                last_msg = f"Zoom set to {2.0**zoom_val:.2f}x"
+        except (ValueError, EOFError):
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+    # --------------------------------------------------------------------------
+    # Główna funkcja rysująca
+    # --------------------------------------------------------------------------
     def _draw():
-        if _in_overlay:
-            return          # playlista / dialog ma ekran — nie nadpisuj
+        ...
+
+    # --------------------------------------------------------------------------
+    # Główna funkcja rysująca
+    # --------------------------------------------------------------------------
+    def _draw():
+        if _in_overlay: return
         _buf = []
         def _w(s): _buf.append(s)
 
         nonlocal _first_draw, last_msg, _last_msg_t
 
-        # Sprawdź rozmiar terminala
         _tw, _th = _term_size()
         if _th < MIN_H or _tw < MIN_W:
             _w("\033[2J\033[H\033[?25l")
             _w(f"\r{YLW}⚠ Terminal za mały: {_tw}x{_th}  (min {MIN_W}x{MIN_H}){RST}\033[K\r\n")
             _w(f"\r{DIM}Powiększ okno terminala{RST}\033[K\r\n")
-            sys.stdout.write("".join(_buf))
-            sys.stdout.flush()
+            sys.stdout.write("".join(_buf)); sys.stdout.flush()
             return
-        _w("\033[?25l")          # ukryj kursor
-        if _first_draw:
-            _w("\033[2J\033[H")  # pierwsze — pełne czyszczenie
-            _first_draw = False
-        else:
-            _w("\033[H")         # następne — tylko powrót
-        _w(f"\r{BLU}╔{chr(9552)*W}╗{RST}\033[K\r\n")
+
+        _w("\033[?25l")
+        if _first_draw: _w("\033[2J\033[H"); _first_draw = False
+        else: _w("\033[H")
+        _w(f"\r{BLU}╔{'═'*W}╗{RST}\033[K\r\n")
 
         def row(content):
             _w(f"\r{BLU}║{RST}{pad(content, W)}{BLU}║{RST}\033[K\r\n")
         def sep():
-            _w(f"\r{BLU}╠{chr(9552)*W}╣{RST}\033[K\r\n")
-        if cam_mode:
-            name = files[current_idx].name
-        else:
-            name = os.path.basename(files[current_idx])
-        nav_prev = f"{YLW}[◄,]{RST}"
-        nav_next = f"{YLW}[.►]{RST}"
-        idx_str  = f"{current_idx+1}/{len(files)}"
-        idx_pad  = f"{idx_str:>5}"
-        nav_idx  = f"{DIM}{idx_pad}{RST}"
+            _w(f"\r{BLU}╠{'═'*W}╣{RST}\033[K\r\n")
 
-# --- NAJPROSTSZE: STAŁA SZEROKOŚĆ LEWEJ CZĘŚCI ---
-
+        # --- Nagłówek ---------------------------------------------------------
         if cam_mode:
             cur_cam = (all_cameras or files)[current_idx]
             cam_name = getattr(cur_cam, 'name', str(files[current_idx]))
             cam_ip = getattr(cur_cam, 'ip', '')
             fname = f"{cam_name} [{cam_ip}]"
             loop_char = "🔁" if loop_mode_local else "⏹ "
-
-            # LEWA CZĘŚĆ - zawsze 15 znaków (dostosuj raz)
+            nav_prev = f"{YLW}[◄,]{RST}"
+            nav_next = f"{YLW}[.►]{RST}"
+            idx_str  = f"{current_idx+1}/{len(files)}"
             lewa_czesc = f" 🎥 {nav_prev} {idx_str}".ljust(15)
-
-            if len(fname) > 36:
-                fname = fname[:33] + "..."
+            if len(fname) > 36: fname = fname[:33] + "..."
             row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}T{YLW}[Z]{RST} {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
-
         else:
             fname = os.path.basename(files[current_idx])
             loop_char = "🔁" if loop_mode_local else "⏹ "
-
+            nav_prev = f"{YLW}[◄,]{RST}"
+            nav_next = f"{YLW}[.►]{RST}"
+            idx_str  = f"{current_idx+1}/{len(files)}"
             lewa_czesc = f" 🎬 {nav_prev} {idx_str}".ljust(15)
-
-            if len(fname) > 36:
-                fname = fname[:33] + "..."
+            if len(fname) > 36: fname = fname[:33] + "..."
             row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}list {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
 
         row(f" {stream_info}")
         sep()
 
-        pb      = _prog_bar(pos_f, dur_f, width=22)
-        ts      = f"{_fmt_time(pos_f)} / {_fmt_time(dur_f)}"
+        # --- Pasek postępu / AB-loop ------------------------------------------
+        pb = _prog_bar(pos_f, dur_f, width=22)
+        ts = f"{_fmt_time(pos_f)} / {_fmt_time(dur_f)}"
         fps_tag = f"  {DIM}{fps:.0f}fps{RST}" if fps > 0 else ""
-
-        _L = 48; _R = 29
-        import time as _t2
-        _blink = int(_t2.time() * 2) % 2  # 0/1 co 0.5s
-
-        # AB loop — 3 fazy, prawa strona L1
+        _L, _R = 48, 29
+        _blink = int(_time.time() * 2) % 2
         _A_fix   = f"{YLW}[A]{RST}"
         _A_blink = f"{YLW}[A]{RST}" if _blink else f"{DIM}[A]{RST}"
         if ab_active:
             ab_right = f" Loop {_A_fix}{RED}{_fmt_time(ab_a)}{RST}↔{GRN}[B]{RST}{RED}{_fmt_time(ab_b)}{RST}"
         elif ab_a >= 0 and ab_b < 0:
-            # Faza 2: pierwszy [A]+czas stały (ustawiony), drugi [A] miga (czeka)
             ab_right = f" Set {DIM}[A]{RST}{YLW}{_fmt_time(ab_a)}{RST}─{_A_blink}{DIM}···{RST} end"
         else:
             ab_right = f" Set {_A_fix}{DIM}···{RST} loop start"
-
         l1_left = f" ⏱ {pb} {ts}{fps_tag}"
         row(f"{pad(l1_left, _L)}{BLU}║{RST}{pad(ab_right, _R)}")
 
-        # === LINIA BITRATE ===
+        # --- Bitrate / REC ----------------------------------------------------
         _SPARK16 = " ▁▂▃▄▅▆▇█"
         _br_hist_draw = getattr(_fetch_state, "_br_hist", []) if not is_file_cam else []
-        _br_file      = getattr(_fetch_state, "_ffprobe_br", None) if is_file_cam else None
+        _br_file = getattr(_fetch_state, "_ffprobe_br", None) if is_file_cam else None
         if is_file_cam and _br_file:
-            br_val  = _br_file
-            spark16 = "─" * 16
+            br_val, spark16 = _br_file, "─" * 16
         elif _br_hist_draw:
-            br_val  = _br_hist_draw[-1]
-            hi      = max(_br_hist_draw) or 1.0
+            br_val = _br_hist_draw[-1]
+            hi = max(_br_hist_draw) or 1.0
             spark16 = "".join(_SPARK16[min(8, int(v/hi*8))] for v in _br_hist_draw[-16:]).ljust(16)
         else:
-            br_val  = 0.0
-            spark16 = " " * 16
-        buf_ms  = int(float(getattr(_fetch_state, "_buf_s_last", 0) or 0) * 1000)
+            br_val, spark16 = 0.0, " " * 16
+        buf_ms = int(float(getattr(_fetch_state, "_buf_s_last", 0) or 0) * 1000)
         buf_str = f" Buf:{buf_ms}ms" if buf_ms > 0 else ""
-
-        # REC indicator — prawa strona L2
         if _clipping:
-            # Miga czerwony/żółty — ffmpeg pracuje
             _R_col = RED if _blink else YLW
-            rec_dot = f"{_R_col}●{RST}"
-            _RR = f"{_R_col}[R]{RST}"
+            rec_dot = f"{_R_col}●{RST}"; _RR = f"{_R_col}[R]{RST}"
         elif ab_active:
-            # AB gotowe — zielony, gotowy do nagrania
-            rec_dot = f"{GRN}●{RST}"
-            _RR = f"{GRN}[R]{RST}"
+            rec_dot = f"{GRN}●{RST}"; _RR = f"{GRN}[R]{RST}"
         else:
-            # Brak AB — szary
-            rec_dot = f"{DIM}○{RST}"
-            _RR = f"{DIM}[R]{RST}"
-
-        if ab_active:
-            rec_right = f" {rec_dot} {_RR}EC / {YLW}Clear[A]{RST} Loop"
-        else:
-            rec_right = f" {rec_dot} {_RR}EC"
-
+            rec_dot = f"{DIM}○{RST}"; _RR = f"{DIM}[R]{RST}"
+        rec_right = f" {rec_dot} {_RR}EC / {YLW}Clear[A]{RST} Loop" if ab_active else f" {rec_dot} {_RR}EC"
         l2_left = f" 🚀 {br_val:.1f}Mb [{DIM}{spark16}{RST}]{buf_str}"
         row(f"{pad(l2_left, _L)}{BLU}║{RST}{pad(rec_right, _R)}")
 
+        # --- Kontrolki play/pause ---------------------------------------------
         if paused:
-            if auto_dir:
-                dir_indicator = f"◄|{GRN}►{RST}"
-            else:
-                dir_indicator = f"{RED}◄{RST}|►"
-
+            dir_indicator = f"◄|{GRN}►{RST}" if auto_dir else f"{RED}◄{RST}|►"
             if auto_run:
-                run_indicator = f"{RED}■ STP{RST}"
-                pause_icon    = f"{RED}⏸{RST}"
-                # [r] miga gdy auto_run aktywny
-                _r_col = RED if _blink else YLW
-                _r_btn = f"{_r_col}[r]{RST}"
+                run_indicator = f"{RED}■ STP{RST}"; pause_icon = f"{RED}⏸{RST}"
+                _r_btn = f"{RED if _blink else YLW}[r]{RST}"
             else:
-                run_indicator = f"{GRN}▶ RUN{RST}"
-                pause_icon    = f"{GRN}⏯{RST}"
+                run_indicator = f"{GRN}▶ RUN{RST}"; pause_icon = f"{GRN}⏯{RST}"
                 _r_btn = f"{DIM}[r]{RST}"
-
             row(f" {pause_icon} {YLW}[SPACE]{RST} {YLW}[ ←[]→ ]{RST} ║ FRAME MODE: {YLW}[D]{RST} {dir_indicator} ║ {_r_btn} {run_indicator} ║ Pg {YLW}[↑]{RST}{YLW}[↓]{RST} {auto_fps:.1f}fps")
         else:
             sp_col = GRN if speed == 1.0 else YLW
@@ -9199,88 +8266,105 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
         sep()
 
-        # Linia Select - małe 's' dla Saturation
-        row(f" 🔧  Select: {YLW}[↑]{RST} {YLW}[↓]{RST} "
-            f"{YLW}[B]{RST} {YLW}[C]{RST} {YLW}[S]{RST} {YLW}[G]{RST} {YLW}[H]{RST} {YLW}[V]{RST}  "
-            f"Adjust {YLW}[←]{RST} {YLW}[→]{RST}  "
-            f"Step {YLW}[<]{RST} {YLW}[>]{RST} {step}")
+        # --- Linia Select / Reset Progress ------------------------------------
+        if ptz_active:
+            # animowany pasek postępu PTZ
+            bar_len = 10
+            filled = int(ptz_progress * bar_len)
+            ptz_bar = f"{GRN}{'█' * filled}{DIM}{'─' * (bar_len - filled)}{RST}"
+            row(f" 🔧 Select: {YLW}[B]{RST} {YLW}[C]{RST} {YLW}[S]{RST} {YLW}[G]{RST} {YLW}[H]{RST} {YLW}[V]{RST}    {YLW}[0]{RST} PTZ active: [{ptz_bar}]")
+        else:
+            row(f" 🔧 Select: {YLW}[B]{RST} {YLW}[C]{RST} {YLW}[S]{RST} {YLW}[G]{RST} {YLW}[H]{RST} {YLW}[V]{RST}    {YLW}[0]{RST} Reset Progress: [----------]")
 
-        # Panel zoom — czysty krzyż, kontrolki w r2 po separatorze │
-        # r1: ▲  │  Pan: x y
-        # r2: ◄■► │ [Z🎥/📺][0🔍] [+][-] val
-        # r3: ▼  │
-        zx_str   = f"{2.0**zoom_val:.1f}x"
-        Z        = YLW if zoom_mode else DIM
-        BC       = RED if zoom_mode else DIM
-        up       = f"{YLW}▲{RST}" if zoom_mode else f"{DIM}·{RST}"
-        dn       = f"{YLW}▼{RST}" if zoom_mode else f"{DIM}·{RST}"
-        lt       = f"{YLW}◄{RST}" if zoom_mode else f"{DIM}·{RST}"
-        rt       = f"{YLW}►{RST}" if zoom_mode else f"{DIM}·{RST}"
-        ctr      = f"{YLW}■{RST}" if (zoom_mode and (pan_x!=0.0 or pan_y!=0.0)) else (f"{DIM}■{RST}" if zoom_mode else f"{DIM}·{RST}")
-        cam_icon = f"{GRN}📺{RST}" if zoom_mode else f"{DIM}🎥{RST}"
-        zoom_lbl = f"{RED}{zx_str}{RST}" if zoom_val != 0.0 else f"{DIM}{zx_str}{RST}"
-        px_col   = RED if pan_x != 0.0 else DIM
-        py_col   = RED if pan_y != 0.0 else DIM
-        pan_str  = f"{DIM}x:{RST}{px_col}{pan_x:+.2f}{RST} {DIM}y:{RST}{py_col}{pan_y:+.2f}{RST}"
-        Z_btn    = f"{Z}[Z{RST}{cam_icon}{Z}]{RST}"
-        R_btn    = f"{Z}[0🔍]{RST}"
-        plus_btn = f"{Z}[+]{RST}"
-        minus_btn= f"{Z}[-]{RST}"
+        # ----------------------------------------------------------------------
+        # Panel prawy – zgodny z projektem (SELECT / PAN / PTZ)– prosty, linia po linii (zgodny z projektem)
+        # ----------------------------------------------------------------------
 
-        def _ppad(content, w=33):
-            diff = w - ansilen(content)
-            return content + " " * max(0, diff)
+        if cam_mode:
+            active_mode = ui_mode
+        else:
+            active_mode = ui_mode_file
 
-        p_top = f"{BC}┌─────────────────────────────────┐{RST}"
-        _r1c  = f"   {up}   {BC}│{RST} Pan: {pan_str}"
-        _r2c  = f" {lt} {ctr} {rt} {BC}│{RST} {Z_btn}{R_btn} {plus_btn}{minus_btn} {zoom_lbl}"
-        _r3c  = f"   {dn}   {BC}│{RST}"
-        p_r1  = f"{BC}│{RST}{_ppad(_r1c)}{BC}│{RST}"
-        p_r2  = f"{BC}│{RST}{_ppad(_r2c)}{BC}│{RST}"
-        p_r3  = f"{BC}│{RST}{_ppad(_r3c)}{BC}│{RST}"
-        p_bot = f"{BC}└─────────────────────────────────┘{RST}"
+        # Budowa nagłówka z ikonami trybów
+        header_parts = []
+        for mode_name, icon in [("SELECT", "📊"), ("PAN", "📺"), ("PTZ", "🎥")]:
+            if mode_name == "PTZ" and not cam_mode:
+                continue
+            if mode_name == active_mode:
+                header_parts.append(f"{RED}[Z{icon}]{RST}")
+            else:
+                header_parts.append(f"{DIM}[Z{icon}]{RST}")
+        header_str = "".join(header_parts)
 
+        # Definicje linii panelu dla każdego trybu
+        if active_mode == "SELECT":
+            border_color = DIM
+            # Wybór prawej części: 11 kresek dla trybu plików, 7 dla trybu kamer
+            right_dashes = "────────────" if not cam_mode else "───────"
+            line1 = f"{border_color}┌───────────{RST}{header_str}{border_color}{right_dashes}┐{RST}"
+            line2 = f"{border_color}│{RST}   {DIM}▲{RST}   {border_color}│{RST} {YLW}Z📊{RST}{DIM}[0🔍]{RST}   {YLW}[↑]{RST}{YLW}[↓]{RST}       {border_color}│{RST}"
+            line3 = f"{border_color}│{RST} {DIM}◄{RST} {DIM}■{RST} {DIM}►{RST} {border_color}│{RST} Adjust     {YLW}[←]{RST}{YLW}[→]{RST}       {border_color}│{RST}"
+            line4 = f"{border_color}│{RST}   {DIM}▼{RST}   {border_color}│{RST} Step       {YLW}[<]{RST}{YLW}[>]{RST} {step:<2}    {border_color}│{RST}"
+            line5 = f"{border_color}└─[1-9]───[ F4 Recall F5 Save ]───┘{RST}"
+        elif active_mode == "PAN":
+            border_color = YLW
+            if zoom_val == 0.0:
+               zoom_str = f"{DIM}{2.0**zoom_val:.1f}x{RST}"
+            else:
+                zoom_str = f"{RED}{2.0**zoom_val:.1f}x{RST}"
+            pan_x_col = RED if pan_x != 0 else DIM
+            pan_y_col = RED if pan_y != 0 else DIM
+            pan_str = f"{pan_x_col}x:{pan_x:+.2f}{RST} {pan_y_col}y:{pan_y:+.2f}{RST}"
+            right_dashes = "────────────" if not cam_mode else "───────"
+            line1 = f"{border_color}┌───────────{RST}{header_str}{border_color}{right_dashes}┐{RST}"
+            line2 = f"{border_color}│{RST}   {YLW}▲{RST}   {border_color}│{RST} {YLW}Z📺{RST}{DIM}[0🔍]{RST} {YLW}[+]{RST}{YLW}[-]{RST}    {zoom_str} {border_color}│{RST}"
+            line3 = f"{border_color}│{RST} {YLW}◄{RST} {YLW}■{RST} {YLW}►{RST} {border_color}│{RST} Pan: {pan_str}    {border_color}│{RST}"
+            line4 = f"{border_color}│{RST}   {YLW}▼{RST}   {border_color}│{RST}                         {border_color}│{RST}"
+            line5 = f"{border_color}└─[1-9]───[ F4 Recall F5 Save ]───┘{RST}"
+        elif active_mode == "PTZ":
+            border_color = GRN
+            zoom_str = f"{GRN}{2.0**zoom_val:.1f}x{RST}"
+            dur_str = f"{GRN}{cam.duration:.1f}s{RST}" if cam else f"{GRN}0.4s{RST}"
+            speed_str = f"{GRN}{cam.speed:.1f}{RST}" if cam else f"{GRN}0.5{RST}"
+            line1 = f"{border_color}┌───────────{RST}{header_str}{border_color}───────┐{RST}"
+            line2 = f"{border_color}│{RST}   {GRN}▲{RST}   {border_color}│{RST} {YLW}Z🎥{RST}{DIM}[0🔍]{RST} {YLW}[+]{RST}{YLW}[-]{RST}   {zoom_str}  {border_color}│{RST}"
+            line3 = f"{border_color}│{RST} {GRN}◄{RST} {GRN}■{RST} {GRN}►{RST} {border_color}│{RST} {YLW}(m/l){RST} Dur:        {dur_str}  {border_color}│{RST}"
+            line4 = f"{border_color}│{RST}   {GRN}▼{RST}   {border_color}│{RST} {YLW}(s/f){RST} Speed:      {speed_str}   {border_color}│{RST}"
+            line5 = f"{border_color}└─[1-9]───[ F4 Recall F5 Save ]───┘{RST}"
+        else:
+            line1 = line2 = line3 = line4 = line5 = ""
+
+        panel_parts = [line1, line2, line3, line4, line5]
+
+        # Rysowanie parametrów z doklejonym panelem
         for i, p in enumerate(PARAMS):
             cursor = f"{YLW}►{RST}" if i == sel else " "
-
+            b = bar(p)
             if p == "VOL":
                 vstr = f"{GRN if values[p]==100 else YLW} {values[p]:3d}%{RST}"
-                padding = " " * 1
                 mute_color = RED if muted else YLW
                 mute_status = f"  {YLW}[{mute_color}M{RST}{YLW}]{RST} {mute_color}Mute ({'ON' if muted else 'OFF'}){RST}"
-                row(f" {cursor}{ICONS[p]}{MAG}{p:<11}{RST} {bar(p)}{padding}{vstr}{mute_status}")
+                row(f" {cursor}{ICONS[p]}{MAG}{p:<11}{RST} {b} {vstr}{mute_status}")
             else:
                 vstr = f"{GRN if values[p]==0 else YLW}{values[p]:+4d}%{RST}"
-                # Sklejamy param z panelem zoom dla wierszy BRIGHTNESS–HUE (i=0..4)
-                if   i == 0: panel_part = p_top
-                elif i == 1: panel_part = p_r1
-                elif i == 2: panel_part = p_r2
-                elif i == 3: panel_part = p_r3
-                elif i == 4: panel_part = p_bot
-                else:        panel_part = ""
-                row(f" {cursor}{ICONS[p]}{MAG}{p:<11}{RST} {bar(p)} {vstr} {panel_part}")
+                prefix = f" {cursor}{ICONS[p]}{MAG}{p:<11}{RST} {b} {vstr} "
+                panel_part = panel_parts[i] if i < len(panel_parts) else ""
+                full_line = prefix + panel_part
+                padding = (W - 2) - ansilen(full_line)
+                row(full_line + " " * max(0, padding))
 
         sep()
+        row(f" {YLW}[,]{RST} Prev  {YLW}[.]{RST} Next  {YLW}[T]{RST} Screenshot  {YLW}[x/X]{RST}💾 Restore/Store Set  {YLW}[Q]{RST} Quit")
 
-        # Dolna linia
-        row(f" {YLW}[,]{RST} Prev  {YLW}[.]{RST} Next  "
-            f"{YLW}[N]{RST} Reset  {YLW}[T]{RST} Screenshot  "
-            f"{YLW}[X]{RST}💾 Store set  "
-            f"{YLW}[Q]{RST} Quit")
-
-        import time as _tm
-        # Timer wiadomości — po _MSG_HOLD s wróć do "OK"
+        # --- Linia statusu ----------------------------------------------------
         if last_msg not in ("OK", "Player mode", "mpv stopped", "mpv disconnected"):
-            if _last_msg_t == 0.0:
-                _last_msg_t = _tm.time()
-            elif _tm.time() - _last_msg_t > _MSG_HOLD:
-                last_msg = "OK"
-                _last_msg_t = 0.0
+            if _last_msg_t == 0.0: _last_msg_t = _time.time()
+            elif _time.time() - _last_msg_t > _MSG_HOLD: last_msg = "OK"; _last_msg_t = 0.0
         else:
             _last_msg_t = 0.0
 
-        msg_col  = GRN if "OK" in last_msg else (RED if ("ERR" in last_msg or "stop" in last_msg or "fail" in last_msg.lower()) else DIM)
-        cpu      = get_cpu_usage()
+        msg_col = GRN if "OK" in last_msg else (RED if ("ERR" in last_msg or "stop" in last_msg or "fail" in last_msg.lower()) else DIM)
+        cpu = get_cpu_usage()
         free_pct = get_free_space_percent()
         _BW = 8
         def _bar8(pct, col=GRN):
@@ -9290,121 +8374,191 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             with open('/proc/meminfo') as _mf:
                 _ml = {l.split(':')[0]: int(l.split()[1]) for l in _mf if ':' in l}
             ram_pct = int(100 * (1 - _ml.get('MemAvailable', 0) / max(_ml.get('MemTotal', 1), 1)))
-        except Exception:
+        except:
             ram_pct = 0
         cpu_n = int(cpu.replace('%','').strip() or 0)
         cpu_col = RED if cpu_n > 80 else (YLW if cpu_n > 50 else GRN)
         ram_col = RED if ram_pct > 80 else (YLW if ram_pct > 60 else GRN)
         hdd_use = 100 - free_pct
         hdd_col = RED if hdd_use > 90 else (YLW if hdd_use > 75 else GRN)
-        cpu_str = f"{cpu_n:3d}%"
-        ram_str = f"{ram_pct:3d}%"
-        hdd_str = f"{hdd_use:3d}%"
-        right    = f"{CYN}v{VERSION}{RST}"
-        # Oblicz max długość last_msg żeby nie wyjść poza ramkę
+        cpu_str = f"{cpu_n:3d}%"; ram_str = f"{ram_pct:3d}%"; hdd_str = f"{hdd_use:3d}%"
+        right = f"{CYN}v{VERSION}{RST}"
         _status_fixed = f" ⚙{cpu_str} 🧠[{'█'*_BW}]{ram_str} 💽[{'█'*_BW}]{hdd_str}  🔔 "
         _msg_max = W - ansilen(_status_fixed) - ansilen(right) - 2
         _msg_disp = last_msg if ansilen(last_msg) <= _msg_max else last_msg[:_msg_max-1] + "…"
-        left  = f" ⚙{cpu_col}{cpu_str}{RST} 🧠[{_bar8(ram_pct,ram_col)}]{ram_col}{ram_str}{RST} 💽[{_bar8(hdd_use,hdd_col)}]{hdd_col}{hdd_str}{RST}  🔔 {msg_col}{_msg_disp}{RST}"
+        left = f" ⚙{cpu_col}{cpu_str}{RST} 🧠[{_bar8(ram_pct,ram_col)}]{ram_col}{ram_str}{RST} 💽[{_bar8(hdd_use,hdd_col)}]{hdd_col}{hdd_str}{RST}  🔔 {msg_col}{_msg_disp}{RST}"
         padding = W - ansilen(left) - ansilen(right) - 2
         row(f"{left}{' ' * max(0,padding)}{right}")
         _w(f"\r{BLU}╚{'═'*W}╝{RST}\033[K\r\n")
-        # Wyślij jednym write — eliminuje migotanie
         sys.stdout.write("".join(_buf))
-        sys.stdout.write("\033[J")   # wyczyść poniżej ramki
-        sys.stdout.write("\033[?25h")
+        sys.stdout.write("\033[J\033[?25h")
         sys.stdout.flush()
 
-    def _ask_save_name():
-        name_default = os.path.splitext(os.path.basename(files[current_idx]))[0]
-        old = termios.tcgetattr(fd)
-        # Przełącz na tryb cooked (normalny)
-        cooked = termios.tcgetattr(fd)
-        cooked[3] |= termios.ECHO | termios.ICANON
-        termios.tcsetattr(fd, termios.TCSADRAIN, cooked)
+    # --------------------------------------------------------------------------
+    # Pomocnicze: ruch PTZ i lista kamer
+    # --------------------------------------------------------------------------
+    def _ptz_move(dx, dy, dz=0.0, label=""):
+        if not cam or not prof: return
+        if cam.type == CameraType.ONVIF:
+            client = ONVIFClient(cam)
+            pan = dx * cam.speed
+            tilt = dy * cam.speed
+            zoom = dz * cam.speed
+            client.move_continuous(prof.token, pan, tilt, zoom)
+            _time.sleep(cam.duration)
+            client.stop(prof.token)
+        elif cam.type == CameraType.DVRIP:
+            client = DVRIPClient(cam)
+            direction = ""
+            if dy > 0: direction = "U"
+            elif dy < 0: direction = "D"
+            elif dx < 0: direction = "L"
+            elif dx > 0: direction = "R"
+            elif dz > 0: direction = "Z+"
+            elif dz < 0: direction = "Z-"
+            if direction:
+                ptz_speed = int(cam.speed * 8)
+                client.move(direction, ptz_speed, cam.duration)
+
+    def _ptz_move_async(dx, dy, dz=0.0, direction_label=""):
+        """Uruchamia ruch PTZ w tle i animuje pasek postępu."""
+        nonlocal ptz_active, ptz_progress, ptz_direction, last_msg
+        if not cam or not prof:
+            return
+        if ptz_active:
+            # już trwa ruch – ignorujemy kolejne kliknięcia
+            return
+        ptz_active = True
+        ptz_progress = 0.0
+        ptz_direction = direction_label
+
+        def _move_worker():
+            nonlocal ptz_active, ptz_progress, last_msg
+            duration = cam.duration
+            steps = 10
+            step_time = duration / steps
+            try:
+                if cam.type == CameraType.ONVIF:
+                    client = ONVIFClient(cam)
+                    pan = dx * cam.speed
+                    tilt = dy * cam.speed
+                    zoom = dz * cam.speed
+                    client.move_continuous(prof.token, pan, tilt, zoom)
+                    for i in range(steps + 1):
+                        ptz_progress = i / steps
+                        _time.sleep(step_time)
+                    client.stop(prof.token)
+                elif cam.type == CameraType.DVRIP:
+                    client = DVRIPClient(cam)
+                    direction = ""
+                    if dy > 0: direction = "U"
+                    elif dy < 0: direction = "D"
+                    elif dx < 0: direction = "L"
+                    elif dx > 0: direction = "R"
+                    elif dz > 0: direction = "Z+"
+                    elif dz < 0: direction = "Z-"
+                    if direction:
+                        ptz_speed = int(cam.speed * 8)
+                        client.move(direction, ptz_speed, duration)
+                        for i in range(steps + 1):
+                            ptz_progress = i / steps
+                            _time.sleep(step_time)
+                last_msg = f"PTZ {direction_label} done"
+            except Exception as e:
+                last_msg = f"PTZ error: {e}"
+            finally:
+                ptz_active = False
+                ptz_progress = 0.0
+        _thr.Thread(target=_move_worker, daemon=True).start()
+
+    def _show_camera_playlist(cameras, cur_idx):
+        nonlocal old_settings
+        items = []
+        for i, c in enumerate(cameras):
+            name = getattr(c, 'name', f'Camera {i+1}')
+            ip = getattr(c, 'ip', '')
+            if ip:
+                name = f"{name} ({ip})"
+            prefix = "🎥 " if i == cur_idx else "   "
+            items.append(f"{prefix}{i+1:2}. {name}")
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.flush()
+        raw_attrs = termios.tcgetattr(fd)
         try:
-            out(f"\033[2J\033[H {YLW}Camera name [{name_default}]: {RST}")
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            sys.stdout.write('\033[2J\033[H')
             sys.stdout.flush()
-            # Użyj zwykłego input() zamiast readline
-            entered = input()
-            name = entered.strip() if entered.strip() else name_default
-            return name
+            result = select_menu(
+                items,
+                selected=cur_idx,
+                title=f"📋 Kamery ({len(cameras)}) - ENTER wybierz, Q/ESC anuluj",
+                W=70,
+                page_size=15
+            )
         finally:
-            # Wyłącz mysz przed przywróceniem raw
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.flush()
-            # Przywróć tryb raw
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            tty.setraw(fd)
-            # Włącz mysz z powrotem
+            termios.tcsetattr(fd, termios.TCSADRAIN, raw_attrs)
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
+        return result
 
-    import time as _time
-    import os as _os
-
-    # Czekaj aż socket IPC będzie dostępny (mpv może potrzebować chwili po Popen)
+    # --------------------------------------------------------------------------
+    # Inicjalizacja IPC i pierwszego stanu
+    # --------------------------------------------------------------------------
     if _ctrl_socket:
-        for _retry in range(50):   # max 5s
-            if _os.path.exists(_ctrl_socket):
-                break
+        for _ in range(50):
+            if _os.path.exists(_ctrl_socket): break
             _time.sleep(0.1)
-        # Daj mpv chwilę na pełną inicjalizację po stworzeniu socketu
         _time.sleep(0.15)
 
-    # Pierwsze pobranie stanu
-    for _retry in range(20):
+    for _ in range(20):
         _fetch_state()
-        if dur_f > 0:
-            break
+        if dur_f > 0: break
         _time.sleep(0.1)
 
-    # Zastosuj image_params przez IPC (nadpisuje wartości z linii poleceń jeśli się różnią)
     if ctrl and ctrl.is_alive():
         for p in PARAMS:
-            if p == "VOL":
-                ctrl.set_property("volume", values[p])
-            else:
-                ctrl.set_property(PROP_MAP[p], values[p])
-        ctrl.set_property("speed",    speed)
-        ctrl.set_property("mute",     muted)
+            if p == "VOL": ctrl.set_property("volume", values[p])
+            else:          ctrl.set_property(PROP_MAP[p], values[p])
+        ctrl.set_property("speed", speed)
+        ctrl.set_property("mute", muted)
         ctrl.set_property("loop-file", "inf" if loop_mode_local else "no")
         _fetch_state()
 
     last_tick = _time.monotonic()
-
     old_settings = termios.tcgetattr(fd)
+
     try:
         tty.setraw(fd)
-        sys.stdout.write('\033[?1049h')          # wejście w alternate screen buffer
+        sys.stdout.write('\033[?1049h')
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         running = True
         result  = "quit"
 
+# --- Mouse handling start (restored & adjusted) -------------------------
         def _handle_mouse_p(r, c):
             nonlocal sel, running, result, auto_dir, paused, step, auto_run, auto_fps, current_idx, loop_mode_local, last_msg
+            nonlocal ui_mode, ui_mode_file
 
+            # Row 2: Header with navigation, mode, loop, playlist
             if r == 2:
-                if    6 <= c <=  9:                                      # [◄,] prev
+                if 6 <= c <= 8:                                         # [◄,] prev
                     _mouse_off()
                     result = "prev"; running = False
                     _mouse_on()
-                elif 54 <= c <= 57:                                      # [.►] next
+                elif 54 <= c <= 56:                                     # [.►] next
                     _mouse_off()
                     result = "next"; running = False
                     _mouse_on()
-                elif 59 <= c <= 61:                                      # [P]list / [P]T[Z]
+                elif 59 <= c <= 61:                                     # [P]list / [P]T[Z]
                     if cam_mode:
-                        # Tryb kamer — otwórz panel PTZ
                         _mouse_off()
                         _in_overlay = True
-                        _open_ptz_panel()
+                        ui_mode = "PTZ"
                         _in_overlay = False
                         _first_draw = True
                         _mouse_on()
                     else:
-                        # Tryb pliku — playlista
                         _mouse_off()
                         _in_overlay = True
                         new_idx = _show_playlist(files, current_idx)
@@ -9420,123 +8574,317 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             result = ("goto", new_idx)
                             running = False
                         _mouse_on()
-                elif 63 <= c <= 65:                                      # [Z]63-65
+                elif 63 <= c <= 65:                                     # [Z] mode toggle
                     if cam_mode:
-                      pass  # TODO
-
-                elif 67 <= c <= 71:                                      # [L] loop
+                        ui_mode = {"SELECT": "PAN", "PAN": "PTZ", "PTZ": "SELECT"}[ui_mode]
+                    else:
+                        ui_mode_file = "PAN" if ui_mode_file == "SELECT" else "SELECT"
+                    last_msg = f"Mode: {ui_mode if cam_mode else ui_mode_file}"
+                elif 67 <= c <= 71:                                     # [L] loop
                     loop_mode_local = not loop_mode_local
                     if ctrl and ctrl.is_alive():
                         ctrl._send(["set_property", "loop-file",
                                     "inf" if loop_mode_local else "no"])
                     last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
-                elif 73 <= c <= 78:                                      # [K>] mpv ctrl
-                    pass  # TODO
-                # Emoji 🎥 na końcu - kolumny 79-80 (opcjonalnie)
-                elif 79 <= c <= 80:
-                    # TODO np. pokaż info o klipie
+                elif 73 <= c <= 78:                                     # [K>] mpv ctrl (placeholder)
                     pass
+                elif 79 <= c <= 80:                                     # 🎥 emoji (placeholder)
+                    pass
+
+            # Row 5: Progress bar and AB‑loop markers
             elif r == 5 and dur_f > 0:
                 BAR_START, BAR_LEN = 5, 22
                 if BAR_START <= c <= BAR_START + BAR_LEN:
-                    # Klik na pasku — seek
                     frac = (c - BAR_START) / BAR_LEN
                     target = frac * dur_f
                     if ctrl and ctrl.is_alive():
                         ctrl._send(["seek", target, "absolute"])
                     last_msg = f"seek {target:.1f}s"
-                # Prawa strona ║ (col 50+) — AB loop, pozycje zależne od fazy
-                # Faza 1: ' Set [A]···  loop start'
-                #   [A]=56-58, ···=59-61
-                # Faza 2: ' Set [A]0:06─[A]···  end'
-                #   [A]1=56-58, tA=59-62, [A]2=64-66, ···=67-69
-                # Faza 3: ' Loop [A]0:06↔[B]0:20'
-                #   [A]=57-59, tA=60-63, [B]=65-67, tB=68-71
-                elif c >= 50:
+                elif c >= 50:                                           # AB‑loop area
                     if ab_active:
-                        # Faza 3
-                        if   57 <= c <= 59:  _ab_clear()          # [A] → clear
-                        elif 60 <= c <= 63:  _ab_edit_a()         # czas A
-                        elif 65 <= c <= 67:  _ab_clear()          # [B] → clear
-                        elif 68 <= c <= 71:  _ab_edit_b()         # czas B
+                        if 57 <= c <= 59:  _ab_clear()
+                        elif 60 <= c <= 63:  _ab_edit_a()
+                        elif 65 <= c <= 67:  _ab_clear()
+                        elif 68 <= c <= 71:  _ab_edit_b()
                     elif ab_a >= 0 and ab_b < 0:
-                        # Faza 2: pierwszy [A]=56-58 (edit A), drugi [A]=64-66 (set B)
-                        if   56 <= c <= 58:  _ab_edit_a()         # [A] stały → edytuj A
-                        elif 59 <= c <= 63:  _ab_edit_a()         # czas A → edytuj A
-                        elif 64 <= c <= 66:  _ab_set_b()          # [A] migający → ustaw B
-                        elif 67 <= c <= 69:  _ab_set_b()          # ··· → ustaw B
+                        if 56 <= c <= 58:  _ab_edit_a()
+                        elif 59 <= c <= 63:  _ab_edit_a()
+                        elif 64 <= c <= 66:  _ab_set_b()
+                        elif 67 <= c <= 69:  _ab_set_b()
                     else:
-                        # Faza 1
-                        if   56 <= c <= 58:  _ab_set_a()          # [A] → ustaw A
-                        elif 59 <= c <= 61:  _ab_set_a()          # ··· → ustaw A
+                        if 56 <= c <= 58:  _ab_set_a()
+                        elif 59 <= c <= 61:  _ab_set_a()
 
+            # Row 6: REC and Clear[A]
             elif r == 6:
-                # Prawa strona ║ — ● [R]EC i Clear[A]
-                # ' ● [R]EC / Clear[A] Loop' od col 51
-                # ●=51, [R]=53-55, Clear[A]=65-71
                 if c >= 50:
-                    if   53 <= c <= 55:  _extract_clip_current()
-                    elif 65 <= c <= 71 and ab_active: _ab_clear()
+                    if 53 <= c <= 55:                                   # ● [R]EC
+                        _extract_clip_current()
+                    elif 65 <= c <= 71 and ab_active:                   # Clear[A]
+                        _ab_clear()
 
+            # Row 7: Play controls (paused / playing)
             elif r == 7:
-                if    3 <= c <= 11:                                       # [SPACE] toggle
+                if 3 <= c <= 11:                                        # [SPACE]
                     _toggle_pause()
                 elif paused:
-                    if   13 <= c <= 16: _frame_step(False)               # [ ←[  frame back
-                    elif 17 <= c <= 20: _frame_step(True)                # ]→ ]  frame forward
-                    elif 36 <= c <= 38: auto_dir = not auto_dir          # [D] dir
-                    elif 46 <= c <= 48:
-                        auto_run = not auto_run                           # [R] run/stop
+                    if 13 <= c <= 16:    _frame_step(False)            # [ ←[
+                    elif 17 <= c <= 20:  _frame_step(True)             # ]→ ]
+                    elif 36 <= c <= 38:  auto_dir = not auto_dir       # [D] dir
+                    elif 46 <= c <= 48:                                # [R] run/stop
+                        auto_run = not auto_run
                         auto_accum = 0.0
-                    elif 61 <= c <= 63: auto_fps = max(0.5, auto_fps - 0.5)  # [↑] fps-
-                    elif 64 <= c <= 66: auto_fps = min(24.0, auto_fps + 0.5) # [↓] fps+
+                    elif 61 <= c <= 63:  auto_fps = max(0.5, auto_fps - 0.5)  # [↑]
+                    elif 64 <= c <= 66:  auto_fps = min(24.0, auto_fps + 0.5) # [↓]
                 else:  # playing
-                    if   24 <= c <= 26 and ctrl and ctrl.is_alive():
-                        ctrl._send(["seek", -30, "relative"])             # [-]
-                    elif 34 <= c <= 36 and ctrl and ctrl.is_alive():
-                        ctrl._send(["seek", +30, "relative"])             # [+]
-                    elif 47 <= c <= 53: _set_speed(0.0)                  # Sp[E]ed reset
-                    elif 56 <= c <= 60: _set_speed(-0.25)                # [D] slow
-                    elif 63 <= c <= 67: _set_speed(+0.25)                # [F] fast
+                    if 24 <= c <= 26 and ctrl and ctrl.is_alive():      # [-]
+                        ctrl._send(["seek", -30, "relative"])
+                    elif 34 <= c <= 36 and ctrl and ctrl.is_alive():    # [+]
+                        ctrl._send(["seek", +30, "relative"])
+                    elif 47 <= c <= 53:  _set_speed(0.0)               # Sp[E]ed
+                    elif 56 <= c <= 60:  _set_speed(-0.25)             # [D] slow
+                    elif 63 <= c <= 67:  _set_speed(+0.25)             # [F] fast
+
+            # Row 9: Parameter selection row
             elif r == 9:
-                if   15 <= c <= 17: sel = (sel - 1) % len(PARAMS)
-                elif 19 <= c <= 21: sel = (sel + 1) % len(PARAMS)
-                elif 23 <= c <= 25: sel = 0
-                elif 27 <= c <= 29: sel = 1
-                elif 31 <= c <= 33: sel = 2
-                elif 35 <= c <= 37: sel = 3
-                elif 39 <= c <= 41: sel = 4
-                elif 43 <= c <= 45: sel = 5
-                elif 54 <= c <= 56: _set_val(PARAMS[sel], -step)
-                elif 58 <= c <= 60: _set_val(PARAMS[sel], +step)
-                elif 68 <= c <= 70: step = max(1, step - 1)
-                elif 72 <= c <= 74: step = min(20, step + 1)
+                # Direct letter buttons (B,C,S,G,H,V)
+                if 14 <= c <= 16:       # [B]
+                    sel = 0
+                elif 18 <= c <= 20:     # [C]
+                    sel = 1
+                elif 22 <= c <= 24:     # [S]
+                    sel = 2
+                elif 26 <= c <= 28:     # [G]
+                    sel = 3
+                elif 30 <= c <= 32:     # [H]
+                    sel = 4
+                elif 34 <= c <= 36:     # [V]
+                    sel = 5
+                # [0] Reset (right side)
+                elif 41 <= c <= 43:
+                    _reset_image_settings()
+                # Reset (right side)
+                elif 45 <= c <= 49:
+                    _reset_all_settings()
+                # Progress (right side)
+                elif 51 <= c <= 59:
+                    pass  # TODO_progress()
+                # Progress bar (right side)
+                elif 61 <= c <= 72:
+                    pass  # TODO_bar_progress()
 
-            elif r == 11 and 46 <= c <= 79:                              # panel zoom row 1 (▲ + Pan)
-                if   c == 49:             _pan(0, +PAN_STEP)            # ▲ c49
-                elif 62 <= c <= 67:       _edit_pan_x()                 # x:-0.20 c62-67
-                elif 68 <= c <= 74:       _edit_pan_y()                 # y:+0.20 c68-74
+            # Rows 11–13: Zoom/Pan panel (right side)
+            elif r == 11 and 46 <= c <= 79:                             # ▲ and zoom controls (PAN/PTZ)
+                if c == 49:                                             # ▲
+                    if cam_mode:
+                        if ui_mode == "SELECT":
+                            sel = (sel - 1) % len(PARAMS)
+                        elif ui_mode == "PAN":
+                            _pan(0, +PAN_STEP)
+                        elif ui_mode == "PTZ":
+                            _ptz_move_async(0.0, 1.0, 0.0, "U")
+                    else:
+                        if ui_mode_file == "SELECT":
+                            sel = (sel - 1) % len(PARAMS)
+                        elif ui_mode_file == "PAN":
+                            _pan(0, +PAN_STEP)
+                # Przyciski dostępne tylko w trybie SELECT (wiersz 11)
+                elif cam_mode and ui_mode == "SELECT":
+                    if 58 <= c <= 62:       # [0🔍] – reset obrazu
+                        _reset_image_settings()
+                    elif 66 <= c <= 68:     # [↑]
+                        sel = (sel - 1) % len(PARAMS)
+                    elif 69 <= c <= 71:     # [↓]
+                        sel = (sel + 1) % len(PARAMS)
+                elif not cam_mode and ui_mode_file == "SELECT":
+                    if 55 <= c <= 59:
+                        _reset_image_settings()
+                    elif 62 <= c <= 64:
+                        sel = (sel - 1) % len(PARAMS)
+                    elif 65 <= c <= 67:
+                        sel = (sel + 1) % len(PARAMS)
+                # Przyciski specyficzne dla trybu PAN (wiersz 11)
+                elif cam_mode and ui_mode == "PAN":
+                    if 58 <= c <= 62:       # [0🔍] – reset zoom/pan
+                        _zoom_reset()
+                    elif 64 <= c <= 66:     # [+]
+                        _zoom_in()
+                    elif 67 <= c <= 69:     # [-]
+                        _zoom_out()
+                    elif 73 <= c <= 77:     # "1.0x" – edycja zoomu
+                        _edit_zoom()
+                # Przyciski specyficzne dla trybu PTZ (wiersz 11)
+                elif cam_mode and ui_mode == "PTZ":
+                    if 58 <= c <= 62:       # [0🔍] – reset zoomu
+                        _zoom_zero()
+                    elif 66 <= c <= 68:     # [+]
+                        _zoom_in()
+                    elif 69 <= c <= 71:     # [-]
+                        _zoom_out()
+                    elif 73 <= c <= 76:     # "1.0x" – edycja zoomu
+                        _edit_zoom()
+                # Istniejące kontrolki dla PAN (edycja wartości pan) – mogą być w wierszu 11 lub 12
+                elif 62 <= c <= 67:     _edit_pan_x()
+                elif 68 <= c <= 74:     _edit_pan_y()
 
-            elif r == 12 and 46 <= c <= 79:                             # panel zoom row 2 (◄■►│controls)
-                if   c == 47:       _pan(+PAN_STEP, 0)                  # ◄ c47
-                elif c == 49:       _pan_center()                       # ■ c49
-                elif c == 51:       _pan(-PAN_STEP, 0)                  # ► c51
-                elif 55 <= c <= 59: _zoom_toggle()                      # [Z🎥/📺] c55-59
-                elif 60 <= c <= 64: _zoom_zero()                        # [0🔍] c60-64
-                elif 66 <= c <= 68: _zoom_in()                          # [+] c66-68
-                elif 69 <= c <= 71: _zoom_out()                         # [-] c69-71
-                elif 73 <= c <= 76: _edit_zoom()                        # 1.0x c73-76
+            elif r == 12 and 46 <= c <= 79:                             # ◄ ■ ► and pan info (PAN) / zoom controls
+                if c == 47:             # ◄
+                    if cam_mode:
+                        if ui_mode == "SELECT":
+                            _set_val(PARAMS[sel], -step)
+                        elif ui_mode == "PAN":
+                            _pan(+PAN_STEP, 0)
+                        elif ui_mode == "PTZ":
+                            _ptz_move_async(-1.0, 0.0, 0.0, "L")
+                    else:
+                        if ui_mode_file == "SELECT":
+                            _set_val(PARAMS[sel], -step)
+                        elif ui_mode_file == "PAN":
+                            _pan(+PAN_STEP, 0)
+                elif c == 49:           # ■
+                    if cam_mode:
+                        if ui_mode == "SELECT":
+                            _reset_image_settings()
+                        elif ui_mode == "PAN":
+                            _pan_center()
+                        elif ui_mode == "PTZ":
+                            if cam and prof:
+                                if cam.type == CameraType.ONVIF:
+                                    ONVIFClient(cam).stop(prof.token)
+                                elif cam.type == CameraType.DVRIP:
+                                    DVRIPClient(cam).move("C", 0, 0)
+                    else:
+                        if ui_mode_file == "SELECT":
+                            _reset_image_settings()
+                        elif ui_mode_file == "PAN":
+                            _pan_center()
+                elif c == 51:           # ►
+                    if cam_mode:
+                        if ui_mode == "SELECT":
+                            _set_val(PARAMS[sel], +step)
+                        elif ui_mode == "PAN":
+                            _pan(-PAN_STEP, 0)
+                        elif ui_mode == "PTZ":
+                            _ptz_move_async(1.0, 0.0, 0.0, "R")
+                    else:
+                        if ui_mode_file == "SELECT":
+                            _set_val(PARAMS[sel], +step)
+                        elif ui_mode_file == "PAN":
+                            _pan(-PAN_STEP, 0)
+                # Przyciski dostępne tylko w trybie SELECT
+                elif cam_mode and ui_mode == "SELECT":
+                    if 66 <= c <= 68:       # [←]
+                        _set_val(PARAMS[sel], -step)
+                    elif 69 <= c <= 71:     # [→]
+                        _set_val(PARAMS[sel], +step)
+                elif not cam_mode and ui_mode_file == "SELECT":
+                    if 66 <= c <= 68:
+                        _set_val(PARAMS[sel], -step)
+                    elif 69 <= c <= 71:
+                        _set_val(PARAMS[sel], +step)
+                # --- Tryb PAN: edycja wartości x/y z tekstu "Pan: x:+0.00 y:+0.00" ---
+                elif cam_mode and ui_mode == "PAN":
+                    # Kliknięcie na wartość x (po "x:")
+                    if 60 <= c <= 65:
+                        _edit_pan_x()
+                    # Kliknięcie na wartość y (po "y:")
+                    elif 66 <= c <= 71:
+                        _edit_pan_y()
+                # --- Tryb PTZ: obsługa (m/l) Dur ---
+                elif cam_mode and ui_mode == "PTZ":
+                    # litera 'm' (zmniejsz duration)
+                    if 56 <= c <= 57:
+                        cam.duration = max(0.1, cam.duration - 0.1)
+                        last_msg = f"Duration: {cam.duration:.1f}s"
+                    # litera 'l' (zwiększ duration)
+                    elif 58 <= c <= 59:
+                        cam.duration = min(5.0, cam.duration + 0.1)
+                        last_msg = f"Duration: {cam.duration:.1f}s"
+                    # wartość liczbowa (np. "0.4s") – otwórz prompt
+                    elif 66 <= c <= 71:
+                        new_dur = _ask_duration_input()
+                        if new_dur is not None:
+                            cam.duration = new_dur
+                            last_msg = f"Duration set to {cam.duration:.1f}s"
+                # Istniejące kontrolki zoomu (wspólne dla PAN/PTZ)
+                elif 55 <= c <= 59:     _zoom_toggle()
+                elif 60 <= c <= 64:     _zoom_zero()
+                elif 66 <= c <= 68:     _zoom_in()
+                elif 69 <= c <= 71:     _zoom_out()
+                elif 73 <= c <= 76:     _edit_zoom()
 
-            elif r == 13 and 46 <= c <= 79:                             # panel zoom row 3 (▼)
-                if c == 49: _pan(0, -PAN_STEP)                          # ▼ c49
+            elif r == 13 and 46 <= c <= 79:                             # ▼ and speed/duration (PTZ) / step (SELECT)
+                if c == 49:                                             # ▼
+                    if cam_mode:
+                        if ui_mode == "SELECT":
+                            sel = (sel + 1) % len(PARAMS)
+                        elif ui_mode == "PAN":
+                            _pan(0, -PAN_STEP)
+                        elif ui_mode == "PTZ":
+                            _ptz_move_async(0.0, -1.0, 0.0, "D")
+                    else:
+                        if ui_mode_file == "SELECT":
+                            sel = (sel + 1) % len(PARAMS)
+                        elif ui_mode_file == "PAN":
+                            _pan(0, -PAN_STEP)
+                # Przyciski dostępne tylko w trybie SELECT
+                elif cam_mode and ui_mode == "SELECT":
+                    if 66 <= c <= 68:       # [<]
+                        step = max(1, step - 1)
+                    elif 69 <= c <= 71:     # [>]
+                        step = min(50, step + 1)
+                elif not cam_mode and ui_mode_file == "SELECT":
+                    if 66 <= c <= 68:
+                        step = max(1, step - 1)
+                    elif 69 <= c <= 71:
+                        step = min(50, step + 1)
+                # --- Tryb PTZ: obsługa (s/f) Speed ---
+                elif cam_mode and ui_mode == "PTZ":
+                    # litera 's' (zmniejsz speed)
+                    if 56 <= c <= 57:
+                        cam.speed = max(0.1, cam.speed - 0.1)
+                        last_msg = f"Speed: {cam.speed:.1f}"
+                    # litera 'f' (zwiększ speed)
+                    elif 58 <= c <= 59:
+                        cam.speed = min(1.0, cam.speed + 0.1)
+                        last_msg = f"Speed: {cam.speed:.1f}"
+                    # wartość liczbowa (np. "0.4") – otwórz prompt
+                    elif 66 <= c <= 71:
+                        new_speed = _ask_speed_input()
+                        if new_speed is not None:
+                            cam.speed = new_speed
+                            last_msg = f"Speed set to {cam.speed:.1f}"
+            # Rows 11–13: Zoom/Pan panel (right side end)
 
+            # Rows 10–15: Parameter sliders (click to set value)
             elif 10 <= r <= 15:
                 new_sel = r - 10
-                if r == 15 and 45 <= c <= 47:
+                # --- Obsługa nagłówków trybów w panelu (tylko wiersz 10) ---
+                if r == 10 and c >= 46:
+                    # [Z📊] SELECT – kolumny ok. 55-59
+                    if 55 <= c <= 59:
+                        if cam_mode:
+                            ui_mode = "SELECT"
+                        else:
+                            ui_mode_file = "SELECT"
+                        last_msg = "Mode: SELECT"
+                    # [Z📺] PAN – kolumny ok. 60-64
+                    elif 60 <= c <= 64:
+                        if cam_mode:
+                            ui_mode = "PAN"
+                        else:
+                            ui_mode_file = "PAN"
+                        last_msg = "Mode: PAN"
+                    # [Z🎥] PTZ – tylko w trybie kamer, kolumny ok. 65-69
+                    elif 65 <= c <= 69 and cam_mode:
+                        ui_mode = "PTZ"
+                        last_msg = "Mode: PTZ"
+                # Mute button on VOL row
+                elif r == 15 and 45 <= c <= 47:
                     _toggle_mute()
-                elif c <= 37:
+                elif c <= 37:                                           # slider area
                     if sel == new_sel:
-                        if 18 <= c <= 37:
+                        if 18 <= c <= 37:                               # bar region
                             param = PARAMS[sel]
                             if param == "VOL":
                                 frac = (c - 18) / (37 - 18)
@@ -9553,33 +8901,28 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     else:
                         sel = new_sel
 
+            # Row 17: Bottom navigation
             elif r == 17:
-                if    3 <= c <=  5: result = "prev"; running = False     # [,]
-                elif 13 <= c <= 15: result = "next"; running = False     # [.]
-                elif 23 <= c <= 25: _reset()                             # [N]
-                elif 34 <= c <= 36: _screenshot()                        # [T]
-                elif 50 <= c <= 52: _save_image_params()                 # [X]
-                elif 67 <= c <= 69: running = False                      # [Q]
+                if 3 <= c <= 5:         result = "prev"; running = False
+                elif 13 <= c <= 15:     result = "next"; running = False
+                elif 23 <= c <= 25:     _screenshot()                   # [T]
+                elif 39 <= c <= 40:     _restore_image_settings()       # [x] Restore
+                elif 42 <= c <= 43:     _save_image_params()            # [X] Store
+                elif 65 <= c <= 68:     running = False                 # [Q]
+# --- Mouse handling end -------------------------------------------------
 
+# --- Główna pętla -----------------------------------------------------
         while running:
-            # Sprawdź czy mpv żyje przez OS (nie przez IPC — może być zajęty seek/ab-loop)
             _mpv_pid = prof.pid if prof else None
             _mpv_alive = _mpv_pid and ProcessManager.is_running(_mpv_pid)
             if not _mpv_alive:
-                last_msg = "mpv stopped"
-                _draw()
-                _time.sleep(1)
-                result = "quit"
-                break
+                last_msg = "mpv stopped"; _draw(); _time.sleep(1); result = "quit"; break
 
             _draw()
 
-            if auto_run and paused:
-                timeout = min(0.05, 1.0 / auto_fps)
-            elif paused:
-                timeout = 0.3
-            else:
-                timeout = 1.0
+            if auto_run and paused: timeout = min(0.05, 1.0 / auto_fps)
+            elif paused:            timeout = 0.3
+            else:                   timeout = 1.0
 
             rlist, _, _ = _sel.select([sys.stdin], [], [], timeout)
 
@@ -9602,7 +8945,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             v = ctrl.get_property(PROP_MAP[pp])
                             if v is not None: values[pp] = int(v)
                     sp = ctrl.get_property("speed")
-                    if sp is not None: speed  = float(sp)
+                    if sp is not None: speed = float(sp)
 
             if auto_run and paused:
                 auto_accum += dt
@@ -9610,21 +8953,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 while auto_accum >= step_interval:
                     auto_accum -= step_interval
                     r = _frame_step(forward=auto_dir)
-                    if r == "eof":
-                        auto_run = False
-                        result = "eof_next"; running = False; break
+                    if r == "eof": auto_run = False; result = "eof_next"; running = False; break
 
             if not rlist:
-                # Sprawdź SIGWINCH i wymuszony redraw
-                if _sigwinch_flag[0]:
-                    _sigwinch_flag[0] = False
-                    _first_draw = True
+                if _sigwinch_flag[0]: _sigwinch_flag[0] = False; _first_draw = True
                 continue
 
-            # Zignoruj mysz gdy terminal za mały — pozycje wierszy byłyby błędne
             _tw, _th = _term_size()
             _term_ok = (_th >= MIN_H and _tw >= MIN_W)
-
+###
             ch = sys.stdin.read(1)
             if ch == '\x1b':
                 ch2 = sys.stdin.read(1)
@@ -9634,187 +8971,161 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         buf = ''
                         while True:
                             c2 = sys.stdin.read(1)
-                            if c2 in ('M', 'm', ''):
-                                release = (c2 == 'm'); break
+                            if c2 in ('M', 'm', ''): release = (c2 == 'm'); break
                             buf += c2
                         try:
                             parts = buf.split(';')
-                            btn_n = int(parts[0])
-                            m_col = int(parts[1])
-                            m_row = int(parts[2])
+                            btn_n, m_col, m_row = int(parts[0]), int(parts[1]), int(parts[2])
                             if not release:
-                                if btn_n == 64:
-                                    if ctrl and ctrl.is_alive():
-                                        ctrl._send(["seek", +5, "relative"])
-                                    last_msg = "⏩ +5s"
-                                elif btn_n == 65:
-                                    if ctrl and ctrl.is_alive():
-                                        ctrl._send(["seek", -5, "relative"])
-                                    last_msg = "⏪ -5s"
-                                elif btn_n == 0:
-                                    if _term_ok:
-                                        _handle_mouse_p(m_row, m_col)
-                        except (ValueError, IndexError):
-                            pass
+                                if btn_n == 64: _seek(+5)
+                                elif btn_n == 65: _seek(-5)
+                                elif btn_n == 0 and _term_ok: _handle_mouse_p(m_row, m_col)
+                        except: pass
                     elif ch3 in ('C', 'D'):
                         forward = (ch3 == 'C')
-                        if zoom_mode:
-                            _pan(-PAN_STEP if forward else +PAN_STEP, 0)
-                        elif paused:
-                            if forward:
-                                _frame_step(True)
-                            else:
-                                _frame_step(False)
-                        else:
-                            _set_val(PARAMS[sel], +step if forward else -step)
+                        if cam_mode and ui_mode == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
+                        elif cam_mode and ui_mode == "PTZ": _ptz_move(1.0 if forward else -1.0, 0.0)
+                        elif not cam_mode and ui_mode_file == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
+                        elif paused: _frame_step(forward)
+                        else: _set_val(PARAMS[sel], +step if forward else -step)
                     elif ch3 == 'A':
-                        if zoom_mode: _pan(0, +PAN_STEP)
+                        if cam_mode and ui_mode == "PAN": _pan(0, +PAN_STEP)
+                        elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, 1.0)
+                        elif not cam_mode and ui_mode_file == "PAN": _pan(0, +PAN_STEP)
                         else: sel = (sel - 1) % len(PARAMS)
                     elif ch3 == 'B':
-                        if zoom_mode: _pan(0, -PAN_STEP)
+                        if cam_mode and ui_mode == "PAN": _pan(0, -PAN_STEP)
+                        elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, -1.0)
+                        elif not cam_mode and ui_mode_file == "PAN": _pan(0, -PAN_STEP)
                         else: sel = (sel + 1) % len(PARAMS)
-                    elif ch3 == '5':
-                        sys.stdin.read(1)
-                        if paused:
-                            auto_fps = max(0.5, auto_fps - 0.5)
-                            last_msg = f"fps → {auto_fps:.1f}"
-                        else:
-                            _set_val(PARAMS[sel], +step)
-                    elif ch3 == '6':
-                        sys.stdin.read(1)
-                        if paused:
-                            auto_fps = min(24.0, auto_fps + 0.5)
-                            last_msg = f"fps → {auto_fps:.1f}"
-                        else:
-                            _set_val(PARAMS[sel], -step)
-                else:
-                    running = False
-            elif ch in ('q', 'Q'):
-                running = False
-            elif ch == ' ':
-                _toggle_pause()
+                else: running = False
+            elif ch in ('q', 'Q'): running = False
+            elif ch == ' ': _toggle_pause()
             elif ch in ('z', 'Z'):
-                _zoom_toggle()
+                if cam_mode:
+                    ui_mode = {"SELECT": "PAN", "PAN": "PTZ", "PTZ": "SELECT"}[ui_mode]
+                else:
+                    ui_mode_file = "PAN" if ui_mode_file == "SELECT" else "SELECT"
+                last_msg = f"Mode: {ui_mode if cam_mode else ui_mode_file}"
             elif ch == '0':
+                _reset_image_settings()
+            elif ch == '*':
                 _zoom_zero()
             elif ch in ('d', 'D'):
-                if paused:
-                    auto_dir = not auto_dir
-                    last_msg = f"dir → {'►' if auto_dir else '◄'}"
+                if paused: auto_dir = not auto_dir
+                else: _set_speed(-0.25)
+            elif ch in ('e', 'E'): _set_speed(0.0)
+
+            # --- f / F (speed odtwarzania vs PTZ speed) ---
+            elif ch == 'f':
+                if cam_mode and ui_mode == "PTZ":
+                    if cam:
+                        cam.speed = min(1.0, cam.speed + 0.1)
+                        last_msg = f"Speed: {cam.speed:.1f}"
                 else:
-                    _set_speed(-0.25)
-            elif ch in ('e', 'E'):
-                _set_speed(0.0)   # reset speed to 1.0x
-            elif ch in ('f', 'F'):
+                    _set_speed(+0.25)
+            elif ch == 'F':
                 _set_speed(+0.25)
-            elif ch in ('r', 'R'):
-                if paused:
-                    auto_run = not auto_run
-                    auto_accum = 0.0
-                    last_msg = f"AUTO {'RUN' if auto_run else 'STOP'}"
+
+            # --- m / M (mute vs PTZ duration) ---
+            elif ch == 'm':
+                if cam_mode and ui_mode == "PTZ":
+                    if cam:
+                        cam.duration = max(0.1, cam.duration - 0.1)
+                        last_msg = f"Duration: {cam.duration:.1f}s"
                 else:
-                    _extract_clip_current()
-            elif ch in ('x', 'X'):
-                _save_image_params()
-            elif ch in ('n', 'N'):
-                _reset()
-            elif ch in ('i', 'I'):
-                _zoom_in()
-            elif ch in ('o', 'O'):
-                _zoom_out()
-            elif ch in ('m', 'M'):
+                    _toggle_mute()
+            elif ch == 'M':
                 _toggle_mute()
-            elif ch in ('t', 'T'):
-                _screenshot()
-            elif ch in ('k', 'K'):  # K = transfer do kamery (zapis jako kamera)
-                name = _ask_save_name()
-                if save_as_camera_fn:
-                    save_as_camera_fn(name)
-                    last_msg = f"📷 saved as '{name}'"
-            elif ch in ('a', 'A'):              # [A] — ab-loop toggle (A→set A, A→set B+start, A→clear)
-                if ab_a < 0:
-                    _ab_set_a()
-                elif ab_b < 0:
-                    _ab_set_b()
+
+            # --- l / L (loop vs PTZ duration) ---
+            elif ch == 'l':
+                if cam_mode and ui_mode == "PTZ":
+                    if cam:
+                        cam.duration = min(5.0, cam.duration + 0.1)
+                        last_msg = f"Duration: {cam.duration:.1f}s"
                 else:
-                    _ab_clear()
-            elif ch.lower() in JUMP_KEY:  # B,C,S,G,H,V – skoki do parametrów
-                sel = PARAMS.index(JUMP_KEY[ch.lower()])
-            elif ch == '[':
-                if paused:
-                    _frame_step(False)
-            elif ch == ']':
-                if paused:
-                    _frame_step(True)
-            elif ch in ('\x1b', ) or ch == '\x00':
-                pass
-            elif ch == '+':
-                if zoom_mode:
-                    _zoom_in()
-                elif paused:
-                    _auto_fps_change(+1)
-                else:
+                    loop_mode_local = not loop_mode_local
                     if ctrl and ctrl.is_alive():
-                        ctrl._send(["seek", 30, "relative"])
-            elif ch == '-':
-                if zoom_mode:
-                    _zoom_out()
-                elif paused:
-                    _auto_fps_change(-1)
-                else:
-                    if ctrl and ctrl.is_alive():
-                        ctrl._send(["seek", -30, "relative"])
-            elif ch == ',':
-                result = "prev"; running = False
-                if Terminal._window_id:
-                    subprocess.run(
-                        ["xdotool", "windowactivate", Terminal._window_id],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                    )
-            elif ch == '.':
-                result = "next"; running = False
-                if Terminal._window_id:
-                    subprocess.run(
-                        ["xdotool", "windowactivate", Terminal._window_id],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                    )
-            elif ch in ('l', 'L'):
+                        ctrl._send(["set_property", "loop-file", "inf" if loop_mode_local else "no"])
+                    last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
+            elif ch == 'L':
                 loop_mode_local = not loop_mode_local
                 if ctrl and ctrl.is_alive():
-                    ctrl._send(["set_property", "loop-file",
-                                "inf" if loop_mode_local else "no"])
+                    ctrl._send(["set_property", "loop-file", "inf" if loop_mode_local else "no"])
                 last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
+
+            # --- s / S (saturation vs PTZ speed) ---
+            elif ch == 's':
+                if cam_mode and ui_mode == "PTZ":
+                    if cam:
+                        cam.speed = max(0.1, cam.speed - 0.1)
+                        last_msg = f"Speed: {cam.speed:.1f}"
+                else:
+                    sel = 2   # Saturation
+            elif ch == 'S':
+                sel = 2
+
+            elif ch in ('r', 'R'):
+                if paused: _auto_toggle_run()
+                else: _extract_clip_current()
+            elif ch == 'x': _restore_image_settings()
+            elif ch == 'X': _save_image_params()
+            elif ch in ('i', 'I'): _zoom_in()
+            elif ch in ('o', 'O'): _zoom_out()
+            elif ch in ('t', 'T'): _screenshot()
+            elif ch in ('k', 'K'):
+                name = _ask_save_name()
+                if save_as_camera_fn: save_as_camera_fn(name); last_msg = f"📷 saved as '{name}'"
+            elif ch in ('a', 'A'):
+                if ab_a < 0: _ab_set_a()
+                elif ab_b < 0: _ab_set_b()
+                else: _ab_clear()
+            elif ch.lower() in JUMP_KEY: sel = JUMP_KEY[ch.lower()]
+            elif ch == '[' and paused: _frame_step(False)
+            elif ch == ']' and paused: _frame_step(True)
+            elif ch == '+':
+                if cam_mode and ui_mode == "PTZ": _ptz_move(0, 0, 1.0)
+                elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"): _zoom_in()
+                elif paused: _auto_fps_change(+1)
+                else: _seek(30)
+            elif ch == '-':
+                if cam_mode and ui_mode == "PTZ": _ptz_move(0, 0, -1.0)
+                elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"): _zoom_out()
+                elif paused: _auto_fps_change(-1)
+                else: _seek(-30)
+            elif ch == ',': result = "prev"; running = False
+            elif ch == '.': result = "next"; running = False
             elif ch in ('p', 'P'):
                 if cam_mode:
-                    _in_overlay = True
-                    _open_ptz_panel()
+                    _mouse_off(); _in_overlay = True
+                    new_idx = _show_camera_playlist(files, current_idx)
                     _in_overlay = False
-                    _first_draw = True
+                    if new_idx >= 0 and new_idx != current_idx:
+                        result = ("goto", new_idx); running = False
+                    else: _first_draw = True; _draw()
+                    _mouse_on()
                 else:
                     new_idx = _show_playlist(files, current_idx)
                     if isinstance(new_idx, tuple) and new_idx[0] == 'add':
                         new_path = new_idx[1]
-                        if new_path not in files:
-                            files.append(new_path)
-                        result = ('goto', files.index(new_path))
-                        running = False
+                        if new_path not in files: files.append(new_path)
+                        result = ('goto', files.index(new_path)); running = False
                     elif new_idx >= 0 and new_idx != current_idx:
-                        result = ('goto', new_idx)
-                        running = False
-                    else:
-                        out('\033[2J\033[H')
-                        _draw()
-            elif ch == '<':
-                step = max(1, step - 1); last_msg = f"step={step}"
-            elif ch == '>':
-                step = min(50, step + 1); last_msg = f"step={step}"
+                        result = ('goto', new_idx); running = False
+                    else: out('\033[2J\033[H'); _draw()
+            elif ch == '<': step = max(1, step - 1)
+            elif ch == '>': step = min(50, step + 1)
+
     finally:
         sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     return result, loop_mode_local
-
+# =============================================================================
+# MPV CONTROL SCREEN PLAYER End
+# =============================================================================
 
 def _show_playlist(files, current_idx):
     """Picker plików — lista + nawigacja po katalogu.
@@ -9841,7 +9152,7 @@ def _show_playlist(files, current_idx):
     orientation  = "V"         # V/H
     show_hidden  = False
     filter_str   = ""          # wpisany filtr
-    page_size    = 14
+    page_size    = 10
 
     VIDEO_EXT = {".mp4",".mkv",".avi",".mov",".wmv",".flv",".ts",".mpg",
                  ".mpeg",".m4v",".webm",".ogv",".3gp",".vob",".mts",".m2ts"}
@@ -9930,7 +9241,7 @@ def _show_playlist(files, current_idx):
         col_w = (W - 2) // cols
         n = len(entries)
         rows = max(1, (n + cols - 1) // cols) if n else 1
-        vis_rows = min(rows, 12)
+        vis_rows = min(rows, 10)
 
         out("\033[2J\033[H\033[?25l")
         out(f"\r{BLU}╔{'═'*W}╗{RST}\r\n")
