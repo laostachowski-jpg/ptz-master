@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.10"
+VERSION = "9.0.12"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -177,8 +177,8 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
             print(f"  -h, --help          Show this help")
             print(f"  -d, --debug         Enable debug logging")
             print(f"  -r, --restore       Restore last session")
-            print(f"  -p, --player FILE   Play video file(s)")
-            print(f"  -pl, --player-loop  Play as looping playlist")
+            print(f"  -p, --player FILE   Play file(s) once (no loop)")
+            print(f"  -pl, --player-loop  Loop: single file → loops file; multiple → loops playlist")
             print(f"  -c N                Start on camera N")
             print(f"  --mac MAC           Start on camera with MAC")
             print(f"  CONFIG              Use config file (default: {DEFAULT_CONFIG})")
@@ -188,7 +188,8 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
         elif arg in ('-p', '--player'):
             player_mode = True
         elif arg in ('-pl', '--player-loop'):
-            # specjalna obsługa playlisty
+            # Loop mode: 1 plik → zapętla plik (--loop-file=inf)
+            #            lista  → zapętla listę (każdy plik raz, lista od nowa)
             player_mode   = True
             playlist_mode = True
         elif arg in ('-c', '--camera') and i + 1 < len(args):
@@ -2957,11 +2958,13 @@ class PlayerWatchdog:
     _restart_counts: dict = {}
 
     def __init__(self, proc: 'subprocess.Popen', cam: 'Camera',
-                 profile: 'CameraProfile', restart_fn, stderr_fd: int = -1):
+                 profile: 'CameraProfile', restart_fn, stderr_fd: int = -1,
+                 eof_stops: bool = False):
         self.proc       = proc
         self.cam        = cam
         self.profile    = profile
         self.restart_fn = restart_fn
+        self.eof_stops  = eof_stops  # FILE: normalny koniec != crash
         self._stop      = threading.Event()
         self._last_pts  = None
         self._last_adv  = time.time()
@@ -3045,8 +3048,15 @@ class PlayerWatchdog:
                     self.profile.error = True
                     self.profile.pid = None
                     notify(f"{self.cam.name}: stream error – check IP/URI", "error")
-                if not self._stop.is_set():
-                    self._restart()
+                    if not self._stop.is_set():
+                        self._restart()
+                elif self.eof_stops:
+                    # Normalny koniec pliku (EOF) — nie restartuj, zatrzymaj watchdog
+                    logger.info(f"Watchdog: {self.cam.name} EOF — stop (no restart)")
+                    self.stop()
+                else:
+                    if not self._stop.is_set():
+                        self._restart()
                 return
 
             if not ipc_path:
@@ -3440,7 +3450,8 @@ class Player:
             notify(f"{cam.name}: cannot start player", "error")
             return False
 
-        PlayerWatchdog(proc, cam, profile or CameraProfile(), _restart)
+        PlayerWatchdog(proc, cam, profile or CameraProfile(), _restart,
+                       eof_stops=(cam.type == CameraType.FILE))
 
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
@@ -7178,8 +7189,11 @@ class PlayerModeApp:
             )
             # Zastosuj DEFAULT_IMAGE_PARAMS dla nowych plików
             cam.image_params = Camera.DEFAULT_IMAGE_PARAMS.copy()
-        # Sync loop z aktualnym stanem UI
-        cam.file_loop = self.loop_mode
+        # file_loop=True (--loop-file=inf) tylko gdy 1 plik w trybie loop.
+        # Dla playlisty (>1 pliku) loop obsługuje _run_control_loop w Pythonie,
+        # a mpv odtwarza każdy plik jeden raz i wychodzi (eof_stops).
+        single_file = (len(self.files) == 1)
+        cam.file_loop = self.loop_mode and single_file
         prof = CameraProfile(name="FILE", uri=path)
         cam.profiles = [prof]
         return cam, prof
@@ -7244,16 +7258,9 @@ class PlayerModeApp:
         layout = self.config.layout.get("mpv_default") or WindowLayout(0, 0, 640, 360)
         self._load(self.idx)
 
-        def _on_eof():
-            next_idx = self.idx + 1
-            if next_idx < len(self.files):
-                self._load(next_idx)
-                return self._cam, self._prof
-            return None
+        self._run_control_loop(layout, None)
 
-        self._run_control_loop(layout, _on_eof)
-
-    def _run_control_loop(self, layout, on_eof):
+    def _run_control_loop(self, layout, _on_eof=None):
         while self.idx < len(self.files):
             cam, prof = self._cam, self._prof
 
@@ -7541,14 +7548,20 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 br_mbps = float(br_raw) / 1_000_000
                 _br_hist = getattr(_fetch_state, "_br_hist", [])
                 _br_hist.append(br_mbps)
-                if len(_br_hist) > 8: _br_hist.pop(0)
+                if len(_br_hist) > 16: _br_hist.pop(0)
                 _fetch_state._br_hist = _br_hist
             else:
                 _br_hist = getattr(_fetch_state, "_br_hist", [])
             buf_ms_str = f" Buf:{int(float(buf_s)*1000)}ms" if buf_s is not None else ""
             if _br_hist:
-                hi = max(_br_hist) or 1.0
-                spark = "".join(" ▁▂▃▄▅▆▇█"[min(8, int(v / hi * 8))] for v in _br_hist)
+                _sp_hi = max(_br_hist) or 1.0
+                _sp_lo = min(_br_hist)
+                _sp_rng = _sp_hi - _sp_lo
+                if _sp_rng < _sp_hi * 0.05:  # stabilny → płaska linia
+                    spark = "▄" * len(_br_hist)
+                else:
+                    spark = "".join(" ▁▂▃▄▅▆▇█"[min(8, int((_v - _sp_lo) / _sp_rng * 8))]
+                                   for _v in _br_hist)
                 br_str = "" if cam_mode else f"  🚀 {_br_hist[-1]:.1f}Mb{buf_ms_str} {spark}"
             else:
                 br_str = ""
@@ -8233,8 +8246,17 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             br_val, spark16 = _br_file, "─" * 16
         elif _br_hist_draw:
             br_val = _br_hist_draw[-1]
-            hi = max(_br_hist_draw) or 1.0
-            spark16 = "".join(_SPARK16[min(8, int(v/hi*8))] for v in _br_hist_draw[-16:]).ljust(16)
+            _sp_hi  = max(_br_hist_draw) or 1.0
+            _sp_lo  = min(_br_hist_draw)
+            _sp_rng = _sp_hi - _sp_lo
+            _data16 = _br_hist_draw[-16:]
+            if _sp_rng < _sp_hi * 0.05:  # stabilny bitrate → płaska linia ▄
+                spark16 = ("▄" * len(_data16)).ljust(16)
+            else:                         # min-max: pełen zakres paska
+                spark16 = "".join(
+                    _SPARK16[min(8, int((_v - _sp_lo) / _sp_rng * 8))]
+                    for _v in _data16
+                ).ljust(16)
         else:
             br_val, spark16 = 0.0, " " * 16
         buf_ms = int(float(getattr(_fetch_state, "_buf_s_last", 0) or 0) * 1000)
@@ -8521,7 +8543,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             else:          ctrl.set_property(PROP_MAP[p], values[p])
         ctrl.set_property("speed", speed)
         ctrl.set_property("mute", muted)
-        ctrl.set_property("loop-file", "inf" if loop_mode_local else "no")
+        # loop-file: tylko dla 1 pliku — dla playlisty wrapper Pythona obsługuje loop
+        _loop_file_val = "inf" if (loop_mode_local and len(files) == 1) else "no"
+        ctrl.set_property("loop-file", _loop_file_val)
         _fetch_state()
 
     last_tick = _time.monotonic()
@@ -8582,10 +8606,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     last_msg = f"Mode: {ui_mode if cam_mode else ui_mode_file}"
                 elif 67 <= c <= 71:                                     # [L] loop
                     loop_mode_local = not loop_mode_local
-                    if ctrl and ctrl.is_alive():
+                    if len(files) == 1 and ctrl and ctrl.is_alive():
                         ctrl._send(["set_property", "loop-file",
                                     "inf" if loop_mode_local else "no"])
-                    last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
+                    last_msg = f"Loop {'🔁 ON (file)' if (loop_mode_local and len(files)==1) else ('🔁 ON (playlist)' if loop_mode_local else '⏹ OFF')}"
                 elif 73 <= c <= 78:                                     # [K>] mpv ctrl (placeholder)
                     pass
                 elif 79 <= c <= 80:                                     # 🎥 emoji (placeholder)
@@ -8916,7 +8940,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _mpv_pid = prof.pid if prof else None
             _mpv_alive = _mpv_pid and ProcessManager.is_running(_mpv_pid)
             if not _mpv_alive:
-                last_msg = "mpv stopped"; _draw(); _time.sleep(1); result = "quit"; break
+                # Plik zakończył się (EOF) lub mpv crashnął.
+                # Dla pliku bez loop → eof_next, żeby wrapper przeszedł do następnego.
+                # Dla kamer RTSP/V4L2 lub błędu → quit.
+                if is_file_cam and not loop_mode_local:
+                    last_msg = "EOF"; _draw(); _time.sleep(0.3)
+                    result = "eof_next"; break
+                else:
+                    last_msg = "mpv stopped"; _draw(); _time.sleep(1)
+                    result = "quit"; break
 
             _draw()
 
@@ -9046,14 +9078,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         last_msg = f"Duration: {cam.duration:.1f}s"
                 else:
                     loop_mode_local = not loop_mode_local
-                    if ctrl and ctrl.is_alive():
+                    # 1 plik: loop-file steruje mpv bezpośrednio
+                    # >1 plik: loop-file zawsze "no" — wrapper obsługuje listę
+                    if len(files) == 1 and ctrl and ctrl.is_alive():
                         ctrl._send(["set_property", "loop-file", "inf" if loop_mode_local else "no"])
-                    last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
+                    last_msg = f"Loop {'🔁 ON (file)' if (loop_mode_local and len(files)==1) else ('🔁 ON (playlist)' if loop_mode_local else '⏹ OFF')}"
             elif ch == 'L':
                 loop_mode_local = not loop_mode_local
-                if ctrl and ctrl.is_alive():
+                if len(files) == 1 and ctrl and ctrl.is_alive():
                     ctrl._send(["set_property", "loop-file", "inf" if loop_mode_local else "no"])
-                last_msg = f"Loop {'🔁 ON' if loop_mode_local else '⏹ OFF'}"
+                last_msg = f"Loop {'🔁 ON (file)' if (loop_mode_local and len(files)==1) else ('🔁 ON (playlist)' if loop_mode_local else '⏹ OFF')}"
 
             # --- s / S (saturation vs PTZ speed) ---
             elif ch == 's':
