@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.11"
+VERSION = "9.0.14"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1576,7 +1576,7 @@ class Config:
             cameras=cameras,
             player_cmd=_migrate_player_cmd(data.get("PLAYER_CMD", MPV_DEFAULT_CMD)),
             layout=layout,
-            auto_check_ip_changes=data.get("AUTO_CHECK_IP_CHANGES", False),
+            auto_check_ip_changes=data.get("AUTO_CHECK_IP_CHANGES", True),
             auto_check_interval=data.get("AUTO_CHECK_INTERVAL", 300),
             session_state=session_state,
             default_image_params=data.get("DEFAULT_IMAGE_PARAMS")
@@ -5533,8 +5533,24 @@ class PTZMasterApp:
         
         added = 0
         for cam_data in to_add:
-            if any(c.ip == cam_data["ip"] for c in self.config.cameras):
-                print(f"  {YLW}Skipping {cam_data['ip']} (exists){RST}")
+            _mac = cam_data["mac"]
+            _ip  = cam_data["ip"]
+            # Sprawdź duplikat po IP lub po MAC (MAC jest pewniejszy po zmianie IP)
+            _dup_ip  = any(c.ip == _ip for c in self.config.cameras)
+            _dup_mac = (_mac not in ("", "UNKNOWN") and
+                        any(c.mac == _mac for c in self.config.cameras))
+            if _dup_ip:
+                print(f"  {YLW}Skipping {_ip} (IP already in list){RST}")
+                continue
+            if _dup_mac:
+                # Kamera istnieje pod innym IP — zaktualizuj zamiast dodawać
+                existing = next(c for c in self.config.cameras if c.mac == _mac)
+                if existing.ip != _ip:
+                    old_ip = existing.ip
+                    NetworkUtils.resolve_ip(existing)  # aktualizuje IP i URI
+                    print(f"  {YLW}Updated {existing.name}: {old_ip} → {existing.ip}{RST}")
+                else:
+                    print(f"  {YLW}Skipping {_ip} (MAC already in list){RST}")
                 continue
             
             ports = CameraPorts()
@@ -5546,16 +5562,16 @@ class PTZMasterApp:
                 ports.onvif = cam_data["port"] or 80
             
             cam = Camera(
-                name=f"Cam_{cam_data['ip'].split('.')[-1]}",
-                ip=cam_data["ip"],
-                mac=cam_data["mac"],
+                name=f"Cam_{_ip.split('.')[-1]}",
+                ip=_ip,
+                mac=_mac,
                 ports=ports,
                 cam_type=cam_data["type"]
             )
             
             self.config.cameras.append(cam)
             added += 1
-            logger.info(f"Added camera: {cam_data['ip']} ({cam_data['type'].value})")
+            logger.info(f"Added camera: {_ip} ({cam_data['type'].value}) MAC={_mac}")
         
         if added > 0:
             self.config_mgr.save()
@@ -5716,9 +5732,25 @@ class PTZMasterApp:
         
         added = 0
         for cam_data in to_add:
-            if any(c.ip == cam_data["ip"] for c in self.config.cameras):
-                print(f"  {YLW}Skipping {cam_data['ip']} (exists){RST}")
+            _mac = cam_data["mac"]
+            _ip  = cam_data["ip"]
+            _mac_known = _mac not in ("", "UNKNOWN")
+            # MAC = tożsamość kamery, IP = adres (może się zmienić)
+            # Priorytet: najpierw szukaj po MAC, potem po IP
+            if _mac_known:
+                _by_mac = next((c for c in self.config.cameras if c.mac == _mac), None)
+                if _by_mac:
+                    if _by_mac.ip != _ip:
+                        _old_ip = _by_mac.ip
+                        NetworkUtils.resolve_ip(_by_mac)
+                        print(f"  {GRN}Updated {_by_mac.name}: {_old_ip} → {_by_mac.ip}{RST}")
+                    else:
+                        print(f"  {DIM}Skipping {_ip} — known camera (MAC){RST}")
+                    continue
+            if any(c.ip == _ip for c in self.config.cameras):
+                print(f"  {DIM}Skipping {_ip} — known camera (IP){RST}")
                 continue
+            # Nowa kamera — MAC nieznany lub nie pasuje do żadnej istniejącej
             
             ports = CameraPorts()
             if cam_data["type"] == CameraType.DVRIP:
@@ -5729,15 +5761,15 @@ class PTZMasterApp:
                 ports.onvif = cam_data["port"] or 80
             
             cam = Camera(
-                name=f"Cam_{cam_data['ip'].split('.')[-1]}",
-                ip=cam_data["ip"],
-                mac=cam_data["mac"],
+                name=f"Cam_{_ip.split('.')[-1]}",
+                ip=_ip,
+                mac=_mac,
                 ports=ports,
                 cam_type=cam_data["type"]
             )
             self.config.cameras.append(cam)
             added += 1
-            logger.info(f"Added camera: {cam_data['ip']} ({cam_data['type'].value})")
+            logger.info(f"Added camera: {_ip} ({cam_data['type'].value}) MAC={_mac}")
         
         if added > 0:
             self.config_mgr.save()
@@ -8246,8 +8278,17 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             br_val, spark16 = _br_file, "─" * 16
         elif _br_hist_draw:
             br_val = _br_hist_draw[-1]
-            hi = max(_br_hist_draw) or 1.0
-            spark16 = "".join(_SPARK16[min(8, int(v/hi*8))] for v in _br_hist_draw[-16:]).ljust(16)
+            _sp_hi  = max(_br_hist_draw) or 1.0
+            _sp_lo  = min(_br_hist_draw)
+            _sp_rng = _sp_hi - _sp_lo
+            _data16 = _br_hist_draw[-16:]
+            if _sp_rng < _sp_hi * 0.05:  # stabilny bitrate → płaska linia ▄
+                spark16 = ("▄" * len(_data16)).ljust(16)
+            else:                         # min-max: pełen zakres paska
+                spark16 = "".join(
+                    _SPARK16[min(8, int((_v - _sp_lo) / _sp_rng * 8))]
+                    for _v in _data16
+                ).ljust(16)
         else:
             br_val, spark16 = 0.0, " " * 16
         buf_ms = int(float(getattr(_fetch_state, "_buf_s_last", 0) or 0) * 1000)
