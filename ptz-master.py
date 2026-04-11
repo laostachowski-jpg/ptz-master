@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.14"
+VERSION = "9.0.15"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1523,7 +1523,8 @@ class Config:
                  auto_check_ip_changes: bool = True,
                  auto_check_interval: int = 300,
                  session_state: Optional[SessionState] = None,
-                 default_image_params: Optional[dict] = None):
+                 default_image_params: Optional[dict] = None,
+                 global_mute: bool = False):
         self.cameras = cameras or []
         self.player_cmd = player_cmd
         self.layout = layout or {
@@ -1533,6 +1534,7 @@ class Config:
         self.auto_check_ip_changes = auto_check_ip_changes
         self.auto_check_interval = auto_check_interval
         self.session_state = session_state
+        self.global_mute = global_mute
         # Domyślne parametry obrazu dla nowych plików
         if default_image_params:
             self.default_image_params = default_image_params
@@ -1547,6 +1549,7 @@ class Config:
             },
             "AUTO_CHECK_IP_CHANGES": self.auto_check_ip_changes,
             "AUTO_CHECK_INTERVAL": self.auto_check_interval,
+            "GLOBAL_MUTE": self.global_mute,
             "CAMERAS": [c.to_dict() for c in self.cameras]
         }
         # Zapisz domyślne parametry jeśli różnią się od fabrycznych
@@ -1579,7 +1582,8 @@ class Config:
             auto_check_ip_changes=data.get("AUTO_CHECK_IP_CHANGES", True),
             auto_check_interval=data.get("AUTO_CHECK_INTERVAL", 300),
             session_state=session_state,
-            default_image_params=data.get("DEFAULT_IMAGE_PARAMS")
+            default_image_params=data.get("DEFAULT_IMAGE_PARAMS"),
+            global_mute=data.get("GLOBAL_MUTE", False)
         )
 
 class ConfigManager:
@@ -3366,7 +3370,7 @@ class V4L2Scanner:
 class Player:
     @staticmethod
     def play(cam: Camera, profile: CameraProfile, player_cmd: str, layout: WindowLayout,
-             skip_focus: bool = False) -> bool:
+             skip_focus: bool = False, global_mute: bool = False) -> bool:
         if not shutil.which('mpv'):
             notify("mpv not found!", "error")
             return False
@@ -3376,12 +3380,13 @@ class Player:
         try:
             if cam.type == CameraType.V4L2:
                 return Player._play_v4l2(cam, profile, layout, player_cmd,
-                                         skip_focus=skip_focus)
+                                         skip_focus=skip_focus, global_mute=global_mute)
             elif cam.type == CameraType.FILE:
-                return Player._play_file(cam, layout, skip_focus=skip_focus)
+                return Player._play_file(cam, layout, skip_focus=skip_focus,
+                                         global_mute=global_mute)
             else:
                 return Player._play_rtsp(cam, profile, player_cmd, layout,
-                                         skip_focus=skip_focus)
+                                         skip_focus=skip_focus, global_mute=global_mute)
         except Exception as e:
             logger.error(f"Error starting player: {e}")
             notify(f"Player error: {str(e)[:30]}", "error")
@@ -3390,7 +3395,8 @@ class Player:
     @staticmethod
     def _play_file(cam: Camera, layout: WindowLayout,
                    _watchdog_restart: bool = False,
-                   skip_focus: bool = False) -> bool:
+                   skip_focus: bool = False,
+                   global_mute: bool = False) -> bool:
         if not cam.file_path or not os.path.isfile(cam.file_path):
             notify(f"FILE: file not found: {cam.file_path}", "error")
             return False
@@ -3420,7 +3426,7 @@ class Player:
         if ip.get("hue",        0) != 0: args.append(f'--hue={int(ip["hue"])}')
         vol = ip.get("volume", 100)
         if vol != 100: args.append(f'--volume={int(vol)}')
-        if ip.get("mute", False):        args.append('--mute=yes')
+        if ip.get("mute", False) or global_mute: args.append('--mute=yes')
         if cam.file_loop:
             args.append('--loop-file=inf')
         if cam.file_start > 0:
@@ -3437,7 +3443,8 @@ class Player:
         logger.info(f"FILE player PID: {proc.pid}")
 
         def _restart(c, p):
-            Player._play_file(c, layout, _watchdog_restart=True)
+            Player._play_file(c, layout, _watchdog_restart=True,
+                              global_mute=global_mute)
 
         if not _watchdog_restart:
             PlayerWatchdog.reset_restart_count(cam.name)
@@ -3468,7 +3475,7 @@ class Player:
     @staticmethod
     def _play_v4l2(cam: Camera, profile: CameraProfile, layout: WindowLayout,
                     player_cmd: str = "", _watchdog_restart: bool = False,
-                    skip_focus: bool = False) -> bool:
+                    skip_focus: bool = False, global_mute: bool = False) -> bool:
         name_safe = cam.name.replace(' ', '_')
         dev_short = cam.device.split('/')[-1] if cam.device else "video"
 
@@ -3528,7 +3535,8 @@ class Player:
         logger.info(f"V4L2 player PID: {proc.pid}")
 
         def _restart(cam, profile):
-            Player._play_v4l2(cam, profile, layout, player_cmd, _watchdog_restart=True)
+            Player._play_v4l2(cam, profile, layout, player_cmd, _watchdog_restart=True,
+                              global_mute=global_mute)
 
         if not _watchdog_restart:
             PlayerWatchdog.reset_restart_count(cam.name)
@@ -3555,7 +3563,7 @@ class Player:
         return True
 
     @staticmethod
-    def _play_rtsp(cam: Camera, profile: CameraProfile, player_cmd: str, layout: WindowLayout, _watchdog_restart: bool = False, skip_focus: bool = False) -> bool:
+    def _play_rtsp(cam: Camera, profile: CameraProfile, player_cmd: str, layout: WindowLayout, _watchdog_restart: bool = False, skip_focus: bool = False, global_mute: bool = False) -> bool:
         if not _watchdog_restart:
             NetworkUtils.resolve_ip(cam)
         name_safe = cam.name.replace(' ', '_')
@@ -3576,8 +3584,9 @@ class Player:
             f'--geometry={layout.w}x{layout.h}+{layout.x}+{layout.y}',
             f'--title=LIVE:{name_safe}',
             f'--input-ipc-server={ipc_path}',
-            profile.uri
         ]
+        if global_mute: full_args.append('--mute=yes')
+        full_args.append(profile.uri)
 
         cmd_str = ' '.join(f'"{a}"' if ' ' in a else a for a in full_args)
         logger.info(f"RTSP mpv command: {cmd_str}")
@@ -3589,7 +3598,8 @@ class Player:
         logger.info(f"RTSP player PID: {proc.pid}")
 
         def _restart(cam, profile):
-            Player._play_rtsp(cam, profile, player_cmd, layout, _watchdog_restart=True)
+            Player._play_rtsp(cam, profile, player_cmd, layout, _watchdog_restart=True,
+                              global_mute=global_mute)
 
         if not _watchdog_restart:
             PlayerWatchdog.reset_restart_count(cam.name)
@@ -3785,7 +3795,9 @@ class UI:
         print('│'+pad(f'  {dsL} {dsC} {dsR}  │  Zoom: [{dsZP}] [{dsZM}]', 33)+'│'+pad(f' {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST} ', FW-34)+'│')
         print('│'+pad(f'    {dsD}    │', 33)+'│'+pad(f' {YLW}(z){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save', FW-34)+'│')
         cam_nav      = f"({self.current_idx + 1}/{total})"
-        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {YLW}(q){RST}"
+        _gm = self.config.global_mute
+        _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
+        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}F6{RST} {YLW}(q){RST}"
         footer_right = f"{CYN}v{VERSION}{RST} "
         print(f"├" + "─" * FW + "┤")
         print(f"│{pad(footer_left, FW - ansilen(footer_right))}{footer_right}│")
@@ -3888,7 +3900,8 @@ class PTZMasterApp:
 
             layout = cam.layout or self.config.layout["mpv_default"]
             if Player.play(cam, prof, self.config.player_cmd, layout,
-                           skip_focus=True):
+                           skip_focus=True,
+                           global_mute=self.config.global_mute):
                 print(f"  {GRN}✓{RST} {cam.name}")
                 if prof.pid:
                     started_pids.append(prof.pid)
@@ -4666,6 +4679,22 @@ class PTZMasterApp:
                         cam.duration = max(0.1, round(cam.duration - 0.1, 1))
                         logger.debug(f"Duration changed: {old} -> {cam.duration}")
                     self.ui.draw()
+                elif key in (Key.F6, '\\'):
+                    # Global mute toggle — działa niezależnie od aktywnej kamery
+                    self.config.global_mute = not self.config.global_mute
+                    _gm = self.config.global_mute
+                    # Zastosuj natychmiast do wszystkich grających instancji mpv
+                    for _cam in self.config.cameras:
+                        for _prof in _cam.profiles:
+                            if _prof.pid and ProcessManager.is_running(_prof.pid):
+                                _ctrl = _prof.get_mpv()
+                                if _ctrl and _ctrl.is_alive():
+                                    _ctrl.set_property("mute", _gm)
+                    self.config_mgr.save()
+                    notify(f"🔇 Global mute {'ON' if _gm else 'OFF'}",
+                           "warning" if _gm else "info")
+                    logger.info(f"Global mute toggled: {_gm}")
+                    self.ui.draw()
                 elif key.lower() == 'z':
                     cam = self.ui.current_camera
                     if cam:
@@ -4980,7 +5009,8 @@ class PTZMasterApp:
             return
         
         layout = cam.layout or self.config.layout["mpv_default"]
-        Player.play(cam, prof, self.config.player_cmd, layout)
+        Player.play(cam, prof, self.config.player_cmd, layout,
+                    global_mute=self.config.global_mute)
     
     def _show_debug_xml(self, xml: str):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
@@ -6314,7 +6344,8 @@ class PTZMasterApp:
                 ProcessManager.kill(prof.pid)
                 time.sleep(0.5)
                 layout = cam.layout or self.config.layout.get("mpv_default", WindowLayout())
-                Player._play_rtsp(cam, prof, self.config.player_cmd, layout)
+                Player._play_rtsp(cam, prof, self.config.player_cmd, layout,
+                                  global_mute=self.config.global_mute)
 
         notify(f"Auto-check: {len(changes)} camera(s) changed IP", "info")
 
@@ -7159,6 +7190,7 @@ class PTZMasterApp:
             ("BATCH & DISCOVERY", ""),
             ("F2", "Discover cameras (ping/nmap/V4L2)"),
             ("F3", "Batch operations"),
+            ("F6 / \\", "Global mute toggle (all playing cameras)"),
             ("", ""),
             ("HELP & SYSTEM", ""),
             ("F1", "Show this help"),
@@ -7246,7 +7278,8 @@ class PlayerModeApp:
             return
         self._cam, self._prof = self._make_cam_prof(path)
         layout = self.config.layout.get("mpv_default") or WindowLayout(0, 0, 640, 360)
-        Player._play_file(self._cam, layout)
+        Player._play_file(self._cam, layout,
+                          global_mute=self.config.global_mute)
 
     def _save_as_camera(self, name: str):
         path = self.files[self.idx]
@@ -7434,7 +7467,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     last_step_dir = None
     _ip    = cam.image_params if hasattr(cam, 'image_params') else {}
     speed  = _ip.get("speed",  1.0)
-    muted  = _ip.get("mute",   False)
+    # global_mute ma priorytet — jeśli włączony globalnie, startuj wyciszony
+    _global_mute = config_mgr.config.global_mute if config_mgr else False
+    muted  = _global_mute or _ip.get("mute", False)
 
     PARAMS   = ["BRIGHTNESS", "CONTRAST", "SATURATION", "GAMMA", "HUE", "VOL"]
     PROP_MAP = {
@@ -7675,7 +7710,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         muted = not muted
         ctrl.set_property("mute", muted)
-        last_msg = f"Mute ({'ON' if muted else 'OFF'})"
+        # Synchronizuj global_mute — następna kamera/plik dziedziczy
+        if config_mgr:
+            config_mgr.config.global_mute = muted
+        last_msg = f"🔇 Global mute {'ON' if muted else 'OFF'}"
 
     def _zoom_apply():
         if not ctrl: return
@@ -8396,8 +8434,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             b = bar(p)
             if p == "VOL":
                 vstr = f"{GRN if values[p]==100 else YLW} {values[p]:3d}%{RST}"
+                _gm = config_mgr.config.global_mute if config_mgr else muted
                 mute_color = RED if muted else YLW
-                mute_status = f"  {YLW}[{mute_color}M{RST}{YLW}]{RST} {mute_color}Mute ({'ON' if muted else 'OFF'}){RST}"
+                _mute_lbl = f"🔇 Global mute ON" if _gm else f"Mute ({'ON' if muted else 'OFF'})"
+                mute_status = f"  {YLW}[{mute_color}M{RST}{YLW}]{RST} {mute_color}{_mute_lbl}{RST}"
                 row(f" {cursor}{ICONS[p]}{MAG}{p:<11}{RST} {b} {vstr}{mute_status}")
             else:
                 vstr = f"{GRN if values[p]==0 else YLW}{values[p]:+4d}%{RST}"
