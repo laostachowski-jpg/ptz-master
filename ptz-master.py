@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.15"
+VERSION = "9.0.16"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -8292,10 +8292,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         sep()
 
         # --- Pasek postępu / AB-loop ------------------------------------------
-        pb = _prog_bar(pos_f, dur_f, width=22)
         ts = f"{_fmt_time(pos_f)} / {_fmt_time(dur_f)}"
-        fps_tag = f"  {DIM}{fps:.0f}fps{RST}" if fps > 0 else ""
+        _fps_vis = f"  {fps:.0f}fps" if fps > 0 else ""  # widoczna długość bez ANSI
+        fps_tag  = f"  {DIM}{fps:.0f}fps{RST}" if fps > 0 else ""
         _L, _R = 48, 29
+        # ⏱(2)+spacje(2)=4, spacja(1) między pb a ts — reszta na pasek
+        _pb_w = max(8, _L - 4 - 1 - len(ts) - len(_fps_vis))
+        pb = _prog_bar(pos_f, dur_f, width=_pb_w)
         _blink = int(_time.time() * 2) % 2
         _A_fix   = f"{YLW}[A]{RST}"
         _A_blink = f"{YLW}[A]{RST}" if _blink else f"{DIM}[A]{RST}"
