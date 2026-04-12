@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.17"
+VERSION = "9.0.19"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -138,7 +138,7 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
             return bool(ext) and ext not in {'.json', '.conf', '.cfg', '.ini', '.txt', '.yaml', '.yml'}
         
         video_exts = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', 
-                     '.m4v', '.mpg', '.mpeg', '.ts', '.m2ts', '.3gp', '.ogv'}
+                     '.m4v', '.mpg', '.mpeg', '.ts', '.m2ts', '.3gp', '.ogv', '.mp3'}
         
         ext = os.path.splitext(path)[1].lower()
         if ext in video_exts:
@@ -183,6 +183,8 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
             print(f"  --mac MAC           Start on camera with MAC")
             print(f"  CONFIG              Use config file (default: {DEFAULT_CONFIG})")
             sys.exit(0)
+        elif arg in ('--debug', '-d'):
+            debug_mode = True
         elif arg in ('--restore', '-r'):
             restore_mode = True
         elif arg in ('-p', '--player'):
@@ -453,7 +455,7 @@ class Camera:
         )
 
 MPV_DEFAULT_CMD = (
-    "mpv --rtsp-transport=tcp --no-border --no-audio "
+    "mpv --rtsp-transport=tcp --no-border "
     "--hwdec=vaapi-copy --hwdec-codecs=all "
     "--cache=yes --cache-secs=10 "
     "--video-sync=display-vdrop --framedrop=vo "
@@ -2831,7 +2833,7 @@ class RTSPScanner:
                 print(f"\n{CYN}Testing stream: {path} {res}{RST}")
                 logger.info(f"Testing selected stream: {path}")
                 subprocess.run(
-                    ['mpv', '--rtsp-transport=tcp', '--no-audio', uri],
+                    ['mpv', '--rtsp-transport=tcp', uri],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 mouse_on(); get_key(); mouse_off()
@@ -3408,6 +3410,12 @@ class Player:
         except FileNotFoundError:
             pass
 
+        # Wykryj plik audio (brak video) — dodaj wizualizację oscilloscope
+        _AUDIO_EXTS = {'.mp3', '.flac', '.ogg', '.opus', '.m4a',
+                       '.aac', '.wav', '.wma', '.ape', '.mka'}
+        _ext = os.path.splitext(cam.file_path)[1].lower()
+        _is_audio_only = _ext in _AUDIO_EXTS
+
         args = [
             'mpv',
             cam.file_path,
@@ -3417,6 +3425,13 @@ class Player:
             f'--input-ipc-server={ipc_path}',
             f'--speed={cam.image_params.get("speed", cam.file_speed):.2f}',
         ]
+        if _is_audio_only:
+            # Oscyloskop / wizualizacja audio przez lavfi
+            _vis_size = f"{layout.w}x{layout.h}"
+            args += [
+                f'--lavfi-complex=[aid1]asplit=2[ao][a1];[a1]avectorscope=s={_vis_size}:zoom=1.5:rc=0:gc=200:bc=0:rf=1:gf=8:bf=7[vo]',
+                '--no-audio-display',
+            ]
         # Zastosuj image_params bezpośrednio w komendzie mpv — bez czekania na IPC
         ip = cam.image_params
         if ip.get("brightness", 0) != 0: args.append(f'--brightness={int(ip["brightness"])}')
@@ -3518,7 +3533,6 @@ class Player:
             f'av://v4l2:{cam.device}',
             '--demuxer-lavf-analyzeduration=0.5',
             f'--demuxer-lavf-o={",".join(lavf_opts)}',
-            '--no-audio',
             f'--geometry={layout.w}x{layout.h}+{layout.x}+{layout.y}',
             f'--title=LIVE:{name_safe}[{dev_short}]',
             f'--input-ipc-server={ipc_path}',
@@ -7529,6 +7543,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if sp is not None: speed  = float(sp)
         if vo is not None: values["VOL"] = int(vo)
         if pa is not None and not auto_run: paused = bool(pa)
+        # Drag & drop: śledź aktualny plik bezpośrednio z mpv
+        _cur_path = ctrl.get_property("path")
+        if _cur_path and _cur_path != getattr(_fetch_state, "_last_path", None):
+            _fetch_state._last_path  = _cur_path
+            _fetch_state._last_title = ctrl.get_property("media-title") or os.path.basename(_cur_path)
+            _fetch_state._ffprobe_br = None  # wymuś ponowny odczyt bitrate
+            logger.debug(f"mpv path changed: {_cur_path}")
         for pp in PARAMS:
             if pp == "VOL": continue
             v = ctrl.get_property(PROP_MAP[pp])
@@ -7541,25 +7562,34 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _fetch_state._vid_w = int(w)
             _fetch_state._vid_h = int(h)
 
-        # Audio info – pobierane z track-list (działa dla RTSP i plików)
+        # Audio info — track-list jest najbardziej wiarygodne
         ac = None
-        ar = None
-        ach = None
+        ar = None   # samplerate jako int lub None
+        ach = None  # channel count jako int lub None
+        abr = None  # bitrate z demux
         track_list = ctrl._send(["get_property", "track-list"])
         if track_list and track_list.get("error") == "success":
             for track in track_list.get("data", []):
                 if track.get("type") == "audio" and track.get("selected"):
-                    ac = track.get("codec")
-                    ar = track.get("demux-samplerate") or track.get("samplerate")
-                    ach = track.get("demux-channel-count") or track.get("channels")
+                    ac  = track.get("codec")
+                    # demux-samplerate jest int — nie używaj "or" (0 jest falsy)
+                    _sr = track.get("demux-samplerate")
+                    ar  = _sr if _sr is not None else track.get("samplerate")
+                    _ch = track.get("demux-channel-count")
+                    ach = _ch if _ch is not None else track.get("audio-channels")
+                    abr = track.get("demux-bitrate")
                     break
-        # fallback do starych właściwości, gdyby track-list było puste
+        # Fallback — stare właściwości (gdy track-list puste: RTSP przed buforem)
         if not ac:
             ac = ctrl.get_property("audio-codec-name") or ctrl.get_property("audio-codec")
-        if not ar:
-            ar = ctrl.get_property("audio-params/samplerate") or ctrl.get_property("audio-samplerate")
-        if not ach:
-            ach = ctrl.get_property("audio-channels")
+        if ar is None:
+            _ar = ctrl.get_property("audio-params/samplerate")
+            ar  = _ar if (_ar is not None and _ar != 0) else None
+        if ach is None:
+            # audio-channels zwraca "auto-safe" — bezużyteczne
+            # audio-params/channel-count zwraca int — poprawne
+            _ach = ctrl.get_property("audio-params/channel-count")
+            ach  = _ach if (_ach is not None and _ach != 0) else None
 
         vs = _codec_name(vc)
         as_ = _codec_name(ac) if ac else "—"
@@ -7567,19 +7597,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         hs = str(int(h)) if h else "—"
         fps_s = f" {fps:.1f}fps" if fps else ""
         ar_s  = f" {int(ar)//1000}kHz" if ar else ""
-        # ... reszta formatowania kanałów (ach_s) jak dotychczas
-        ach_real = ctrl.get_property("audio-params/channel-count")
-        if ach_real:
-            try:    ach_s = f" {int(ach_real)}ch"
-            except: ach_s = ""
-        elif ach:
+        # Formatowanie kanałów z int (nie string "auto-safe")
+        if ach:
             _ACH_MAP = {
-                "mono": "1ch", "stereo": "2ch", "2.1": "2.1", "3.0": "3.0",
-                "quad": "4ch", "4.0":   "4ch",  "5.0": "5.0", "5.1": "5.1",
-                "6.1":  "6.1", "7.1":   "7.1",  "auto": "",   "auto-safe": "",
+                1: "mono", 2: "stereo", 3: "3.0", 4: "4.0",
+                6: "5.1",  7: "6.1",   8: "7.1",
             }
-            try:    ach_s = f" {int(ach)}ch"
-            except: ach_s = f" {_ACH_MAP.get(str(ach), '')}"
+            try:
+                _n = int(ach)
+                ach_s = f" {_ACH_MAP.get(_n, str(_n)+'ch')}"
+            except: ach_s = ""
         else:
             ach_s = ""
         buf_s = ctrl.get_property("demuxer-cache-duration")
@@ -8289,7 +8316,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             if len(fname) > 36: fname = fname[:33] + "..."
             row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}T{YLW}[Z]{RST} {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
         else:
-            fname = os.path.basename(files[current_idx])
+            # Drag & drop: użyj tytułu z IPC jeśli mpv gra inny plik
+            _ipc_title = getattr(_fetch_state, "_last_title", None)
+            _ipc_path  = getattr(_fetch_state, "_last_path", None)
+            _static    = files[current_idx] if current_idx < len(files) else ""
+            if _ipc_path and os.path.abspath(_ipc_path) != os.path.abspath(_static):
+                fname = (_ipc_title or os.path.basename(_ipc_path))
+                fname = fname + " ↕"  # wskaźnik że to plik wrzucony do mpv
+            else:
+                fname = os.path.basename(_static)
             loop_char = "🔁" if loop_mode_local else "⏹ "
             nav_prev = f"{YLW}[◄,]{RST}"
             nav_next = f"{YLW}[.►]{RST}"
@@ -8695,10 +8730,18 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         ctrl._send(["set_property", "loop-file",
                                     "inf" if loop_mode_local else "no"])
                     last_msg = f"Loop {'🔁 ON (file)' if (loop_mode_local and len(files)==1) else ('🔁 ON (playlist)' if loop_mode_local else '⏹ OFF')}"
-                elif 73 <= c <= 78:                                     # [K>] mpv ctrl (placeholder)
-                    pass
-                elif 79 <= c <= 80:                                     # 🎥 emoji (placeholder)
-                    pass
+                elif 73 <= c <= 78:                                     # [K>] save as camera
+                    if save_as_camera_fn:
+                        _mouse_off()
+                        name = _ask_save_name()
+                        if name: save_as_camera_fn(name); last_msg = f"📷 saved as '{name}'"
+                        _mouse_on()
+                elif 79 <= c <= 80:                                     # 🎥 (same as [K>])
+                    if save_as_camera_fn:
+                        _mouse_off()
+                        name = _ask_save_name()
+                        if name: save_as_camera_fn(name); last_msg = f"📷 saved as '{name}'"
+                        _mouse_on()
 
             # Row 5: Progress bar and AB‑loop markers
             elif r == 5 and dur_f > 0:
@@ -9093,7 +9136,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         if cam_mode and ui_mode == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
                         elif cam_mode and ui_mode == "PTZ": _ptz_move(1.0 if forward else -1.0, 0.0)
                         elif not cam_mode and ui_mode_file == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
-                        elif paused: _frame_step(forward)
                         else: _set_val(PARAMS[sel], +step if forward else -step)
                     elif ch3 == 'A':
                         if cam_mode and ui_mode == "PAN": _pan(0, +PAN_STEP)
@@ -9191,8 +9233,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 elif ab_b < 0: _ab_set_b()
                 else: _ab_clear()
             elif ch.lower() in JUMP_KEY: sel = JUMP_KEY[ch.lower()]
-            elif ch == '[' and paused: _frame_step(False)
-            elif ch == ']' and paused: _frame_step(True)
+            elif ch == '[':
+                if paused: _frame_step(False)    # krok wstecz
+                else: _seek(-1.0)               # przewijanie 1s gdy gra
+            elif ch == ']':
+                if paused: _frame_step(True)     # krok wprzód
+                else: _seek(+1.0)               # przewijanie 1s gdy gra
             elif ch == '+':
                 if cam_mode and ui_mode == "PTZ": _ptz_move(0, 0, 1.0)
                 elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"): _zoom_in()
