@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.16"
+VERSION = "9.0.17"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3523,6 +3523,8 @@ class Player:
             f'--title=LIVE:{name_safe}[{dev_short}]',
             f'--input-ipc-server={ipc_path}',
         ]
+        if global_mute:
+            args.append('--mute=yes')
         if '--no-border' in (player_cmd or ''):
             args.insert(1, '--no-border')
 
@@ -3821,7 +3823,7 @@ class UI:
         self.progress = progress
 
 # =============================================================================
-# MAIN APPLICATION
+# MAIN CAMERA CONTROL SCREEN (PTZMasterApp) Start
 # =============================================================================
 
 class PTZMasterApp:
@@ -7220,7 +7222,11 @@ class PTZMasterApp:
         self._wait_click_or_key()
 
 # =============================================================================
-# PLAYER MODE
+# MAIN CAMERA CONTROL SCREEN (PTZMasterApp) End
+# =============================================================================
+
+# =============================================================================
+# PLAYER MODE MPV CONTROL SCREEN PLAYER Start
 # =============================================================================
 
 class PlayerModeApp:
@@ -7365,9 +7371,6 @@ class PlayerModeApp:
             else:
                 break
 
-# =============================================================================
-# MPV CONTROL SCREEN PLAYER Start
-# =============================================================================
 def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 save_as_camera_fn=None, config_mgr=None,
                                 loop_mode=False, cam_mode=False,
@@ -7454,7 +7457,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     zoom_val      = 0.0
     pan_x         = 0.0
     pan_y         = 0.0
-    ZOOM_STEP     = 0.5
+    ZOOM_STEP     = 0.1
+    ZOOM_MIN      = -3.0
+    ZOOM_MAX      = 3.0
     PAN_STEP      = 0.1
     ab_a          = -1.0
     ab_b          = -1.0
@@ -7725,26 +7730,31 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _zoom_in():
         nonlocal zoom_val, zoom_mode, last_msg
-        zoom_mode = True; zoom_val = min(zoom_val + ZOOM_STEP, 4.0)
+        zoom_val = min(zoom_val + ZOOM_STEP, ZOOM_MAX)
+        zoom_mode = True
         _zoom_apply()
         last_msg = f"🔍 Zoom: {2.0**zoom_val:.2f}x"
 
     def _zoom_out():
         nonlocal zoom_val, zoom_mode, last_msg
-        zoom_val = max(zoom_val - ZOOM_STEP, 0.0)
-        if zoom_val == 0.0: zoom_mode = False; _zoom_reset(); return
+        zoom_val = max(zoom_val - ZOOM_STEP, ZOOM_MIN)
+        zoom_mode = True
         _zoom_apply()
         last_msg = f"🔍 Zoom: {2.0**zoom_val:.2f}x"
 
     def _zoom_zero():
         nonlocal zoom_val, zoom_mode, last_msg
-        zoom_val = 0.0; zoom_mode = False
+        zoom_val = 0.0
+        zoom_mode = False   # lub True? Dla 0 nie ma zoomu, ale pan może być niezależne
         _zoom_apply()
         last_msg = "🔍 Zoom → 1.0x"
 
     def _zoom_reset():
         nonlocal zoom_val, pan_x, pan_y, zoom_mode, last_msg
-        zoom_val = 0.0; pan_x = 0.0; pan_y = 0.0; zoom_mode = False
+        zoom_val = 0.0
+        pan_x = 0.0
+        pan_y = 0.0
+        zoom_mode = False
         _zoom_apply()
         last_msg = "🔍 Zoom+Pan reset"
 
@@ -8772,7 +8782,33 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 elif 61 <= c <= 72:
                     pass  # TODO_bar_progress()
 
-            # Rows 11–13: Zoom/Pan panel (right side)
+            # ------------------------------------------------------------------
+            # Row 10: Header with mode icons (different for CAMERA vs PLAYER)
+            # ------------------------------------------------------------------
+            if r == 10 and c >= 46:
+                # [Z📊] SELECT – kolumny ok. 55-59 (dla obu trybów)
+                if 55 <= c <= 59:
+                    if cam_mode:
+                        ui_mode = "SELECT"
+                    else:
+                        ui_mode_file = "SELECT"
+                    last_msg = "Mode: SELECT"
+                # [Z📺] PAN – kolumny ok. 60-64 (dla obu trybów)
+                elif 60 <= c <= 64:
+                    if cam_mode:
+                        ui_mode = "PAN"
+                    else:
+                        ui_mode_file = "PAN"
+                    last_msg = "Mode: PAN"
+                # [Z🎥] PTZ – tylko w trybie CAMERA, kolumny ok. 65-69
+                elif 65 <= c <= 69 and cam_mode:
+                    ui_mode = "PTZ"
+                    last_msg = "Mode: PTZ"
+
+            # ------------------------------------------------------------------
+            # Rows 11–13: Zoom/Pan panel – identyczne dla obu trybów
+            # (różnica tylko w dostępności trybu PTZ)
+            # ------------------------------------------------------------------
             elif r == 11 and 46 <= c <= 79:                             # ▲ and zoom controls (PAN/PTZ)
                 if c == 49:                                             # ▲
                     if cam_mode:
@@ -8787,23 +8823,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             sel = (sel - 1) % len(PARAMS)
                         elif ui_mode_file == "PAN":
                             _pan(0, +PAN_STEP)
-                # Przyciski dostępne tylko w trybie SELECT (wiersz 11)
-                elif cam_mode and ui_mode == "SELECT":
+                # Przyciski dostępne tylko w trybie SELECT
+                elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 58 <= c <= 62:       # [0🔍] – reset obrazu
                         _reset_image_settings()
                     elif 66 <= c <= 68:     # [↑]
                         sel = (sel - 1) % len(PARAMS)
                     elif 69 <= c <= 71:     # [↓]
                         sel = (sel + 1) % len(PARAMS)
-                elif not cam_mode and ui_mode_file == "SELECT":
-                    if 55 <= c <= 59:
-                        _reset_image_settings()
-                    elif 62 <= c <= 64:
-                        sel = (sel - 1) % len(PARAMS)
-                    elif 65 <= c <= 67:
-                        sel = (sel + 1) % len(PARAMS)
-                # Przyciski specyficzne dla trybu PAN (wiersz 11)
-                elif cam_mode and ui_mode == "PAN":
+                # Przyciski specyficzne dla trybu PAN (zoom i reset)
+                elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"):
                     if 58 <= c <= 62:       # [0🔍] – reset zoom/pan
                         _zoom_reset()
                     elif 64 <= c <= 66:     # [+]
@@ -8812,7 +8841,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         _zoom_out()
                     elif 73 <= c <= 77:     # "1.0x" – edycja zoomu
                         _edit_zoom()
-                # Przyciski specyficzne dla trybu PTZ (wiersz 11)
+                # Przyciski specyficzne dla trybu PTZ (tylko CAMERA)
                 elif cam_mode and ui_mode == "PTZ":
                     if 58 <= c <= 62:       # [0🔍] – reset zoomu
                         _zoom_zero()
@@ -8822,9 +8851,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         _zoom_out()
                     elif 73 <= c <= 76:     # "1.0x" – edycja zoomu
                         _edit_zoom()
-                # Istniejące kontrolki dla PAN (edycja wartości pan) – mogą być w wierszu 11 lub 12
-                elif 62 <= c <= 67:     _edit_pan_x()
-                elif 68 <= c <= 74:     _edit_pan_y()
 
             elif r == 12 and 46 <= c <= 79:                             # ◄ ■ ► and pan info (PAN) / zoom controls
                 if c == 47:             # ◄
@@ -8871,25 +8897,20 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         elif ui_mode_file == "PAN":
                             _pan(-PAN_STEP, 0)
                 # Przyciski dostępne tylko w trybie SELECT
-                elif cam_mode and ui_mode == "SELECT":
+                elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 66 <= c <= 68:       # [←]
                         _set_val(PARAMS[sel], -step)
                     elif 69 <= c <= 71:     # [→]
                         _set_val(PARAMS[sel], +step)
-                elif not cam_mode and ui_mode_file == "SELECT":
-                    if 66 <= c <= 68:
-                        _set_val(PARAMS[sel], -step)
-                    elif 69 <= c <= 71:
-                        _set_val(PARAMS[sel], +step)
                 # --- Tryb PAN: edycja wartości x/y z tekstu "Pan: x:+0.00 y:+0.00" ---
-                elif cam_mode and ui_mode == "PAN":
+                elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"):
                     # Kliknięcie na wartość x (po "x:")
                     if 60 <= c <= 65:
                         _edit_pan_x()
                     # Kliknięcie na wartość y (po "y:")
                     elif 66 <= c <= 71:
                         _edit_pan_y()
-                # --- Tryb PTZ: obsługa (m/l) Dur ---
+                # --- Tryb PTZ: obsługa (m/l) Dur (tylko CAMERA) ---
                 elif cam_mode and ui_mode == "PTZ":
                     # litera 'm' (zmniejsz duration)
                     if 56 <= c <= 57:
@@ -8905,7 +8926,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         if new_dur is not None:
                             cam.duration = new_dur
                             last_msg = f"Duration set to {cam.duration:.1f}s"
-                # Istniejące kontrolki zoomu (wspólne dla PAN/PTZ)
+                # Istniejące kontrolki zoomu (wspólne dla PAN/PTZ) – ale tylko jeśli nie były obsłużone
                 elif 55 <= c <= 59:     _zoom_toggle()
                 elif 60 <= c <= 64:     _zoom_zero()
                 elif 66 <= c <= 68:     _zoom_in()
@@ -8927,17 +8948,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         elif ui_mode_file == "PAN":
                             _pan(0, -PAN_STEP)
                 # Przyciski dostępne tylko w trybie SELECT
-                elif cam_mode and ui_mode == "SELECT":
+                elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 66 <= c <= 68:       # [<]
                         step = max(1, step - 1)
                     elif 69 <= c <= 71:     # [>]
                         step = min(50, step + 1)
-                elif not cam_mode and ui_mode_file == "SELECT":
-                    if 66 <= c <= 68:
-                        step = max(1, step - 1)
-                    elif 69 <= c <= 71:
-                        step = min(50, step + 1)
-                # --- Tryb PTZ: obsługa (s/f) Speed ---
+                # --- Tryb PTZ: obsługa (s/f) Speed (tylko CAMERA) ---
                 elif cam_mode and ui_mode == "PTZ":
                     # litera 's' (zmniejsz speed)
                     if 56 <= c <= 57:
@@ -8955,31 +8971,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             last_msg = f"Speed set to {cam.speed:.1f}"
             # Rows 11–13: Zoom/Pan panel (right side end)
 
-            # Rows 10–15: Parameter sliders (click to set value)
-            elif 10 <= r <= 15:
+            # Rows 10–15: Parameter sliders (click to set value) – ale tylko dla r od 10 do 15,
+            # ale r=10 już obsłużyliśmy powyżej, więc żeby nie dubować, zaczynamy od r=11?
+            # W oryginalnym kodzie był blok dla 10 <= r <= 15, ale ponieważ r=10 mamy wyżej,
+            # to tutaj możemy zacząć od r=11. Dla bezpieczeństwa zostawiam oryginalną logikę,
+            # ale z wykluczeniem r==10, które już obslużyliśmy.
+            elif 11 <= r <= 15:
                 new_sel = r - 10
-                # --- Obsługa nagłówków trybów w panelu (tylko wiersz 10) ---
-                if r == 10 and c >= 46:
-                    # [Z📊] SELECT – kolumny ok. 55-59
-                    if 55 <= c <= 59:
-                        if cam_mode:
-                            ui_mode = "SELECT"
-                        else:
-                            ui_mode_file = "SELECT"
-                        last_msg = "Mode: SELECT"
-                    # [Z📺] PAN – kolumny ok. 60-64
-                    elif 60 <= c <= 64:
-                        if cam_mode:
-                            ui_mode = "PAN"
-                        else:
-                            ui_mode_file = "PAN"
-                        last_msg = "Mode: PAN"
-                    # [Z🎥] PTZ – tylko w trybie kamer, kolumny ok. 65-69
-                    elif 65 <= c <= 69 and cam_mode:
-                        ui_mode = "PTZ"
-                        last_msg = "Mode: PTZ"
-                # Mute button on VOL row
-                elif r == 15 and 45 <= c <= 47:
+                # Mute button on VOL row (r==15)
+                if r == 15 and 45 <= c <= 47:
                     _toggle_mute()
                 elif c <= 37:                                           # slider area
                     if sel == new_sel:
@@ -9233,7 +9233,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     return result, loop_mode_local
 # =============================================================================
-# MPV CONTROL SCREEN PLAYER End
+# PLAYER MODE MPV CONTROL SCREEN PLAYER End
 # =============================================================================
 
 def _show_playlist(files, current_idx):
