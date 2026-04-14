@@ -5,7 +5,7 @@ Professional TUI (Terminal User Interface) in Python for Linux to control PTZ IP
 Developed by Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
 
 ## ✨ Key Features
-* **Multi-source support:** Streams via RTSP, V4L2 (USB cameras), and local video files.
+* **Multi-source support:** Streams via RTSP, V4L2 (USB cameras), Scanner (SANE), and local video files.
 * **Integrated Player:** Uses `mpv` for high-performance video rendering.
 * **PTZ Control:** Interactive movement and zoom controls directly from the terminal.
 * **Linux Optimized:** Designed specifically for Linux environments utilizing `termios` and `tty`.
