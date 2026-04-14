@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.20"
+VERSION = "9.0.26"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3702,7 +3702,7 @@ class Player:
 
     @staticmethod
     def _play_scanner(cam: 'Camera', skip_focus: bool = False) -> bool:
-        """Wykonaj skan przez scanimage + convert (logika z scan.sh)."""
+        """Perform scan using scanimage + convert (logic from scan.sh)."""
         if not shutil.which('scanimage'):
             notify("scanimage not found! Install: sane-utils", "error")
             return False
@@ -3710,7 +3710,7 @@ class Player:
         import datetime as _dt
         import tempfile as _tmp
 
-        # --- Parametry ---
+        # --- Parameters ---
         mode    = cam.scan_mode
         dpi     = cam.scan_dpi
         area    = cam.scan_area          # "x:y:w:h"
@@ -3719,22 +3719,22 @@ class Player:
         resize  = cam.scan_resize
         desc    = cam.scan_desc
         dest    = cam.scan_dest
-        device  = cam.scan_device        # "" = domyślny skaner SANE
+        device  = cam.scan_device        # "" = default SANE scanner
 
-        # Parsuj area
+        # Parse area
         try:
             xl, yt, wd, ht = area.split(":")
         except Exception:
             xl, yt, wd, ht = "0", "0", "215", "297"
 
-        # Utwórz katalog docelowy
+        # Create destination directory
         try:
             os.makedirs(dest, exist_ok=True)
         except Exception as e:
             notify(f"Scan dest error: {e}", "error")
             return False
 
-        # Wygeneruj nazwę pliku (YYYY-MM-DD_opis_NNN.fmt)
+        # Generate filename (YYYY-MM-DD_description_NNN.format)
         today = _dt.date.today().strftime("%Y-%m-%d")
         desc_part = f"_{desc}" if desc else ""
         pattern = f"{today}{desc_part}_*.{fmt}"
@@ -3752,15 +3752,15 @@ class Player:
         fname = f"{today}{desc_part}_{next_num:03d}.{fmt}"
         dest_file = os.path.join(dest, fname)
 
-        # --- Tymczasowe pliki ---
+        # --- Temporary files ---
         tmp_dir = _tmp.mkdtemp(prefix="ptz-scan-")
         raw_file = os.path.join(tmp_dir, f"raw_scan.tiff")
         out_file = os.path.join(tmp_dir, f"scan_out.{fmt}")
 
-        # Profil aktywny — zapisz ścieżkę dla statusu
+        # Active profile — store path for status
         profile = cam.profiles[cam.active_profile] if cam.profiles else None
         if profile:
-            profile.pid = -1   # -1 = skanowanie w toku
+            profile.pid = -1   # -1 = scanning in progress
             profile.ipc_path = dest_file
 
         logger.info(f"Scan START: {mode} {dpi}DPI → {dest_file}")
@@ -3810,10 +3810,10 @@ class Player:
                                stderr=subprocess.DEVNULL, timeout=60)
                 src = out_file if os.path.isfile(out_file) else raw_file
             else:
-                # Brak convert — skopiuj raw
+                # No convert — copy raw
                 src = raw_file
 
-            # 3. Przenieś do dest
+            # 3. Move to destination
             shutil.copy2(src, dest_file)
             logger.info(f"Scan saved: {dest_file}")
             notify(f"Scan saved: {fname}", "info")
@@ -3822,7 +3822,7 @@ class Player:
                 profile.pid = None
                 profile.ipc_path = dest_file
 
-            # 4. Otwórz przeglądarkę
+            # 4. Open viewer
             viewer = cam.scan_viewer or "mpv"
             if shutil.which(viewer):
                 subprocess.Popen(
@@ -3995,12 +3995,17 @@ class UI:
             r5 = f"{YLW}(k){RST} Kill {p_status} "
         rlines.append(("normal", f"│{pad(l5, W - ansilen(r5))}{r5}│"))
 
-        max_uri  = W - len(" (r) URI: ")
-        uri      = prof.uri or "N/A"
-        if len(uri) > max_uri:
-            uri = uri[:max_uri - 1] + "…"
-        uri_line = f" {YLW}(r){RST} URI: {BLU}{uri}{RST}"
-        rlines.append(("normal", f"│{pad(uri_line, W)}│"))
+        # For SCANNER, display scanner info instead of URI
+        if cam.type == CameraType.SCANNER:
+            scan_info = f" {YLW}(r){RST} SCAN: {cam.scan_mode} {cam.scan_dpi}DPI → {cam.scan_dest}"
+            rlines.append(("normal", f"│{pad(scan_info, W)}│"))
+        else:
+            max_uri  = W - len(" (r) URI: ")
+            uri      = prof.uri or "N/A"
+            if len(uri) > max_uri:
+                uri = uri[:max_uri - 1] + "…"
+            uri_line = f" {YLW}(r){RST} URI: {BLU}{uri}{RST}"
+            rlines.append(("normal", f"│{pad(uri_line, W)}│"))
 
         rlines.append(("bot_join", f"┴" + "─" * W + "┤"))
 
@@ -4182,6 +4187,13 @@ class PTZMasterApp:
         LW = 19
         S  = LW + 2
 
+        # For SCANNER, ignore PTZ area clicks (rows 12-14, columns related to PTZ)
+        if cam and cam.type == CameraType.SCANNER:
+            # If click in PTZ area (rows 12,13,14 and relevant columns), just return
+            if r in (12, 13, 14):
+                # Allow only maybe the progress bar or other non-PTZ elements? Better to ignore.
+                return
+
         if 1 <= c <= LW + 1 and r <= 9:
             cameras = self.ui.config.cameras
             total = len(cameras)
@@ -4242,7 +4254,13 @@ class PTZMasterApp:
             if S+1 <= c <= S+3:
                 self._mouse_off(); self._play_stream(); self._mouse_on(); self.ui.draw(); return
             if S+10 <= c <= S+12:
-                self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on(); self.ui.draw(); return
+                self._mouse_off()
+                cam = self.ui.current_camera
+                if cam and cam.type == CameraType.SCANNER:
+                    self._scanner_control_screen()
+                else:
+                    self._mpv_control_screen_cam()
+                self._mouse_on(); self.ui.draw(); return
             if S+20 <= c <= S+22:
                 self._mouse_off()
                 self.config.player_cmd = self._edit_param("PLAYER CMD", self.config.player_cmd)
@@ -4698,6 +4716,21 @@ class PTZMasterApp:
                 if DEBUG_MODE and key not in [Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT]:
                     logger.debug(f"Key: {key}")
 
+                # --------------------------------------------------------------
+                # SCANNER: block unavailable actions
+                # --------------------------------------------------------------
+                cam = self.ui.current_camera
+                if cam and cam.type == CameraType.SCANNER:
+                    # Keys PTZ, sync, URI, player edit, credentials, speed/duration, zoom, preset, profile
+                    if key in (Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT,
+                               '+', '=', '-', Key.SPACE,
+                               'g', 'r', 'o', 'u', 'h', 's', 'f', 'm', 'l',
+                               'z', 't', 'i', 'I', '?', '\\'):
+                        notify("SCANNER: operation not available", "warning")
+                        self.ui.draw()
+                        continue
+                    # Keys p, x, e, a, d, w, c, ,, ., 1-9, F1-F6, q work normally
+
                 if key.lower() == 'q':
                     if self.last_key and self.last_key.lower() == 'q':
                         logger.info("Double q detected - quick exit")
@@ -4951,7 +4984,7 @@ class PTZMasterApp:
             self._mouse_off(); self._confirm_exit(); self._mouse_on()
     
     def _sync_network(self, cam: Camera) -> bool:
-        if cam.type == CameraType.V4L2 or cam.type == CameraType.SCANNER:
+        if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
             return False
         NetworkUtils.resolve_ip(cam)
         
@@ -4988,7 +5021,7 @@ class PTZMasterApp:
             notify("FILE: local file, no profiles to sync", "warning")
             return
         if cam.type == CameraType.SCANNER:
-            notify("SCANNER: no profiles needed", "warning")
+            notify("SCANNER: use (x) to configure", "warning")
             return
         
         if cam.type == CameraType.AUTO:
@@ -5242,6 +5275,16 @@ class PTZMasterApp:
         prof = self.ui.current_profile
         
         if not cam or not prof:
+            return
+        
+        # For SCANNER, skip URI check and directly call Player.play
+        if cam.type == CameraType.SCANNER:
+            if ProcessManager.is_running(prof.pid):
+                notify("Already scanning?", "warning")
+                return
+            layout = cam.layout or self.config.layout["mpv_default"]
+            Player.play(cam, prof, self.config.player_cmd, layout,
+                        global_mute=self.config.global_mute)
             return
         
         if ProcessManager.is_running(prof.pid):
@@ -5690,6 +5733,9 @@ class PTZMasterApp:
         elif cam.type == CameraType.FILE:
             notify("FILE: PTZ not supported", "warning")
             self.ui.draw(); return
+        elif cam.type == CameraType.SCANNER:
+            notify("SCANNER: no PTZ", "warning")
+            self.ui.draw(); return
         
         if cam.type == CameraType.DVRIP:
             if prof.channel != 0:
@@ -5758,20 +5804,24 @@ class PTZMasterApp:
             self.ui.set_active_dir(None)
             self.ui.set_progress(0)
             self.ui.draw()
-    
+
+# --------------------------------------------------------------------------
+# Scanner configuration TUI (x) start
+# --------------------------------------------------------------------------
     def _scanner_control_screen(self):
-        """TUI konfiguracji i serial mode skanera (x)."""
+        """Scanner configuration TUI – aligned columns, ESC to quit, mouse safe."""
         cam = self.ui.current_camera
         if not cam or cam.type != CameraType.SCANNER:
-            notify("Nie wybrano skanera", "warning"); return
+            notify("No scanner selected", "warning")
+            return
 
-        import textwrap
-
+        # --- Available options ---
         MODES   = ["gray", "color", "lineart"]
         FORMATS = ["jpg", "png", "pdf", "tiff"]
         VIEWERS = ["mpv", "gwenview", "xdg-open", "eog", "feh"]
         DPIS    = [75, 100, 150, 200, 300, 600, 1200]
-        AREAS   = {
+
+        AREAS = {
             "A4"     : "0:0:215:297",
             "A5"     : "0:0:148:210",
             "Letter" : "0:0:216:279",
@@ -5785,139 +5835,211 @@ class PTZMasterApp:
             "Custom": cam.scan_resize,
         }
 
-        def _cycled(lst, val):
-            try:    return lst[(lst.index(val) + 1) % len(lst)]
-            except: return lst[0]
+        # Number padding: 0 = none (0d), 2 = two digits (2d), 3 = three digits (3d)
+        num_padding = 3
+        date_format = 0   # 0 = YYYY-MM-DD, 1 = DD-MM-YYYY
+        override_num = None
 
-        def _draw_scanner_tui():
-            sys.stdout.write('[2J[H'); sys.stdout.flush()
+        def _cycled(lst, val):
+            try:
+                return lst[(lst.index(val) + 1) % len(lst)]
+            except ValueError:
+                return lst[0]
+
+        def _get_next_number():
+            if override_num is not None:
+                return override_num
+            import glob as _gl
+            today = datetime.date.today().strftime("%Y-%m-%d")
+            desc_part = f"_{cam.scan_desc}" if cam.scan_desc else ""
+            pattern = f"{today}{desc_part}_*.{cam.scan_format}"
+            existing = _gl.glob(os.path.join(cam.scan_dest, pattern))
+            nums = []
+            for f in existing:
+                bn = os.path.basename(f)
+                try:
+                    n = int(bn.split("_")[-1].split(".")[0])
+                    nums.append(n)
+                except Exception:
+                    pass
+            return max(nums, default=0) + 1
+
+        def _format_number(num):
+            if num_padding == 0:
+                return str(num)
+            elif num_padding == 2:
+                return f"{num:02d}"
+            else:
+                return f"{num:03d}"
+
+        def _draw():
+            sys.stdout.write('\033[2J\033[H')
+            sys.stdout.flush()
             W = 76
-            def line(txt=""): print(f"║ {pad(txt, W-2)} ║")
+            def line(txt=""):
+                print(f"║ {pad(txt, W-2)} ║")
+
+            # Header
+            header = f"{CYN}🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
+            header_len = ansilen(header)
+            if header_len < W-2:
+                header += ' ' * (W-2 - header_len)
             print(f"╔{'═'*W}╗")
-            line(f"{CYN}🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}")
+            line(header)
             print(f"╠{'═'*W}╣")
-            line(f" {YLW}(m){RST} Mode:    {GRN}{cam.scan_mode:<10}{RST}  "
-                 f"{YLW}(d){RST} DPI:     {GRN}{cam.scan_dpi:<6}{RST}  "
-                 f"{YLW}(f){RST} Format:  {GRN}{cam.scan_format}{RST}")
-            line(f" {YLW}(a){RST} Area:    {GRN}{cam.scan_area:<18}{RST}  "
-                 f"{YLW}(r){RST} Resize:  {GRN}{cam.scan_resize}{RST}")
-            line(f" {YLW}(q){RST} Quality: {GRN}{cam.scan_quality:<4}{RST}  "
-                 f"{YLW}(t){RST} Dest:    {GRN}{str(cam.scan_dest)[:35]}{RST}")
-            line(f" {YLW}(v){RST} Viewer:  {GRN}{cam.scan_viewer:<12}{RST}  "
-                 f"{YLW}(n){RST} Desc:    {GRN}{cam.scan_desc or '(brak)'}{RST}")
+
+            # Helper: fixed width left part (key + label + spaces + colon)
+            def _field(key, label, value):
+                # left part exactly 13 characters (e.g. "(m) Mode    :")
+                left = f" {key} {label:<6} :"
+                return f"{left:<13} {value}"
+
+            # Row 1
+            f1 = _field("(m)", "Mode", f"{GRN}{cam.scan_mode}{RST}")
+            f2 = _field("(d)", "DPI", f"{GRN}{cam.scan_dpi}{RST}")
+            f3 = _field("(a)", "Area", f"{GRN}{cam.scan_area}{RST}")
+            row1 = f1 + "   " + f2 + "   " + f3
+
+            # Row 2
+            f1 = _field("(f)", "Format", f"{GRN}{cam.scan_format}{RST}")
+            f2 = _field("(r)", "Resize", f"{GRN}{cam.scan_resize}{RST}")
+            f3 = _field("(q)", "Quality", f"{GRN}{cam.scan_quality}{RST}")
+            row2 = f1 + "   " + f2 + "   " + f3
+
+            # Row 3
+            dest_str = str(cam.scan_dest)
+            if len(dest_str) > 30:
+                dest_str = "…" + dest_str[-28:]
+            f1 = _field("(v)", "Viewer", f"{GRN}{cam.scan_viewer}{RST}")
+            f2 = _field("(t)", "Dest", f"{GRN}{dest_str}{RST}")
+            # Empty third column (just spaces to keep alignment)
+            row3 = f1 + "   " + f2 + "   " + " " * 13
+
+            # Row 4
+            today = datetime.date.today()
+            date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
+            next_num = _get_next_number()
+            num_str = _format_number(next_num)
+            pad_indicator = {0:"0d", 2:"2d", 3:"3d"}[num_padding]
+            f1 = _field("(n)", "Desc", f"{GRN}{cam.scan_desc or '(none)'}{RST}")
+            f2 = _field("(h)", "Date", f"{GRN}{date_str}{RST}")
+            f3 = _field("(x)", "Number", f"{GRN}{num_str} [{pad_indicator}](y){RST}")
+            row4 = f1 + "   " + f2 + "   " + f3
+
+            for r in (row1, row2, row3, row4):
+                cur_len = ansilen(r)
+                if cur_len < W-2:
+                    r += ' ' * (W-2 - cur_len)
+                line(r)
+
             print(f"╠{'═'*W}╣")
-            line(f" {YLW}(p){RST} Skanuj raz   "
-                 f"{YLW}(s){RST} Serial mode (skanuj → pytaj o kontynuację)   "
-                 f"{YLW}(x){RST} Wróć")
+            line(f" {YLW}(p){RST} Scan   {YLW}(ESC){RST} Quit")
             print(f"╚{'═'*W}╝")
 
-        fd = sys.stdin.fileno()
+        # Enable mouse tracking with proper cleanup
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         running = True
-        while running:
-            _draw_scanner_tui()
-            ch = sys.stdin.read(1)
-            if ch == 'm':
-                cam.scan_mode   = _cycled(MODES, cam.scan_mode)
-                self.config_mgr.save()
-            elif ch == 'd':
-                try:    idx = DPIS.index(cam.scan_dpi)
-                except: idx = 4
-                cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
-                self.config_mgr.save()
-            elif ch == 'f':
-                cam.scan_format = _cycled(FORMATS, cam.scan_format)
-                self.config_mgr.save()
-            elif ch == 'a':
-                area_items = list(AREAS.keys())
-                ai = select_menu(area_items, selected=0, title="Obszar skanowania")
-                if ai >= 0:
-                    key = area_items[ai]
-                    if key == "Custom":
-                        cam.scan_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
-                    else:
-                        cam.scan_area = AREAS[key]
+
+        try:
+            while running:
+                _draw()
+                key = get_key()
+
+                if key == 'm':
+                    cam.scan_mode = _cycled(MODES, cam.scan_mode)
                     self.config_mgr.save()
-            elif ch == 'r':
-                res_items = list(RESIZES.keys())
-                ri = select_menu(res_items, selected=0, title="Rozmiar wynikowy")
-                if ri >= 0:
-                    key = res_items[ri]
-                    if key == "Custom":
-                        cam.scan_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
-                    else:
-                        cam.scan_resize = RESIZES[key]
+                elif key == 'd':
+                    try:
+                        idx = DPIS.index(cam.scan_dpi)
+                    except ValueError:
+                        idx = 4
+                    cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
                     self.config_mgr.save()
-            elif ch == 'q':
-                val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
-                try:    cam.scan_quality = max(0, min(100, int(val)))
-                except: pass
-                self.config_mgr.save()
-            elif ch == 't':
-                cam.scan_dest = self._edit_param("Dest dir", str(cam.scan_dest))
-                self.config_mgr.save()
-            elif ch == 'v':
-                cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
-                self.config_mgr.save()
-            elif ch == 'n':
-                cam.scan_desc = self._edit_param("Opis (do nazwy pliku)", cam.scan_desc)
-                self.config_mgr.save()
-            elif ch == 'p':
-                # Skanuj raz — wyłącz mysz podczas drukowania statusu
-                self.config_mgr.save()
-                _draw_scanner_tui()
-                ok = Player._play_scanner(cam)
-                status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ BŁĄD{RST}"
-                print(f"\n  {status}  — naciśnij dowolny klawisz...")
-                sys.stdin.read(1)  # raw mode — dowolny klawisz
-            elif ch == 's':
-                # Serial mode — skanuj w pętli
-                self.config_mgr.save()
-                while True:
-                    _draw_scanner_tui()
-                    print(f"\n  {CYN}SERIAL MODE{RST} — skanowanie...")
+                elif key == 'f':
+                    cam.scan_format = _cycled(FORMATS, cam.scan_format)
+                    self.config_mgr.save()
+                elif key == 'a':
+                    items = list(AREAS.keys())
+                    ai = select_menu(items, selected=0, title="Scan area")
+                    if ai >= 0:
+                        key_ = items[ai]
+                        if key_ == "Custom":
+                            new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
+                            if new_area:
+                                cam.scan_area = new_area
+                        else:
+                            cam.scan_area = AREAS[key_]
+                        self.config_mgr.save()
+                elif key == 'r':
+                    items = list(RESIZES.keys())
+                    ri = select_menu(items, selected=0, title="Output resize")
+                    if ri >= 0:
+                        key_ = items[ri]
+                        if key_ == "Custom":
+                            new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
+                            if new_resize:
+                                cam.scan_resize = new_resize
+                        else:
+                            cam.scan_resize = RESIZES[key_]
+                        self.config_mgr.save()
+                elif key == 'q':
+                    val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
+                    try:
+                        cam.scan_quality = max(0, min(100, int(val)))
+                        self.config_mgr.save()
+                    except ValueError:
+                        pass
+                elif key == 'v':
+                    cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
+                    self.config_mgr.save()
+                elif key == 't':
+                    new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
+                    if new_dest:
+                        cam.scan_dest = new_dest
+                        self.config_mgr.save()
+                elif key == 'n':
+                    new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
+                    if new_desc is not None:
+                        cam.scan_desc = new_desc
+                        self.config_mgr.save()
+                elif key == 'h':
+                    date_format = 1 - date_format
+                elif key == 'x':
+                    if num_padding == 0:
+                        num_padding = 2
+                    elif num_padding == 2:
+                        num_padding = 3
+                    else:
+                        num_padding = 0
+                    self.config_mgr.save()
+                elif key == 'y':
+                    val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
+                    try:
+                        num = int(val)
+                        if 1 <= num <= 999:
+                            override_num = num
+                        else:
+                            notify("Number must be 1-999", "warning")
+                    except ValueError:
+                        pass
+                elif key == 'p':
+                    self.config_mgr.save()
+                    _draw()
+                    print("\n  Scanning... please wait")
                     ok = Player._play_scanner(cam)
-                    status = f"{GRN}OK{RST}" if ok else f"{RED}BŁĄD{RST}"
-                    print(f"  Wynik: {status}")
-                    print(f"\n  {YLW}Enter/spacja{RST} Skanuj ponownie  "
-                          f"{YLW}m{RST}ode {YLW}d{RST}pi {YLW}f{RST}ormat {YLW}a{RST}rea {YLW}r{RST}esize {YLW}q{RST}uality {YLW}n{RST}azwa  "
-                          f"{YLW}x/Esc{RST} Zakończ")
-                    ans = sys.stdin.read(1)
-                    if ans in ('x', 'X', '\x1b'):
-                        break
-                    elif ans == 'm':
-                        cam.scan_mode   = _cycled(MODES, cam.scan_mode)
-                    elif ans == 'd':
-                        try:    idx = DPIS.index(cam.scan_dpi)
-                        except: idx = 4
-                        cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
-                    elif ans == 'f':
-                        cam.scan_format = _cycled(FORMATS, cam.scan_format)
-                    elif ans == 'a':
-                        area_items = list(AREAS.keys())
-                        ai = select_menu(area_items, selected=0, title="Obszar")
-                        if ai >= 0:
-                            key = area_items[ai]
-                            cam.scan_area = AREAS[key] if key != "Custom" else self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
-                    elif ans == 'r':
-                        res_items = list(RESIZES.keys())
-                        ri = select_menu(res_items, selected=0, title="Resize")
-                        if ri >= 0:
-                            key = res_items[ri]
-                            cam.scan_resize = RESIZES[key] if key != "Custom" else self._edit_param("Resize (WxH)", cam.scan_resize)
-                    elif ans == 'q':
-                        val = self._edit_param("Quality", str(cam.scan_quality))
-                        try:    cam.scan_quality = max(0, min(100, int(val)))
-                        except: pass
-                    elif ans == 'n':
-                        cam.scan_desc = self._edit_param("Opis", cam.scan_desc)
-                    # \r/\n lub nieznany = skanuj ponownie
-                    self.config_mgr.save()
-                self.config_mgr.save()
-            elif ch in ('x', 'X', ''):
-                running = False
-            self.config_mgr.save()
+                    status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ ERROR{RST}"
+                    print(f"\n  {status} — press any key...")
+                    sys.stdin.read(1)
+                elif key == Key.ESC:
+                    running = False
+        finally:
+            # Always disable mouse tracking on exit, even if an exception occurs
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.flush()
+# --------------------------------------------------------------------------
+# Scanner configuration TUI (x) end
+# --------------------------------------------------------------------------
 
     def _discover_cameras(self):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
