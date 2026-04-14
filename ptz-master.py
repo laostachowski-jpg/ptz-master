@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.26"
+VERSION = "9.0.27"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4366,7 +4366,7 @@ class PTZMasterApp:
         print(f"{YLW}│{pad(' Options:', W)}│{RST}")
         print(f"{YLW}│{pad('  [s] 💾 Save session and exit', W)}│{RST}")
         print(f"{YLW}│{pad('  [q] 🚪 Exit without saving', W)}│{RST}")
-        print(f"{YLW}│{pad('  [c] 🔄 Cancel and return', W)}│{RST}")
+        print(f"{YLW}│{pad('  [c/ESC] 🔄 Cancel and return', W)}│{RST}")
         print(f"{YLW}├" + "─" * W + f"┤{RST}")
         print(f"{YLW}│{pad(' ⏱️  Auto-exit without saving in 10s...', W)}│{RST}")
         print(f"{YLW}└" + "─" * W + f"┘{RST}")
@@ -4385,49 +4385,28 @@ class PTZMasterApp:
 
             key = None
             deadline = time.time() + 10
-            ignore_until = time.time() + 0.2
+            time.sleep(0.2)  # krótki debounce
             while key is None:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
-                ready, _, _ = select.select([fd], [], [], min(remaining, 1.0))
-                if not ready:
+                # get_key z timeoutem 1s — nie blokuje, odświeża odliczanie
+                ch = get_key(min(remaining, 1.0))
+                if ch == Key.TIMEOUT:
                     continue
-
-                ch = sys.stdin.read(1).lower()
-                if time.time() < ignore_until:
-                    if ch == '\x1b':
-                        import select as _si
-                        while _si.select([fd], [], [], 0.05)[0]:
-                            try: os.read(fd, 64)
-                            except OSError: break
+                if isinstance(ch, MouseEvent):
+                    if not ch.release and ch.btn == 0:
+                        r, c = ch.row, ch.col
+                        if   r == 8  and 4 <= c <= 6: key = 's'
+                        elif r == 9  and 4 <= c <= 6: key = 'q'
+                        elif r == 10 and 4 <= c <= 6: key = 'c'
+                        else: key = 'c'
                     continue
-                if ch == '\x1b':
-                    ch2 = sys.stdin.read(1)
-                    if ch2 == '[':
-                        ch3 = sys.stdin.read(1)
-                        if ch3 == '<':
-                            buf = ''
-                            while True:
-                                cx = sys.stdin.read(1)
-                                if cx in ('M', 'm', ''): break
-                                buf += cx
-                            try:
-                                parts = buf.split(';')
-                                btn_n = int(parts[0])
-                                m_col = int(parts[1])
-                                m_row = int(parts[2])
-                                if btn_n == 0:
-                                    if   m_row == 8  and 4 <= m_col <= 6: key = 's'
-                                    elif m_row == 9  and 4 <= m_col <= 6: key = 'q'
-                                    elif m_row == 10 and 4 <= m_col <= 6: key = 'c'
-                                    else: key = 'c'
-                            except (ValueError, IndexError):
-                                pass
-                elif ch in ('s', 'q', 'c'):
-                    key = ch
-                elif ch in ('\r', '\n', ' '):
-                    pass
+                # ESC = anuluj (wróć do programu)
+                if ch in (Key.ESC, Key.ESC_ESC):
+                    key = 'c'
+                elif ch.lower() in ('s', 'q', 'c'):
+                    key = ch.lower()
 
             sys.stdout.write('\r' + ' ' * 80 + '\r')
             sys.stdout.flush()
@@ -4730,6 +4709,12 @@ class PTZMasterApp:
                         self.ui.draw()
                         continue
                     # Keys p, x, e, a, d, w, c, ,, ., 1-9, F1-F6, q work normally
+
+                if key in (Key.ESC, Key.ESC_ESC):
+                    # ESC = wróć / anuluj (identycznie jak q)
+                    logger.info("ESC pressed - confirm exit")
+                    self._mouse_off(); self._confirm_exit(); self._mouse_on()
+                    continue
 
                 if key.lower() == 'q':
                     if self.last_key and self.last_key.lower() == 'q':
@@ -5809,7 +5794,7 @@ class PTZMasterApp:
 # Scanner configuration TUI (x) start
 # --------------------------------------------------------------------------
     def _scanner_control_screen(self):
-        """Scanner configuration TUI – aligned columns, ESC to quit, mouse safe."""
+        """Scanner configuration TUI – aligned columns, ESC to quit."""
         cam = self.ui.current_camera
         if not cam or cam.type != CameraType.SCANNER:
             notify("No scanner selected", "warning")
@@ -5879,7 +5864,7 @@ class PTZMasterApp:
             def line(txt=""):
                 print(f"║ {pad(txt, W-2)} ║")
 
-            # Header
+            # Header – fixed length to ensure right border alignment
             header = f"{CYN}🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
             header_len = ansilen(header)
             if header_len < W-2:
@@ -5888,32 +5873,34 @@ class PTZMasterApp:
             line(header)
             print(f"╠{'═'*W}╣")
 
-            # Helper: fixed width left part (key + label + spaces + colon)
-            def _field(key, label, value):
-                # left part exactly 13 characters (e.g. "(m) Mode    :")
-                left = f" {key} {label:<6} :"
-                return f"{left:<13} {value}"
+            # Helper to pad a string (with ANSI) to exact visual width
+            def _pad_field(txt, width):
+                cur = ansilen(txt)
+                if cur < width:
+                    txt += ' ' * (width - cur)
+                return txt
+
+            col_w = 24
 
             # Row 1
-            f1 = _field("(m)", "Mode", f"{GRN}{cam.scan_mode}{RST}")
-            f2 = _field("(d)", "DPI", f"{GRN}{cam.scan_dpi}{RST}")
-            f3 = _field("(a)", "Area", f"{GRN}{cam.scan_area}{RST}")
-            row1 = f1 + "   " + f2 + "   " + f3
+            f1 = f" {YLW}(m){RST} Mode    : {GRN}{cam.scan_mode:<8}{RST}"
+            f2 = f" {YLW}(d){RST} DPI     : {GRN}{cam.scan_dpi:<4}{RST}"
+            f3 = f" {YLW}(a){RST} Area    : {GRN}{cam.scan_area}{RST}"
+            row1 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
 
             # Row 2
-            f1 = _field("(f)", "Format", f"{GRN}{cam.scan_format}{RST}")
-            f2 = _field("(r)", "Resize", f"{GRN}{cam.scan_resize}{RST}")
-            f3 = _field("(q)", "Quality", f"{GRN}{cam.scan_quality}{RST}")
-            row2 = f1 + "   " + f2 + "   " + f3
+            f1 = f" {YLW}(f){RST} Format  : {GRN}{cam.scan_format:<5}{RST}"
+            f2 = f" {YLW}(r){RST} Resize  : {GRN}{cam.scan_resize:<10}{RST}"
+            f3 = f" {YLW}(q){RST} Quality : {GRN}{cam.scan_quality:<3}{RST}"
+            row2 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
 
             # Row 3
             dest_str = str(cam.scan_dest)
-            if len(dest_str) > 30:
-                dest_str = "…" + dest_str[-28:]
-            f1 = _field("(v)", "Viewer", f"{GRN}{cam.scan_viewer}{RST}")
-            f2 = _field("(t)", "Dest", f"{GRN}{dest_str}{RST}")
-            # Empty third column (just spaces to keep alignment)
-            row3 = f1 + "   " + f2 + "   " + " " * 13
+            if len(dest_str) > 28:
+                dest_str = "…" + dest_str[-26:]
+            f1 = f" {YLW}(v){RST} Viewer  : {GRN}{cam.scan_viewer:<8}{RST}"
+            f2 = f" {YLW}(t){RST} Dest    : {GRN}{dest_str}{RST}"
+            row3 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field("", col_w)
 
             # Row 4
             today = datetime.date.today()
@@ -5921,10 +5908,10 @@ class PTZMasterApp:
             next_num = _get_next_number()
             num_str = _format_number(next_num)
             pad_indicator = {0:"0d", 2:"2d", 3:"3d"}[num_padding]
-            f1 = _field("(n)", "Desc", f"{GRN}{cam.scan_desc or '(none)'}{RST}")
-            f2 = _field("(h)", "Date", f"{GRN}{date_str}{RST}")
-            f3 = _field("(x)", "Number", f"{GRN}{num_str} [{pad_indicator}](y){RST}")
-            row4 = f1 + "   " + f2 + "   " + f3
+            f1 = f" {YLW}(n){RST} Desc    : {GRN}{cam.scan_desc or '(none)'}{RST}"
+            f2 = f" {YLW}(h){RST} Date    : {GRN}{date_str}{RST}"
+            f3 = f" {YLW}(x){RST} Number  : {GRN}{num_str} [{pad_indicator}](y){RST}"
+            row4 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
 
             for r in (row1, row2, row3, row4):
                 cur_len = ansilen(r)
@@ -5936,105 +5923,102 @@ class PTZMasterApp:
             line(f" {YLW}(p){RST} Scan   {YLW}(ESC){RST} Quit")
             print(f"╚{'═'*W}╝")
 
-        # Enable mouse tracking with proper cleanup
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         running = True
-
         try:
             while running:
-                _draw()
-                key = get_key()
+              _draw()
+              key = get_key()
 
-                if key == 'm':
-                    cam.scan_mode = _cycled(MODES, cam.scan_mode)
-                    self.config_mgr.save()
-                elif key == 'd':
-                    try:
-                        idx = DPIS.index(cam.scan_dpi)
-                    except ValueError:
-                        idx = 4
-                    cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
-                    self.config_mgr.save()
-                elif key == 'f':
-                    cam.scan_format = _cycled(FORMATS, cam.scan_format)
-                    self.config_mgr.save()
-                elif key == 'a':
-                    items = list(AREAS.keys())
-                    ai = select_menu(items, selected=0, title="Scan area")
-                    if ai >= 0:
-                        key_ = items[ai]
-                        if key_ == "Custom":
-                            new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
-                            if new_area:
-                                cam.scan_area = new_area
-                        else:
-                            cam.scan_area = AREAS[key_]
-                        self.config_mgr.save()
-                elif key == 'r':
-                    items = list(RESIZES.keys())
-                    ri = select_menu(items, selected=0, title="Output resize")
-                    if ri >= 0:
-                        key_ = items[ri]
-                        if key_ == "Custom":
-                            new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
-                            if new_resize:
-                                cam.scan_resize = new_resize
-                        else:
-                            cam.scan_resize = RESIZES[key_]
-                        self.config_mgr.save()
-                elif key == 'q':
-                    val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
-                    try:
-                        cam.scan_quality = max(0, min(100, int(val)))
-                        self.config_mgr.save()
-                    except ValueError:
-                        pass
-                elif key == 'v':
-                    cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
-                    self.config_mgr.save()
-                elif key == 't':
-                    new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
-                    if new_dest:
-                        cam.scan_dest = new_dest
-                        self.config_mgr.save()
-                elif key == 'n':
-                    new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
-                    if new_desc is not None:
-                        cam.scan_desc = new_desc
-                        self.config_mgr.save()
-                elif key == 'h':
-                    date_format = 1 - date_format
-                elif key == 'x':
-                    if num_padding == 0:
-                        num_padding = 2
-                    elif num_padding == 2:
-                        num_padding = 3
-                    else:
-                        num_padding = 0
-                    self.config_mgr.save()
-                elif key == 'y':
-                    val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
-                    try:
-                        num = int(val)
-                        if 1 <= num <= 999:
-                            override_num = num
-                        else:
-                            notify("Number must be 1-999", "warning")
-                    except ValueError:
-                        pass
-                elif key == 'p':
-                    self.config_mgr.save()
-                    _draw()
-                    print("\n  Scanning... please wait")
-                    ok = Player._play_scanner(cam)
-                    status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ ERROR{RST}"
-                    print(f"\n  {status} — press any key...")
-                    sys.stdin.read(1)
-                elif key == Key.ESC:
-                    running = False
+              if key == 'm':
+                  cam.scan_mode = _cycled(MODES, cam.scan_mode)
+                  self.config_mgr.save()
+              elif key == 'd':
+                  try:
+                      idx = DPIS.index(cam.scan_dpi)
+                  except ValueError:
+                      idx = 4
+                  cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
+                  self.config_mgr.save()
+              elif key == 'f':
+                  cam.scan_format = _cycled(FORMATS, cam.scan_format)
+                  self.config_mgr.save()
+              elif key == 'a':
+                  items = list(AREAS.keys())
+                  ai = select_menu(items, selected=0, title="Scan area")
+                  if ai >= 0:
+                      key_ = items[ai]
+                      if key_ == "Custom":
+                          new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
+                          if new_area:
+                              cam.scan_area = new_area
+                      else:
+                          cam.scan_area = AREAS[key_]
+                      self.config_mgr.save()
+              elif key == 'r':
+                  items = list(RESIZES.keys())
+                  ri = select_menu(items, selected=0, title="Output resize")
+                  if ri >= 0:
+                      key_ = items[ri]
+                      if key_ == "Custom":
+                          new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
+                          if new_resize:
+                              cam.scan_resize = new_resize
+                      else:
+                          cam.scan_resize = RESIZES[key_]
+                      self.config_mgr.save()
+              elif key == 'q':
+                  val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
+                  try:
+                      cam.scan_quality = max(0, min(100, int(val)))
+                      self.config_mgr.save()
+                  except ValueError:
+                      pass
+              elif key == 'v':
+                  cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
+                  self.config_mgr.save()
+              elif key == 't':
+                  new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
+                  if new_dest:
+                      cam.scan_dest = new_dest
+                      self.config_mgr.save()
+              elif key == 'n':
+                  new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
+                  if new_desc is not None:
+                      cam.scan_desc = new_desc
+                      self.config_mgr.save()
+              elif key == 'h':
+                  date_format = 1 - date_format
+              elif key == 'x':
+                  if num_padding == 0:
+                      num_padding = 2
+                  elif num_padding == 2:
+                      num_padding = 3
+                  else:
+                      num_padding = 0
+                  self.config_mgr.save()
+              elif key == 'y':
+                  val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
+                  try:
+                      num = int(val)
+                      if 1 <= num <= 999:
+                          override_num = num
+                      else:
+                          notify("Number must be 1-999", "warning")
+                  except ValueError:
+                      pass
+              elif key == 'p':
+                  self.config_mgr.save()
+                  _draw()
+                  print("\n  Scanning... please wait")
+                  ok = Player._play_scanner(cam)
+                  status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ ERROR{RST}"
+                  print(f"\n  {status} — press any key...")
+                  sys.stdin.read(1)
+              elif key == Key.ESC:
+                  running = False
         finally:
-            # Always disable mouse tracking on exit, even if an exception occurs
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
             sys.stdout.flush()
 # --------------------------------------------------------------------------
