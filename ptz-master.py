@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.19"
+VERSION = "9.0.20"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -8,7 +8,7 @@ __doc__ = f"""
 # ⚙️  Version:      {VERSION}
 # 👨‍💻  Author:       Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
 # 🎯  Purpose:      Interactive TUI for IP camera control via mpv
-#                   Supports RTSP, V4L2, USB camera and play video files
+#                   Supports RTSP, V4L2, USB camera, play video files and SANE scanners
 #
 # 🚀  Usage:        python3 ptz-master.py
 #                   ./ptz-master.py --help
@@ -16,7 +16,7 @@ __doc__ = f"""
 #                   python3 ptz-master.py -p <video_file>
 #                   python3 ptz-master.py -pl <video_files>  # playlist with loop
 #
-# 🔧  Dependencies: Python 3.6+, mpv, ffprobe, ffmpeg
+# 🔧  Dependencies: Python 3.6+, mpv, ffprobe, ffmpeg, sane-utils (scanimage), ImageMagick (convert)
 #                   xdotool (X11 player positioning)
 #                   kdotool (Wayland/KDE player positioning)
 #
@@ -72,6 +72,18 @@ if not os.path.exists(LOG_DIR):
     except Exception:
         LOG_DIR = "/tmp"
 LOG_FILE = os.path.join(LOG_DIR, "ptz_master_debug.log")
+REC_DIR  = os.path.join(BASE_DIR, "rec")
+if not os.path.exists(REC_DIR):
+    try:
+        os.makedirs(REC_DIR)
+    except Exception:
+        REC_DIR = "/tmp"
+SCAN_DIR = os.path.join(BASE_DIR, "scans")
+if not os.path.exists(SCAN_DIR):
+    try:
+        os.makedirs(SCAN_DIR)
+    except Exception:
+        SCAN_DIR = "/tmp"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -227,6 +239,7 @@ class CameraType(Enum):
     RTSP_ONLY = "RTSP_ONLY"
     V4L2 = "V4L2"
     FILE = "FILE"
+    SCANNER = "SCANNER"
     UNKNOWN = "UNKNOWN"
 
 class CameraPorts:
@@ -388,6 +401,17 @@ class Camera:
         self.image_params: dict = dict(self.DEFAULT_IMAGE_PARAMS)
         if image_params:
             self.image_params.update(image_params)
+        # Scanner params (CameraType.SCANNER)
+        self.scan_device  = ""            # SANE device string (e.g. "pixma:04A91234")
+        self.scan_mode    = "gray"        # color | gray | lineart
+        self.scan_dpi     = 300
+        self.scan_area    = "0:0:215:297" # x:y:w:h mm
+        self.scan_format  = "jpg"         # jpg | png | pdf | tiff
+        self.scan_quality = 75
+        self.scan_resize  = "1240x1754"   # WxH po konwersji
+        self.scan_desc    = ""            # opis do nazwy pliku
+        self.scan_dest    = SCAN_DIR      # katalog docelowy
+        self.scan_viewer  = "mpv"         # przeglądarka: mpv|gwenview|xdg-open|eog|feh
 
     def to_dict(self) -> dict:
         result = {
@@ -415,6 +439,17 @@ class Camera:
             result["file_start"] = self.file_start
         if self.image_params != self.DEFAULT_IMAGE_PARAMS:
             result["image_params"] = self.image_params
+        if self.type == CameraType.SCANNER:
+            result["scan_device"]  = self.scan_device
+            result["scan_mode"]    = self.scan_mode
+            result["scan_dpi"]     = self.scan_dpi
+            result["scan_area"]    = self.scan_area
+            result["scan_format"]  = self.scan_format
+            result["scan_quality"] = self.scan_quality
+            result["scan_resize"]  = self.scan_resize
+            result["scan_desc"]    = self.scan_desc
+            result["scan_dest"]    = self.scan_dest
+            result["scan_viewer"]  = self.scan_viewer
         return result
 
     @classmethod
@@ -432,7 +467,7 @@ class Camera:
         layout = None
         if "layout" in data:
             layout = WindowLayout.from_dict(data["layout"])
-        return cls(
+        obj = cls(
             name=data.get("name", "New Camera"),
             ip=data.get("ip", "192.168.1.10"),
             mac=data.get("mac", "UNKNOWN"),
@@ -453,6 +488,18 @@ class Camera:
             file_start=data.get("file_start", 0.0),
             image_params=data.get("image_params", None),
         )
+        if cam_type == CameraType.SCANNER:
+            obj.scan_device  = data.get("scan_device",  "")
+            obj.scan_mode    = data.get("scan_mode",    "gray")
+            obj.scan_dpi     = data.get("scan_dpi",     300)
+            obj.scan_area    = data.get("scan_area",    "0:0:215:297")
+            obj.scan_format  = data.get("scan_format",  "jpg")
+            obj.scan_quality = data.get("scan_quality", 75)
+            obj.scan_resize  = data.get("scan_resize",  "1240x1754")
+            obj.scan_desc    = data.get("scan_desc",    "")
+            obj.scan_dest    = data.get("scan_dest",    SCAN_DIR)
+            obj.scan_viewer  = data.get("scan_viewer",  "mpv")
+        return obj
 
 MPV_DEFAULT_CMD = (
     "mpv --rtsp-transport=tcp --no-border "
@@ -521,7 +568,7 @@ logger = Logger()
 
 REQUIRED_CRITICAL = ['mpv', 'ffprobe']
 REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat',
-                     'ffmpeg', 'kdotool']
+                     'ffmpeg', 'kdotool', 'fuser', 'scanimage', 'convert']
 
 def _win_tool_available() -> bool:
     """Zwraca True jeśli dostępne narzędzie do zapisu/odczytu geometrii okien."""
@@ -1008,6 +1055,16 @@ def _extract_clip(filepath: str, start: float, end: float,
         with open(ffmpeg_log, "w") as _flog:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=_flog)
         logger.info(f"_extract_clip PID={proc.pid}  ffmpeg_log={ffmpeg_log}")
+        # Usuń log w tle po zakończeniu ffmpeg
+        def _rm_log():
+            try:
+                proc.wait(timeout=600)
+                if os.path.exists(ffmpeg_log):
+                    os.unlink(ffmpeg_log)
+            except Exception:
+                pass
+        import threading as _thr_ec
+        _thr_ec.Thread(target=_rm_log, daemon=True).start()
         return True
     except Exception as e:
         logger.error(f"_extract_clip Popen failed: {e}")
@@ -1783,9 +1840,9 @@ class NetworkUtils:
 
     @staticmethod
     def resolve_ip(cam) -> bool:
-        if cam.type in (CameraType.V4L2, CameraType.FILE):
+        if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
             return False
-        if not cam.mac or cam.mac in ("UNKNOWN", "V4L2", "FILE", ""):
+        if not cam.mac or cam.mac in ("UNKNOWN", "V4L2", "FILE", "SCANNER", ""):
             return False
         new_ip = NetworkUtils.get_ip_from_mac(cam.mac)
         if not new_ip:
@@ -1893,7 +1950,7 @@ class CameraDetector:
     
     @classmethod
     def detect(cls, cam: Camera, show_progress: bool = False) -> Tuple[CameraType, Optional[int]]:
-        if cam.type in (CameraType.V4L2, CameraType.FILE):
+        if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
             return cam.type, None
         
         if not cam.ip:
@@ -3386,6 +3443,8 @@ class Player:
             elif cam.type == CameraType.FILE:
                 return Player._play_file(cam, layout, skip_focus=skip_focus,
                                          global_mute=global_mute)
+            elif cam.type == CameraType.SCANNER:
+                return Player._play_scanner(cam, skip_focus=skip_focus)
             else:
                 return Player._play_rtsp(cam, profile, player_cmd, layout,
                                          skip_focus=skip_focus, global_mute=global_mute)
@@ -3641,6 +3700,153 @@ class Player:
 
         return True
 
+    @staticmethod
+    def _play_scanner(cam: 'Camera', skip_focus: bool = False) -> bool:
+        """Wykonaj skan przez scanimage + convert (logika z scan.sh)."""
+        if not shutil.which('scanimage'):
+            notify("scanimage not found! Install: sane-utils", "error")
+            return False
+
+        import datetime as _dt
+        import tempfile as _tmp
+
+        # --- Parametry ---
+        mode    = cam.scan_mode
+        dpi     = cam.scan_dpi
+        area    = cam.scan_area          # "x:y:w:h"
+        fmt     = cam.scan_format
+        quality = cam.scan_quality
+        resize  = cam.scan_resize
+        desc    = cam.scan_desc
+        dest    = cam.scan_dest
+        device  = cam.scan_device        # "" = domyślny skaner SANE
+
+        # Parsuj area
+        try:
+            xl, yt, wd, ht = area.split(":")
+        except Exception:
+            xl, yt, wd, ht = "0", "0", "215", "297"
+
+        # Utwórz katalog docelowy
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except Exception as e:
+            notify(f"Scan dest error: {e}", "error")
+            return False
+
+        # Wygeneruj nazwę pliku (YYYY-MM-DD_opis_NNN.fmt)
+        today = _dt.date.today().strftime("%Y-%m-%d")
+        desc_part = f"_{desc}" if desc else ""
+        pattern = f"{today}{desc_part}_*.{fmt}"
+        import glob as _gl
+        existing = _gl.glob(os.path.join(dest, pattern))
+        nums = []
+        for f in existing:
+            bn = os.path.basename(f)
+            try:
+                n = int(bn.split("_")[-1].split(".")[0])
+                nums.append(n)
+            except Exception:
+                pass
+        next_num = max(nums, default=0) + 1
+        fname = f"{today}{desc_part}_{next_num:03d}.{fmt}"
+        dest_file = os.path.join(dest, fname)
+
+        # --- Tymczasowe pliki ---
+        tmp_dir = _tmp.mkdtemp(prefix="ptz-scan-")
+        raw_file = os.path.join(tmp_dir, f"raw_scan.tiff")
+        out_file = os.path.join(tmp_dir, f"scan_out.{fmt}")
+
+        # Profil aktywny — zapisz ścieżkę dla statusu
+        profile = cam.profiles[cam.active_profile] if cam.profiles else None
+        if profile:
+            profile.pid = -1   # -1 = skanowanie w toku
+            profile.ipc_path = dest_file
+
+        logger.info(f"Scan START: {mode} {dpi}DPI → {dest_file}")
+        notify(f"Scanning... {mode} {dpi}DPI", "info")
+
+        try:
+            # 1. scanimage
+            scan_cmd = [
+                'scanimage',
+                '--mode', mode,
+                '-l', xl, '-t', yt,
+                '-x', wd, '-y', ht,
+                '--resolution', str(dpi),
+                '--format', 'tiff',
+            ]
+            if device:
+                scan_cmd += ['--device-name', device]
+            scan_cmd += ['--output-file', raw_file]
+
+            logger.info(f"scanimage cmd: {' '.join(scan_cmd)}")
+            proc = subprocess.run(
+                scan_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=120
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.decode('utf-8', errors='replace')[:200]
+                logger.error(f"scanimage failed: {err}")
+                notify(f"Scan error: {err[:60]}", "error")
+                return False
+
+            if not os.path.isfile(raw_file) or os.path.getsize(raw_file) == 0:
+                notify("Scan empty — check scanner", "error")
+                return False
+
+            # 2. convert (ImageMagick)
+            if shutil.which('convert'):
+                conv_cmd = [
+                    'convert', raw_file,
+                    '-sharpen', '0x1.0',
+                    '-resize', resize,
+                    '-quality', str(quality),
+                    '-strip', out_file
+                ]
+                subprocess.run(conv_cmd, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=60)
+                src = out_file if os.path.isfile(out_file) else raw_file
+            else:
+                # Brak convert — skopiuj raw
+                src = raw_file
+
+            # 3. Przenieś do dest
+            shutil.copy2(src, dest_file)
+            logger.info(f"Scan saved: {dest_file}")
+            notify(f"Scan saved: {fname}", "info")
+
+            if profile:
+                profile.pid = None
+                profile.ipc_path = dest_file
+
+            # 4. Otwórz przeglądarkę
+            viewer = cam.scan_viewer or "mpv"
+            if shutil.which(viewer):
+                subprocess.Popen(
+                    [viewer, dest_file],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+            elif shutil.which('xdg-open'):
+                subprocess.Popen(
+                    ['xdg-open', dest_file],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+
+            return True
+
+        except subprocess.TimeoutExpired:
+            notify("Scan timeout (>120s)", "error")
+            return False
+        except Exception as e:
+            logger.error(f"_play_scanner exception: {e}")
+            notify(f"Scan error: {str(e)[:50]}", "error")
+            return False
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
 # =============================================================================
 # UI - MAIN INTERFACE
 # =============================================================================
@@ -3703,6 +3909,7 @@ class UI:
             CameraType.RTSP_ONLY: "RTS",
             CameraType.V4L2:      "V4L",
             CameraType.FILE:      "FIL",
+            CameraType.SCANNER:   "SCN",
             CameraType.AUTO:      "?  ",
         }
         ts = type_short.get(cam.type, "?  ")
@@ -3736,6 +3943,10 @@ class UI:
             fname = os.path.basename(cam.file_path) if cam.file_path else "—"
             l2 = f" {YLW}(i){RST} FILE: {GRN}{fname[:30]}{RST}"
             r2 = f"{MAG}x{cam.file_speed:.2f}{RST} {'🔁' if cam.file_loop else '▶'} "
+        elif cam.type == CameraType.SCANNER:
+            _dev = cam.scan_device or "(default)"
+            l2 = f" {YLW}(i){RST} DEV: {GRN}{_dev[:28]}{RST}"
+            r2 = f"{CYN}{cam.scan_mode} {cam.scan_dpi}DPI{RST} "
         else:
             port = cam.ports.onvif
             if cam.type == CameraType.DVRIP:
@@ -3752,6 +3963,10 @@ class UI:
         if cam.type == CameraType.FILE:
             l3 = f" {MAG}Start:{RST} {GRN}{cam.file_start:.1f}s{RST}"
             r3 = f"{YLW}(h){RST} PASS: {GRN}{pass_stars}{RST} {YLW}(?){RST} {MAG}{ts.strip():<3}{RST} {YLW}(g){RST} {MAG}Sync{RST} "
+        elif cam.type == CameraType.SCANNER:
+            _dest_short = str(cam.scan_dest)[-28:]
+            l3 = f" {YLW}(x){RST} {GRN}{cam.scan_format.upper():<4}{RST} q:{GRN}{cam.scan_quality}{RST} → {DIM}{_dest_short}{RST}"
+            r3 = f"{MAG}{ts.strip():<3}{RST} {YLW}(g){RST} {MAG}Sync{RST} "
         rlines.append(("normal", f"│{pad(l3, W - ansilen(r3))}{r3}│"))
         rlines.append(("sep",    f"├" + "─" * W + "┤"))
 
@@ -3760,6 +3975,9 @@ class UI:
         if cam.type in (CameraType.V4L2, CameraType.FILE):
             display_name = prof.name
             res_display  = ""
+        elif cam.type == CameraType.SCANNER:
+            display_name = "🖨 Scanner"
+            res_display  = f" [{cam.scan_resize}]"
         else:
             display_name = prof.name
             res_display  = f" [{prof.res}]"
@@ -3769,8 +3987,12 @@ class UI:
         rlines.append(("sep",    f"├" + "─" * W + "┤"))
 
         player_short = self.config.player_cmd[:13]
-        l5 = f" {YLW}(p){RST} Play {YLW}(x){RST} mpv ▶ {YLW}(o){RST} {GRN}{player_short}{RST}"
-        r5 = f"{YLW}(k){RST} Kill {p_status} "
+        if cam.type == CameraType.SCANNER:
+            l5 = f" {YLW}(p){RST} Scan {YLW}(x){RST} Config  {DIM}viewer: {cam.scan_viewer}{RST}"
+            r5 = f"{YLW}(k){RST} Kill {p_status} "
+        else:
+            l5 = f" {YLW}(p){RST} Play {YLW}(x){RST} mpv ▶ {YLW}(o){RST} {GRN}{player_short}{RST}"
+            r5 = f"{YLW}(k){RST} Kill {p_status} "
         rlines.append(("normal", f"│{pad(l5, W - ansilen(r5))}{r5}│"))
 
         max_uri  = W - len(" (r) URI: ")
@@ -4592,7 +4814,11 @@ class PTZMasterApp:
                     self._mouse_off(); self._play_stream(); self._mouse_on()
                     self.ui.draw()
                 elif key.lower() == 'x':
-                    self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on()
+                    cam = self.ui.current_camera
+                    if cam and cam.type == CameraType.SCANNER:
+                        self._mouse_off(); self._scanner_control_screen(); self._mouse_on()
+                    else:
+                        self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on()
                     self.ui.draw()
                 elif key.lower() == 'k':
                     cam = self.ui.current_camera
@@ -4725,7 +4951,7 @@ class PTZMasterApp:
             self._mouse_off(); self._confirm_exit(); self._mouse_on()
     
     def _sync_network(self, cam: Camera) -> bool:
-        if cam.type == CameraType.V4L2:
+        if cam.type == CameraType.V4L2 or cam.type == CameraType.SCANNER:
             return False
         NetworkUtils.resolve_ip(cam)
         
@@ -4760,6 +4986,9 @@ class PTZMasterApp:
             return
         if cam.type == CameraType.FILE:
             notify("FILE: local file, no profiles to sync", "warning")
+            return
+        if cam.type == CameraType.SCANNER:
+            notify("SCANNER: no profiles needed", "warning")
             return
         
         if cam.type == CameraType.AUTO:
@@ -5086,6 +5315,24 @@ class PTZMasterApp:
             self.config_mgr.save()
             return
 
+        if cam.type == CameraType.SCANNER:
+            cam.name = self._edit_param("NAME", cam.name)
+            cam.scan_device = self._edit_param("SCAN DEVICE (empty=default)", cam.scan_device)
+            cam.scan_mode = self._edit_param("Mode (gray|color|lineart)", cam.scan_mode)
+            dpi = self._edit_param("DPI", str(cam.scan_dpi))
+            try: cam.scan_dpi = max(50, min(2400, int(dpi)))
+            except: pass
+            cam.scan_format = self._edit_param("Format (jpg|png|pdf|tiff)", cam.scan_format)
+            q = self._edit_param("Quality (0-100)", str(cam.scan_quality))
+            try: cam.scan_quality = max(0, min(100, int(q)))
+            except: pass
+            cam.scan_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
+            cam.scan_desc = self._edit_param("Description (for filename)", cam.scan_desc)
+            cam.scan_dest = self._edit_param("Destination dir", str(cam.scan_dest))
+            cam.scan_viewer = self._edit_param("Viewer (mpv|gwenview|xdg-open|eog|feh)", cam.scan_viewer)
+            self.config_mgr.save()
+            return
+
         old_ip = cam.ip
 
         cam.name = self._edit_param("NAME", cam.name)
@@ -5134,6 +5381,9 @@ class PTZMasterApp:
             return
         if cam.type == CameraType.FILE:
             notify("FILE: use (e) to edit file path and settings", "warning")
+            return
+        if cam.type == CameraType.SCANNER:
+            notify("SCANNER: use (e) to edit scanner settings", "warning")
             return
         
         old_ip = cam.ip
@@ -5242,7 +5492,7 @@ class PTZMasterApp:
         W = 57
         
         type_order = [CameraType.AUTO, CameraType.ONVIF, CameraType.DVRIP,
-                      CameraType.RTSP_ONLY, CameraType.V4L2, CameraType.FILE]
+                      CameraType.RTSP_ONLY, CameraType.V4L2, CameraType.FILE, CameraType.SCANNER]
         cur = type_order.index(cam.type) if cam.type in type_order else 0
 
         items = [
@@ -5252,6 +5502,7 @@ class PTZMasterApp:
             "📡 RTSP_ONLY – Stream only",
             "🎥 V4L2      – Local USB device",
             "📁  FILE      – Local video file",
+            "🖨️  SCANNER   – Sane scanner",
         ]
 
         idx = select_menu(items, selected=cur,
@@ -5313,6 +5564,16 @@ class PTZMasterApp:
                 name=os.path.basename(cam.file_path or "file"),
                 token="file_0", uri=cam.file_path)]
             cam.active_profile = 0
+        elif idx == 6:
+            cam.type = CameraType.SCANNER
+            cam.ip = ""
+            cam.mac = "SCANNER"
+            cam.ports = CameraPorts()
+            cam.profiles = [CameraProfile(name="scan", token="", res="A4")]
+            if not cam.scan_device:
+                cam.scan_device = ""
+            if not cam.scan_dest:
+                cam.scan_dest = SCAN_DIR
         else:
             changed = False
 
@@ -5498,6 +5759,166 @@ class PTZMasterApp:
             self.ui.set_progress(0)
             self.ui.draw()
     
+    def _scanner_control_screen(self):
+        """TUI konfiguracji i serial mode skanera (x)."""
+        cam = self.ui.current_camera
+        if not cam or cam.type != CameraType.SCANNER:
+            notify("Nie wybrano skanera", "warning"); return
+
+        import textwrap
+
+        MODES   = ["gray", "color", "lineart"]
+        FORMATS = ["jpg", "png", "pdf", "tiff"]
+        VIEWERS = ["mpv", "gwenview", "xdg-open", "eog", "feh"]
+        DPIS    = [75, 100, 150, 200, 300, 600, 1200]
+        AREAS   = {
+            "A4"     : "0:0:215:297",
+            "A5"     : "0:0:148:210",
+            "Letter" : "0:0:216:279",
+            "Custom" : cam.scan_area,
+        }
+        RESIZES = {
+            "A4@150": "1240x1754",
+            "A4@300": "2480x3508",
+            "A4@100": "827x1169",
+            "A4@75" : "620x877",
+            "Custom": cam.scan_resize,
+        }
+
+        def _cycled(lst, val):
+            try:    return lst[(lst.index(val) + 1) % len(lst)]
+            except: return lst[0]
+
+        def _draw_scanner_tui():
+            sys.stdout.write('[2J[H'); sys.stdout.flush()
+            W = 76
+            def line(txt=""): print(f"║ {pad(txt, W-2)} ║")
+            print(f"╔{'═'*W}╗")
+            line(f"{CYN}🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}")
+            print(f"╠{'═'*W}╣")
+            line(f" {YLW}(m){RST} Mode:    {GRN}{cam.scan_mode:<10}{RST}  "
+                 f"{YLW}(d){RST} DPI:     {GRN}{cam.scan_dpi:<6}{RST}  "
+                 f"{YLW}(f){RST} Format:  {GRN}{cam.scan_format}{RST}")
+            line(f" {YLW}(a){RST} Area:    {GRN}{cam.scan_area:<18}{RST}  "
+                 f"{YLW}(r){RST} Resize:  {GRN}{cam.scan_resize}{RST}")
+            line(f" {YLW}(q){RST} Quality: {GRN}{cam.scan_quality:<4}{RST}  "
+                 f"{YLW}(t){RST} Dest:    {GRN}{str(cam.scan_dest)[:35]}{RST}")
+            line(f" {YLW}(v){RST} Viewer:  {GRN}{cam.scan_viewer:<12}{RST}  "
+                 f"{YLW}(n){RST} Desc:    {GRN}{cam.scan_desc or '(brak)'}{RST}")
+            print(f"╠{'═'*W}╣")
+            line(f" {YLW}(p){RST} Skanuj raz   "
+                 f"{YLW}(s){RST} Serial mode (skanuj → pytaj o kontynuację)   "
+                 f"{YLW}(x){RST} Wróć")
+            print(f"╚{'═'*W}╝")
+
+        fd = sys.stdin.fileno()
+        sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+        sys.stdout.flush()
+        running = True
+        while running:
+            _draw_scanner_tui()
+            ch = sys.stdin.read(1)
+            if ch == 'm':
+                cam.scan_mode   = _cycled(MODES, cam.scan_mode)
+                self.config_mgr.save()
+            elif ch == 'd':
+                try:    idx = DPIS.index(cam.scan_dpi)
+                except: idx = 4
+                cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
+                self.config_mgr.save()
+            elif ch == 'f':
+                cam.scan_format = _cycled(FORMATS, cam.scan_format)
+                self.config_mgr.save()
+            elif ch == 'a':
+                area_items = list(AREAS.keys())
+                ai = select_menu(area_items, selected=0, title="Obszar skanowania")
+                if ai >= 0:
+                    key = area_items[ai]
+                    if key == "Custom":
+                        cam.scan_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
+                    else:
+                        cam.scan_area = AREAS[key]
+                    self.config_mgr.save()
+            elif ch == 'r':
+                res_items = list(RESIZES.keys())
+                ri = select_menu(res_items, selected=0, title="Rozmiar wynikowy")
+                if ri >= 0:
+                    key = res_items[ri]
+                    if key == "Custom":
+                        cam.scan_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
+                    else:
+                        cam.scan_resize = RESIZES[key]
+                    self.config_mgr.save()
+            elif ch == 'q':
+                val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
+                try:    cam.scan_quality = max(0, min(100, int(val)))
+                except: pass
+                self.config_mgr.save()
+            elif ch == 't':
+                cam.scan_dest = self._edit_param("Dest dir", str(cam.scan_dest))
+                self.config_mgr.save()
+            elif ch == 'v':
+                cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
+                self.config_mgr.save()
+            elif ch == 'n':
+                cam.scan_desc = self._edit_param("Opis (do nazwy pliku)", cam.scan_desc)
+                self.config_mgr.save()
+            elif ch == 'p':
+                # Skanuj raz — wyłącz mysz podczas drukowania statusu
+                self.config_mgr.save()
+                _draw_scanner_tui()
+                ok = Player._play_scanner(cam)
+                status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ BŁĄD{RST}"
+                print(f"\n  {status}  — naciśnij dowolny klawisz...")
+                sys.stdin.read(1)  # raw mode — dowolny klawisz
+            elif ch == 's':
+                # Serial mode — skanuj w pętli
+                self.config_mgr.save()
+                while True:
+                    _draw_scanner_tui()
+                    print(f"\n  {CYN}SERIAL MODE{RST} — skanowanie...")
+                    ok = Player._play_scanner(cam)
+                    status = f"{GRN}OK{RST}" if ok else f"{RED}BŁĄD{RST}"
+                    print(f"  Wynik: {status}")
+                    print(f"\n  {YLW}Enter/spacja{RST} Skanuj ponownie  "
+                          f"{YLW}m{RST}ode {YLW}d{RST}pi {YLW}f{RST}ormat {YLW}a{RST}rea {YLW}r{RST}esize {YLW}q{RST}uality {YLW}n{RST}azwa  "
+                          f"{YLW}x/Esc{RST} Zakończ")
+                    ans = sys.stdin.read(1)
+                    if ans in ('x', 'X', '\x1b'):
+                        break
+                    elif ans == 'm':
+                        cam.scan_mode   = _cycled(MODES, cam.scan_mode)
+                    elif ans == 'd':
+                        try:    idx = DPIS.index(cam.scan_dpi)
+                        except: idx = 4
+                        cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
+                    elif ans == 'f':
+                        cam.scan_format = _cycled(FORMATS, cam.scan_format)
+                    elif ans == 'a':
+                        area_items = list(AREAS.keys())
+                        ai = select_menu(area_items, selected=0, title="Obszar")
+                        if ai >= 0:
+                            key = area_items[ai]
+                            cam.scan_area = AREAS[key] if key != "Custom" else self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
+                    elif ans == 'r':
+                        res_items = list(RESIZES.keys())
+                        ri = select_menu(res_items, selected=0, title="Resize")
+                        if ri >= 0:
+                            key = res_items[ri]
+                            cam.scan_resize = RESIZES[key] if key != "Custom" else self._edit_param("Resize (WxH)", cam.scan_resize)
+                    elif ans == 'q':
+                        val = self._edit_param("Quality", str(cam.scan_quality))
+                        try:    cam.scan_quality = max(0, min(100, int(val)))
+                        except: pass
+                    elif ans == 'n':
+                        cam.scan_desc = self._edit_param("Opis", cam.scan_desc)
+                    # \r/\n lub nieznany = skanuj ponownie
+                    self.config_mgr.save()
+                self.config_mgr.save()
+            elif ch in ('x', 'X', ''):
+                running = False
+            self.config_mgr.save()
+
     def _discover_cameras(self):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         W = 57
@@ -5511,6 +5932,7 @@ class PTZMasterApp:
             "🎥 Scan V4L2 Devices (USB/local)",
             nmap_label,
             "📂  Add File Camera (local video file)",
+            "🖨️  Add Scanner (SANE)",
             "✖  Cancel",
         ]
         idx = select_menu(items, selected=0, title="📷 Camera Discovery")
@@ -5529,7 +5951,71 @@ class PTZMasterApp:
                 time.sleep(2)
         elif idx == 3:
             self._add_file_camera()
+        elif idx == 4:
+            self._add_scanner_camera()
     
+    def _add_scanner_camera(self):
+        """Wykryj skanery przez scanimage -L lub dodaj ręcznie."""
+        print_header("SCANNER DISCOVERY")
+        scanners = []
+
+        if shutil.which('scanimage'):
+            print(f"  {CYN}Szukam skanerów (scanimage -L)...{RST}")
+            try:
+                r = subprocess.run(
+                    ['scanimage', '-L'],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15
+                )
+                out = r.stdout.decode('utf-8', errors='replace')
+                for line in out.splitlines():
+                    # format: device `pixma:04A91234' is a Canon...
+                    import re
+                    m = re.match(r"device `([^']+)' is (.+)", line)
+                    if m:
+                        scanners.append((m.group(1), m.group(2).strip()))
+                        print(f"  {GRN}✓{RST} {m.group(1)}  {DIM}{m.group(2)[:50]}{RST}")
+            except Exception as e:
+                print(f"  {YLW}scanimage -L error: {e}{RST}")
+        else:
+            print(f"  {RED}scanimage not found — install sane-utils{RST}")
+
+        if not scanners:
+            print(f"  {YLW}Nie znaleziono skanerów.{RST}")
+
+        items = [f"🖨  {dev}  {DIM}{desc[:40]}{RST}" for dev, desc in scanners]
+        items += ["✏  Dodaj ręcznie (wpisz device)", "✖  Anuluj"]
+
+        idx = select_menu(items, selected=0, title="🖨  Dodaj skaner")
+        if idx == -1 or idx == len(items) - 1:
+            return
+
+        if idx == len(items) - 2:
+            # Ręczne dodanie
+            device_str = self._edit_param("Device (np. pixma:04A91234 lub ''=domyślny)", "")
+            name       = self._edit_param("Nazwa", "Scanner")
+        else:
+            device_str, dev_desc = scanners[idx]
+            name = self._edit_param("Nazwa", dev_desc[:20].replace(" ", "_"))
+
+        # Sprawdź duplikat
+        if any(c.type == CameraType.SCANNER and c.scan_device == device_str
+               for c in self.config.cameras):
+            notify("Skaner już w liście", "warning")
+            return
+
+        cam = Camera(
+            name=name,
+            cam_type=CameraType.SCANNER,
+            ip="", mac="UNKNOWN",
+        )
+        cam.scan_device = device_str
+        cam.scan_dest   = SCAN_DIR
+        cam.profiles    = [CameraProfile(name="scan", token="", res="A4")]
+        self.config.cameras.append(cam)
+        self.config_mgr.save()
+        notify(f"Dodano skaner: {name}", "info")
+        logger.info(f"Added scanner: {name} device={device_str}")
+
     def _discover_network(self):
         print_header("NETWORK CAMERA DISCOVERY")
         
@@ -6103,6 +6589,9 @@ class PTZMasterApp:
             import termios as _termios2
             _fd2 = sys.stdin.fileno()
             _old2 = _termios2.tcgetattr(_fd2)
+            # Wyłącz raportowanie myszy — bez tego ruch myszy generuje śmieci w input()
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.flush()
             try:
                 cooked = _termios2.tcgetattr(_fd2)
                 cooked[3] |= _termios2.ECHO | _termios2.ICANON
@@ -6134,6 +6623,9 @@ class PTZMasterApp:
                             pass
             finally:
                 _termios2.tcsetattr(_fd2, _termios2.TCSADRAIN, _old2)
+                # Przywróć raportowanie myszy
+                sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                sys.stdout.flush()
         elif saved == 0:
             print(f"\n{YLW}Nie znaleziono aktywnych okien mpv.{RST}")
 
@@ -6328,7 +6820,7 @@ class PTZMasterApp:
 
         changes = []
         for cam in self.config.cameras:
-            if cam.type in (CameraType.V4L2, CameraType.FILE) or cam.mac in ("UNKNOWN", "V4L2", "FILE", ""):
+            if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER) or cam.mac in ("UNKNOWN", "V4L2", "FILE", "SCANNER", ""):
                 continue
             new_ip = NetworkUtils.get_ip_from_mac(cam.mac)
             if new_ip and new_ip != cam.ip:
@@ -6412,7 +6904,7 @@ class PTZMasterApp:
         
         changes = []
         for cam in self.config.cameras:
-            if cam.type in (CameraType.V4L2, CameraType.FILE) or cam.mac in ["UNKNOWN", "V4L2", "FILE"]:
+            if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER) or cam.mac in ["UNKNOWN", "V4L2", "FILE", "SCANNER"]:
                 continue
             
             new_ip = NetworkUtils.get_ip_from_mac(cam.mac)
@@ -7204,7 +7696,7 @@ class PTZMasterApp:
             ("c", "Change config file"),
             ("", ""),
             ("BATCH & DISCOVERY", ""),
-            ("F2", "Discover cameras (ping/nmap/V4L2)"),
+            ("F2", "Discover cameras (ping/nmap/V4L2/SANE)"),
             ("F3", "Batch operations"),
             ("F6 / \\", "Global mute toggle (all playing cameras)"),
             ("", ""),
@@ -7479,6 +7971,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     ab_b          = -1.0
     ab_active     = False
     _clipping     = False
+    _rec_active   = False   # stream-record aktywny (cam_mode)
+    _rec_path     = ""      # ścieżka aktualnego nagrania
     ptz_active = False          # czy trwa ruch PTZ
     ptz_progress = 0.0          # postęp ruchu (0..1)
     ptz_direction = ""          # opcjonalnie kierunek do wyświetlenia
@@ -7917,6 +8411,33 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             ctrl._send(["set_property", "ab-loop-b", "no"])
         last_msg = "[a] loop wyłączony"
 
+    def _rec_toggle():
+        """cam_mode: start/stop nagrywania strumienia przez mpv stream-record."""
+        nonlocal _rec_active, _rec_path, last_msg
+        if not ctrl or not ctrl.is_alive():
+            last_msg = "mpv disconnected"; return
+        if not _rec_active:
+            import datetime as _dt
+            _ts = _dt.datetime.now().strftime("%y-%m-%d-%H.%M.%S")
+            _cn = (cam.name if cam else "cam").replace("/", "_").replace(" ", "_")
+            _rec_path = os.path.join(REC_DIR, f"{_cn}-{_ts}.ts")
+            if ctrl.set_property("stream-record", _rec_path):
+                _rec_active = True
+                last_msg = f"⏺ REC → {os.path.basename(_rec_path)}"
+                logger.info(f"stream-record START: {_rec_path}")
+            else:
+                last_msg = "⏺ REC start failed"
+        else:
+            ctrl.set_property("stream-record", "")
+            _rec_active = False
+            _saved = _rec_path
+            _rec_path = ""
+            # Pełna ścieżka — oznacz gdy fallback do /tmp
+            _in_tmp = _saved.startswith("/tmp")
+            _lbl = "[/tmp] " if _in_tmp else ""
+            last_msg = f"⏹ REC {_lbl}{_saved}"
+            logger.info(f"stream-record STOP: {_saved}")
+
     def _parse_time(s: str) -> float:
         s = s.strip()
         try:
@@ -8022,12 +8543,25 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _extract_clip_current():
         nonlocal last_msg, _clipping
+        # REC działa tylko dla plików — w cam_mode files[] to obiekty Camera
+        if not is_file_cam:
+            last_msg = "🎬 REC tylko dla plików (nie dla strumieni)"
+            return
         if not ab_active or ab_a < 0 or ab_b <= ab_a:
             last_msg = "🎬 Set AB loop first ([A] twice)"
             return
-        fp = files[current_idx] if files else (cam.file_path if cam else "")
-        if not fp:
+        fp = files[current_idx] if (files and current_idx < len(files)) else ""
+        # Upewnij się że fp to ścieżka do pliku, nie obiekt Camera
+        if not isinstance(fp, str):
+            fp = getattr(fp, "file_path", "") or ""
+        if not fp or not os.path.isfile(fp):
             last_msg = "🎬 No file path"
+            return
+        # Pliki audio nie mają video — AB-loop clip extraction nie ma sensu
+        _AUDIO_EXTS = {'.mp3', '.flac', '.ogg', '.opus', '.m4a',
+                       '.aac', '.wav', '.wma', '.ape', '.mka'}
+        if os.path.splitext(fp)[1].lower() in _AUDIO_EXTS:
+            last_msg = "🎬 Clip extraction niedostępny dla plików audio"
             return
         _has_filters = any(values.get(p, 0) != 0 for p in ["BRIGHTNESS","CONTRAST","SATURATION","GAMMA","HUE"])
         _has_zoom    = zoom_mode and (zoom_val != 0.0 or pan_x != 0.0 or pan_y != 0.0)
@@ -8096,6 +8630,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         break
                 _clipping = False
                 last_msg = f"🎬 Gotowe: clip_{int(ab_a)}_{int(ab_b)}.mp4"
+                # Usuń plik logu ffmpeg po zakończeniu
+                try:
+                    if os.path.exists(clip_log):
+                        os.unlink(clip_log)
+                        logger.debug(f"Removed ffmpeg log: {clip_log}")
+                except OSError as _e:
+                    logger.debug(f"Could not remove ffmpeg log: {_e}")
             _thr.Thread(target=_monitor_clip, daemon=True).start()
         else:
             last_msg = "🎬 Clip extraction failed"
@@ -8379,14 +8920,26 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             br_val, spark16 = 0.0, " " * 16
         buf_ms = int(float(getattr(_fetch_state, "_buf_s_last", 0) or 0) * 1000)
         buf_str = f" Buf:{buf_ms}ms" if buf_ms > 0 else ""
-        if _clipping:
+        if _rec_active:
+            # cam_mode: aktywne nagrywanie stream-record — miga czerwony
+            _R_col = RED if _blink else WHT
+            rec_dot = f"{_R_col}●{RST}"; _RR = f"{_R_col}[A]{RST}"
+            _rec_short = os.path.basename(_rec_path)[:20] if _rec_path else ""
+            rec_right = f" {rec_dot} {_RR} {DIM}{_rec_short}{RST}"
+        elif _clipping:
             _R_col = RED if _blink else YLW
             rec_dot = f"{_R_col}●{RST}"; _RR = f"{_R_col}[R]{RST}"
+            rec_right = f" {rec_dot} {_RR}EC"
         elif ab_active:
             rec_dot = f"{GRN}●{RST}"; _RR = f"{GRN}[R]{RST}"
+            rec_right = f" {rec_dot} {_RR}EC / {YLW}Clear[A]{RST} Loop"
         else:
-            rec_dot = f"{DIM}○{RST}"; _RR = f"{DIM}[R]{RST}"
-        rec_right = f" {rec_dot} {_RR}EC / {YLW}Clear[A]{RST} Loop" if ab_active else f" {rec_dot} {_RR}EC"
+            _A_lbl = f"{YLW}[A]{RST}" if cam_mode else f"{DIM}[R]{RST}"
+            rec_dot = f"{DIM}○{RST}"
+            _hint   = f" REC" if cam_mode else f"EC"
+            rec_right = f" {rec_dot} {_A_lbl}{_hint}"
+            if not cam_mode and ab_active:
+                rec_right = f" {GRN}●{RST} {GRN}[R]{RST}EC / {YLW}Clear[A]{RST} Loop"
         l2_left = f" 🚀 {br_val:.1f}Mb [{DIM}{spark16}{RST}]{buf_str}"
         row(f"{pad(l2_left, _L)}{BLU}║{RST}{pad(rec_right, _R)}")
 
@@ -8599,12 +9152,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     elif dx > 0: direction = "R"
                     elif dz > 0: direction = "Z+"
                     elif dz < 0: direction = "Z-"
-                    if direction:
-                        ptz_speed = int(cam.speed * 8)
-                        client.move(direction, ptz_speed, duration)
-                        for i in range(steps + 1):
-                            ptz_progress = i / steps
-                            _time.sleep(step_time)
+                    try:
+                        if direction:
+                            ptz_speed = int(cam.speed * 8)
+                            client.move(direction, ptz_speed, duration)
+                            for i in range(steps + 1):
+                                ptz_progress = i / steps
+                                _time.sleep(step_time)
+                    finally:
+                        client.close()
                 last_msg = f"PTZ {direction_label} done"
             except Exception as e:
                 last_msg = f"PTZ error: {e}"
@@ -8770,8 +9326,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             # Row 6: REC and Clear[A]
             elif r == 6:
                 if c >= 50:
-                    if 53 <= c <= 55:                                   # ● [R]EC
-                        _extract_clip_current()
+                    if 53 <= c <= 55:                                   # ● [A]REC / [R]EC
+                        if cam_mode: _rec_toggle()
+                        elif is_file_cam: _extract_clip_current()
+                        else: last_msg = "🎬 REC tylko dla plików"
                     elif 65 <= c <= 71 and ab_active:                   # Clear[A]
                         _ab_clear()
 
@@ -9219,7 +9777,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
             elif ch in ('r', 'R'):
                 if paused: _auto_toggle_run()
-                else: _extract_clip_current()
+                elif is_file_cam: _extract_clip_current()
+                else: last_msg = "🎬 REC tylko dla plików"
             elif ch == 'x': _restore_image_settings()
             elif ch == 'X': _save_image_params()
             elif ch in ('i', 'I'): _zoom_in()
@@ -9229,7 +9788,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 name = _ask_save_name()
                 if save_as_camera_fn: save_as_camera_fn(name); last_msg = f"📷 saved as '{name}'"
             elif ch in ('a', 'A'):
-                if ab_a < 0: _ab_set_a()
+                if cam_mode:
+                    _rec_toggle()  # cam_mode: start/stop stream-record
+                elif ab_a < 0: _ab_set_a()
                 elif ab_b < 0: _ab_set_b()
                 else: _ab_clear()
             elif ch.lower() in JUMP_KEY: sel = JUMP_KEY[ch.lower()]
