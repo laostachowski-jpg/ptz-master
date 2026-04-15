@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.28"
+VERSION = "9.0.29"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4040,7 +4040,7 @@ class UI:
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
         _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
-        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}F6{RST}"
+        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
         footer_right = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
         print(f"├" + "─" * FW + "┤")
         print(f"│{pad(footer_left, FW - ansilen(footer_right))}{footer_right}│")
@@ -4166,20 +4166,25 @@ class PTZMasterApp:
 
     def _wait_click_or_key(self):
         import termios as _t, time as _time
+        fd = sys.stdin.fileno()
+        old_settings = _t.tcgetattr(fd)
         try:
-            _t.tcflush(sys.stdin.fileno(), _t.TCIFLUSH)
+            _t.tcflush(fd, _t.TCIFLUSH)
         except Exception:
             pass
         _time.sleep(0.05)
         self._mouse_on()
-        while True:
-            key = get_key()
-            if isinstance(key, MouseEvent):
-                if not key.release:
+        try:
+            while True:
+                key = get_key()
+                if isinstance(key, MouseEvent):
+                    if not key.release:
+                        break
+                elif key not in (Key.TIMEOUT,):
                     break
-            elif key not in (Key.TIMEOUT,):
-                break
-        self._mouse_off()
+        finally:
+            self._mouse_off()
+            _t.tcsetattr(fd, _t.TCSADRAIN, old_settings)
 
     def _handle_mouse_click(self, ev: 'MouseEvent'):
         r, c = ev.row, ev.col
@@ -4322,22 +4327,57 @@ class PTZMasterApp:
                 self._mouse_off(); self._save_preset(); self._mouse_on(); self.ui.draw(); return
 
         if r == 16:
-            if 3 <= c <= 4:
-                self._mouse_off(); self._discover_cameras(); self._mouse_on(); self.ui.draw(); return
-            if 16 <= c <= 17:
-                self._mouse_off(); self._batch_menu(); self._mouse_on(); self.ui.draw(); return
+            # === Nawigacja po kamerach (oryginalne, działające zakresy) ===
             if c == 25 or c == 27:
                 cameras = self.ui.config.cameras
                 if cameras:
                     self.ui.current_idx = (self.ui.current_idx + (1 if c == 27 else -1)) % len(cameras)
-                    self._sync_network(cameras[self.ui.current_idx]); self.ui.draw(); return
+                    self._sync_network(cameras[self.ui.current_idx])
+                    self.ui.draw()
+                return
             if 33 <= c <= 34 or 36 <= c <= 37:
                 cameras = self.ui.config.cameras
                 if cameras:
                     self.ui.current_idx = (self.ui.current_idx + (1 if c >= 36 else -1)) % len(cameras)
-                    self._sync_network(cameras[self.ui.current_idx]); self.ui.draw(); return
-            if 39 <= c <= 41:
-                self._mouse_off(); self._confirm_exit(); self._mouse_on(); return
+                    self._sync_network(cameras[self.ui.current_idx])
+                    self.ui.draw()
+                return
+
+            # === Przyciski funkcyjne (stałe zakresy) ===
+            if 3 <= c <= 4:                     # F2 Discovery
+                self._mouse_off()
+                self._discover_cameras()
+                self._mouse_on()
+                self.ui.draw()
+                return
+            if 16 <= c <= 17:                   # F3 Batch
+                self._mouse_off()
+                self._batch_menu()
+                self._mouse_on()
+                self.ui.draw()
+                return
+            if 39 <= c <= 44:
+                self._mouse_off()
+                self.config.global_mute = not self.config.global_mute
+                _gm = self.config.global_mute
+                for _cam in self.config.cameras:
+                    for _prof in _cam.profiles:
+                        if _prof.pid and ProcessManager.is_running(_prof.pid):
+                            _ctrl = _prof.get_mpv()
+                            if _ctrl and _ctrl.is_alive():
+                                _ctrl.set_property("mute", _gm)
+                self.config_mgr.save()
+                notify(f"🔇 Global mute {'ON' if _gm else 'OFF'}",
+                       "warning" if _gm else "info")
+                self._mouse_on()
+                self.ui.draw()
+                return
+
+            if 70 <= c <= 73:                   # (ESC) Quit
+                self._mouse_off()
+                self._confirm_exit()
+                self._mouse_on()
+                return
 
     def _confirm_exit(self, quick_exit: bool = False):
         if quick_exit:
@@ -4834,9 +4874,19 @@ class PTZMasterApp:
                 elif key.lower() == 'x':
                     cam = self.ui.current_camera
                     if cam and cam.type == CameraType.SCANNER:
-                        self._mouse_off(); self._scanner_control_screen(); self._mouse_on()
+                        self._mouse_off()
+                        self._scanner_control_screen()
+                        self._mouse_on()
                     else:
-                        self._mouse_off(); self._mpv_control_screen_cam(); self._mouse_on()
+                        prof = self.ui.current_profile
+                        player_running = prof and ProcessManager.is_running(prof.pid or 0)
+                        if not player_running:
+                            logger.info(f"Auto-starting stream for {cam.name} before control screen")
+                            self._play_stream()
+                            time.sleep(0.5)  # short pause for IPC socket creation
+                        self._mouse_off()
+                        self._mpv_control_screen_cam()
+                        self._mouse_on()
                     self.ui.draw()
                 elif key.lower() == 'k':
                     cam = self.ui.current_camera
@@ -4971,34 +5021,41 @@ class PTZMasterApp:
     def _sync_network(self, cam: Camera) -> bool:
         if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
             return False
-        NetworkUtils.resolve_ip(cam)
-        
-        if shutil.which('ping'):
-            try:
-                subprocess.run(
-                    ["ping", "-c", "1", "-W", "1", cam.ip],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2
-                )
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-        
-        if cam.mac in [None, "", "UNKNOWN"]:
-            mac = NetworkUtils.get_mac_from_ip(cam.ip)
-            if mac and mac != "UNKNOWN":
-                cam.mac = mac
-                notify(f"MAC found: {mac[:12]}", "info")
-                return True
-        
-        return False
+
+        # --- Tymczasowe wyłączenie myszy, aby uniknąć wycieków escape'ów ---
+        self._mouse_off()
+        try:
+            NetworkUtils.resolve_ip(cam)
+
+            if shutil.which('ping'):
+                try:
+                    subprocess.run(
+                        ["ping", "-c", "1", "-W", "1", cam.ip],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2
+                    )
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+            if cam.mac in [None, "", "UNKNOWN"]:
+                mac = NetworkUtils.get_mac_from_ip(cam.ip)
+                if mac and mac != "UNKNOWN":
+                    cam.mac = mac
+                    notify(f"MAC found: {mac[:12]}", "info")
+                    return True
+
+            return False
+        finally:
+            # Zawsze przywracamy mysz po zakończeniu (nawet po błędzie)
+            self._mouse_on()
     
     def _sync_profiles(self):
         cam = self.ui.current_camera
-        
+
         if not cam:
             return
-        
+
         if cam.type == CameraType.V4L2:
             notify("V4L2: local device, no profiles to sync", "warning")
             return
@@ -5008,230 +5065,248 @@ class PTZMasterApp:
         if cam.type == CameraType.SCANNER:
             notify("SCANNER: use (x) to configure", "warning")
             return
-        
-        if cam.type == CameraType.AUTO:
-            print(f"\n{CYN}Detecting camera type...{RST}")
-            new_type, port = CameraDetector.detect(cam, show_progress=True)
-            cam.type = new_type
-            
-            if port:
-                if new_type == CameraType.DVRIP:
-                    cam.ports.dvrip = port
-                else:
-                    cam.ports.onvif = port
-            
-            notify(f"TYPE detected: {new_type.value}", "info")
-            time.sleep(1)
-        
-        if cam.type == CameraType.DVRIP:
-            print(f"\n{MAG}DVRIP camera - manual profile configuration{RST}")
-            print("Use 'r' to scan RTSP paths")
-            print("\nPress any key to continue...")
-            self._wait_click_or_key()
-            return
-        
-        if cam.type == CameraType.RTSP_ONLY:
-            scanner = RTSPScanner(cam)
-            profiles = scanner.scan()
-            if profiles:
-                cam.profiles = profiles
-                cam.active_profile = 0
-                self.config_mgr.save()
-                notify(f"Found {len(profiles)} RTSP streams", "info")
-            return
-        
-        if cam.type == CameraType.ONVIF:
-            print(f"\n{CYN}ONVIF sync...{RST}")
-            raw_xml = ""
-            key_pressed = None
-            
-            try:
-                client = ONVIFClient(cam)
-                profiles, raw_xml = client.get_profiles()
-                
+
+        # --- Zabezpieczenie stanu terminala na czas całej metody ---
+        fd = sys.stdin.fileno()
+        old_termios = termios.tcgetattr(fd)
+        try:
+            # Upewniamy się, że mysz jest włączona (na wypadek wcześniejszych błędów)
+            self._mouse_on()
+
+            if cam.type == CameraType.AUTO:
+                print(f"\n{CYN}Detecting camera type...{RST}")
+                new_type, port = CameraDetector.detect(cam, show_progress=True)
+                cam.type = new_type
+
+                if port:
+                    if new_type == CameraType.DVRIP:
+                        cam.ports.dvrip = port
+                    else:
+                        cam.ports.onvif = port
+
+                notify(f"TYPE detected: {new_type.value}", "info")
+                time.sleep(1)
+
+            if cam.type == CameraType.DVRIP:
+                print(f"\n{MAG}DVRIP camera - manual profile configuration{RST}")
+                print("Use 'r' to scan RTSP paths")
+                print("\nPress any key to continue...")
+                self._wait_click_or_key()
+                return
+
+            if cam.type == CameraType.RTSP_ONLY:
+                scanner = RTSPScanner(cam)
+                profiles = scanner.scan()
                 if profiles:
                     cam.profiles = profiles
                     cam.active_profile = 0
-                    notify(f"Synced {len(profiles)} profiles", "info")
                     self.config_mgr.save()
-                    
-                    print(f"\n{GRN}Found {len(profiles)} profiles:{RST}")
-                    for i, p in enumerate(profiles, 1):
-                        try:
-                            if "x" in p.res:
-                                width = int(p.res.split('x')[0])
-                                res_color = GRN if width >= 1920 else YLW
-                            else:
+                    notify(f"Found {len(profiles)} RTSP streams", "info")
+                return
+
+            if cam.type == CameraType.ONVIF:
+                print(f"\n{CYN}ONVIF sync...{RST}")
+                raw_xml = ""
+                key_pressed = None
+
+                try:
+                    client = ONVIFClient(cam)
+                    profiles, raw_xml = client.get_profiles()
+
+                    if profiles:
+                        cam.profiles = profiles
+                        cam.active_profile = 0
+                        notify(f"Synced {len(profiles)} profiles", "info")
+                        self.config_mgr.save()
+
+                        print(f"\n{GRN}Found {len(profiles)} profiles:{RST}")
+                        for i, p in enumerate(profiles, 1):
+                            try:
+                                if "x" in p.res:
+                                    width = int(p.res.split('x')[0])
+                                    res_color = GRN if width >= 1920 else YLW
+                                else:
+                                    res_color = WHT
+                            except Exception as e:
+                                logger.debug(f"Resolution parse error: {e}")
                                 res_color = WHT
-                        except Exception as e:
-                            logger.debug(f"Resolution parse error: {e}")
-                            res_color = WHT
-                        
-                        print(f"  {i}. {p.name} - {res_color}{p.res}{RST}")
-                    
-                    print(f"\n{GRN}✓ Sync completed successfully!{RST}")
-                    
-                    print(f"\n{YLW}─── Debugging info ───{RST}")
-                    print(f"{BLU}• RAW XML response:{RST} {len(raw_xml)} bytes")
-                    print(f"{BLU}• Profiles found:{RST} {len(profiles)}")
-                    print(f"{BLU}• Camera type:{RST} {cam.type.value}")
-                    print(f"{BLU}• ONVIF port:{RST} {cam.ports.onvif}")
-                    
-                    if "http://www.onvif.org/ver10/profile/wsdl" in raw_xml:
-                        print(f"{BLU}• Profile version:{RST} Ver10")
-                    if "InvalidArgVal" in raw_xml:
-                        print(f"{YLW}• Warning:{RST} Invalid arguments in response")
-                    
-                    print(f"\n{YLW}🔍 Debug options:{RST}")
-                    print(f"  {GRN}1.{RST} Run with {CYN}--debug{RST} flag for verbose logging")
-                    print(f"  {GRN}2.{RST} Press {CYN}d{RST} now to view RAW XML response")
-                    print(f"  {GRN}3.{RST} Check {CYN}{LOG_FILE}{RST} for detailed logs")
-                    print(f"  {GRN}4.{RST} Use {CYN}F1{RST} for help with camera configuration")
-                    
-                    print(f"\n{YLW}Press 'd' for XML debug, any other key to continue (auto-continue in 10s)...{RST}")
-                    
-                    fd = sys.stdin.fileno()
-                    old_settings = termios.tcgetattr(fd)
-                    try:
-                        tty.setraw(fd)
-                        
-                        ready, _, _ = select.select([fd], [], [], 10)
-                        
-                        if ready:
-                            key_pressed = sys.stdin.read(1)
-                        else:
-                            key_pressed = None
-                            
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                    
-                    if key_pressed and key_pressed.lower() == 'd':
-                        self._show_debug_xml(raw_xml)
-                    else:
-                        if key_pressed is None:
-                            print(f"\n{GRN}Timeout - continuing...{RST}")
-                        else:
-                            print(f"\n{GRN}Continuing...{RST}")
-                        time.sleep(0.5)
-                    
-                else:
-                    notify("No profiles found - check credentials", "error")
-                    print(f"\n{RED}No profiles found.{RST}")
-                    print(f"{YLW}Check:{RST}")
-                    print(f"  • Username: {BLU}{cam.user}{RST}")
-                    print(f"  • Password: {BLU}{'*' * len(cam.password)}{RST}")
-                    print(f"  • ONVIF port: {BLU}{cam.ports.onvif}{RST}")
-                    print(f"  • Camera IP: {BLU}{cam.ip}{RST}")
-                    
-                    print(f"\n{YLW}🔍 Debug tips:{RST}")
-                    print(f"  {GRN}•{RST} Try different ONVIF ports: 80, 8080, 8899, 8000")
-                    print(f"  {GRN}•{RST} Check if camera supports ONVIF (try '?' to change type)")
-                    print(f"  {GRN}•{RST} Run with {CYN}--debug{RST} for detailed logs")
-                    print(f"  {GRN}•{RST} Test with VLC: {CYN}vlc rtsp://{cam.user}:{cam.password}@{cam.ip}:{cam.ports.rtsp}{RST}")
-                    
-                    if raw_xml:
-                        print(f"  {GRN}•{RST} Press {CYN}d{RST} to view RAW response (may contain clues)")
-                        print(f"\n{YLW}Press 'd' for XML debug, any other key to continue...{RST}")
-                        
-                        key_pressed = get_key()
-                        if key_pressed.lower() == 'd':
+
+                            print(f"  {i}. {p.name} - {res_color}{p.res}{RST}")
+
+                        print(f"\n{GRN}✓ Sync completed successfully!{RST}")
+
+                        print(f"\n{YLW}─── Debugging info ───{RST}")
+                        print(f"{BLU}• RAW XML response:{RST} {len(raw_xml)} bytes")
+                        print(f"{BLU}• Profiles found:{RST} {len(profiles)}")
+                        print(f"{BLU}• Camera type:{RST} {cam.type.value}")
+                        print(f"{BLU}• ONVIF port:{RST} {cam.ports.onvif}")
+
+                        if "http://www.onvif.org/ver10/profile/wsdl" in raw_xml:
+                            print(f"{BLU}• Profile version:{RST} Ver10")
+                        if "InvalidArgVal" in raw_xml:
+                            print(f"{YLW}• Warning:{RST} Invalid arguments in response")
+
+                        print(f"\n{YLW}🔍 Debug options:{RST}")
+                        print(f"  {GRN}1.{RST} Run with {CYN}--debug{RST} flag for verbose logging")
+                        print(f"  {GRN}2.{RST} Press {CYN}d{RST} now to view RAW XML response")
+                        print(f"  {GRN}3.{RST} Check {CYN}{LOG_FILE}{RST} for detailed logs")
+                        print(f"  {GRN}4.{RST} Use {CYN}F1{RST} for help with camera configuration")
+
+                        print(f"\n{YLW}Press 'd' for XML debug, any other key to continue (auto-continue in 10s)...{RST}")
+
+                        # Bezpieczne oczekiwanie na klawisz z timeoutem
+                        start_time = time.time()
+                        key_pressed = None
+                        while time.time() - start_time < 10:
+                            k = get_key(timeout=0.2)
+                            if k and k != Key.TIMEOUT:
+                                if isinstance(k, str):
+                                    key_pressed = k
+                                    break
+                                elif isinstance(k, MouseEvent) and not k.release:
+                                    # kliknięcie myszy - kontynuuj
+                                    break
+
+                        if key_pressed and key_pressed.lower() == 'd':
                             self._show_debug_xml(raw_xml)
+                        else:
+                            if key_pressed is None:
+                                print(f"\n{GRN}Timeout - continuing...{RST}")
+                            else:
+                                print(f"\n{GRN}Continuing...{RST}")
+                            time.sleep(0.5)
+
                     else:
-                        print(f"\n{YLW}Press any key to continue...{RST}")
-                        self._wait_click_or_key()
-            
-            except requests.exceptions.ConnectionError as e:
-                logger.error(f"ONVIF connection error: {e}")
-                notify("Camera offline", "error")
-                print(f"\n{RED}🚫 Connection refused - camera offline?{RST}")
-                print(f"\n{YLW}🔍 Debug:{RST}")
-                print(f"  {GRN}•{RST} Ping camera: {CYN}ping {cam.ip}{RST}")
-                print(f"  {GRN}•{RST} Check port: {CYN}nc -zv {cam.ip} {cam.ports.onvif}{RST}")
-                print(f"  {GRN}•{RST} Verify network connectivity")
-                print(f"  {GRN}•{RST} Check if firewall is blocking port {cam.ports.onvif}")
-                
-                if "Connection refused" in str(e):
-                    print(f"\n{YLW}💡 Hint: Camera may be on different port. Common ONVIF ports:{RST}")
-                    print(f"    80, 8080, 8899, 8000, 5000")
-                
-                print(f"\n{YLW}Press any key to continue...{RST}")
-                self._wait_click_or_key()
-            
-            except requests.exceptions.Timeout:
-                logger.error(f"ONVIF timeout for {cam.ip}")
-                notify("Camera timeout", "error")
-                print(f"\n{RED}⏱️ Timeout - camera not responding{RST}")
-                print(f"\n{YLW}🔍 Debug:{RST}")
-                print(f"  {GRN}•{RST} Camera may be overloaded - try again later")
-                print(f"  {GRN}•{RST} Check if {cam.ip} is correct")
-                print(f"  {GRN}•{RST} Try increasing timeout in code")
-                print(f"  {GRN}•{RST} Test with browser: {CYN}http://{cam.ip}:{cam.ports.onvif}{RST}")
-                print(f"\n{YLW}Press any key to continue...{RST}")
-                self._wait_click_or_key()
-            
-            except requests.exceptions.HTTPError as e:
-                logger.error(f"ONVIF HTTP error: {e}")
-                status_code = e.response.status_code if hasattr(e, 'response') else 'N/A'
-                
-                if status_code == 401:
-                    notify("Authentication failed", "error")
-                    print(f"\n{RED}🔐 Authentication failed (HTTP 401){RST}")
+                        notify("No profiles found - check credentials", "error")
+                        print(f"\n{RED}No profiles found.{RST}")
+                        print(f"{YLW}Check:{RST}")
+                        print(f"  • Username: {BLU}{cam.user}{RST}")
+                        print(f"  • Password: {BLU}{'*' * len(cam.password)}{RST}")
+                        print(f"  • ONVIF port: {BLU}{cam.ports.onvif}{RST}")
+                        print(f"  • Camera IP: {BLU}{cam.ip}{RST}")
+
+                        print(f"\n{YLW}🔍 Debug tips:{RST}")
+                        print(f"  {GRN}•{RST} Try different ONVIF ports: 80, 8080, 8899, 8000")
+                        print(f"  {GRN}•{RST} Check if camera supports ONVIF (try '?' to change type)")
+                        print(f"  {GRN}•{RST} Run with {CYN}--debug{RST} for detailed logs")
+                        print(f"  {GRN}•{RST} Test with VLC: {CYN}vlc rtsp://{cam.user}:{cam.password}@{cam.ip}:{cam.ports.rtsp}{RST}")
+
+                        if raw_xml:
+                            print(f"  {GRN}•{RST} Press {CYN}d{RST} to view RAW response (may contain clues)")
+                            print(f"\n{YLW}Press 'd' for XML debug, any other key to continue...{RST}")
+
+                            key_pressed = get_key()
+                            if key_pressed.lower() == 'd':
+                                self._show_debug_xml(raw_xml)
+                        else:
+                            print(f"\n{YLW}Press any key to continue...{RST}")
+                            self._wait_click_or_key()
+
+                except requests.exceptions.ConnectionError as e:
+                    logger.error(f"ONVIF connection error: {e}")
+                    notify("Camera offline", "error")
+                    print(f"\n{RED}🚫 Connection refused - camera offline?{RST}")
                     print(f"\n{YLW}🔍 Debug:{RST}")
-                    print(f"  {GRN}•{RST} Current user: {BLU}{cam.user}{RST}")
-                    print(f"  {GRN}•{RST} Current pass: {BLU}{'*' * len(cam.password)}{RST}")
-                    print(f"  {GRN}•{RST} Try default credentials: admin/admin, admin/12345, admin/888888")
-                    print(f"  {GRN}•{RST} Some cameras use empty password")
-                else:
-                    notify(f"HTTP error {status_code}", "error")
-                    print(f"\n{RED}❌ HTTP error {status_code}{RST}")
+                    print(f"  {GRN}•{RST} Ping camera: {CYN}ping {cam.ip}{RST}")
+                    print(f"  {GRN}•{RST} Check port: {CYN}nc -zv {cam.ip} {cam.ports.onvif}{RST}")
+                    print(f"  {GRN}•{RST} Verify network connectivity")
+                    print(f"  {GRN}•{RST} Check if firewall is blocking port {cam.ports.onvif}")
+
+                    if "Connection refused" in str(e):
+                        print(f"\n{YLW}💡 Hint: Camera may be on different port. Common ONVIF ports:{RST}")
+                        print(f"    80, 8080, 8899, 8000, 5000")
+
+                    print(f"\n{YLW}Press any key to continue...{RST}")
+                    self._wait_click_or_key()
+
+                except requests.exceptions.Timeout:
+                    logger.error(f"ONVIF timeout for {cam.ip}")
+                    notify("Camera timeout", "error")
+                    print(f"\n{RED}⏱️ Timeout - camera not responding{RST}")
                     print(f"\n{YLW}🔍 Debug:{RST}")
-                    print(f"  {GRN}•{RST} HTTP Status: {status_code}")
-                    if raw_xml:
-                        print(f"  {GRN}•{RST} Press {CYN}d{RST} to view RAW response")
-                        print(f"\n{YLW}Press 'd' for XML debug, any other key to continue...{RST}")
-                        
-                        key_pressed = get_key()
-                        if key_pressed.lower() == 'd':
-                            self._show_debug_xml(raw_xml)
+                    print(f"  {GRN}•{RST} Camera may be overloaded - try again later")
+                    print(f"  {GRN}•{RST} Check if {cam.ip} is correct")
+                    print(f"  {GRN}•{RST} Try increasing timeout in code")
+                    print(f"  {GRN}•{RST} Test with browser: {CYN}http://{cam.ip}:{cam.ports.onvif}{RST}")
+                    print(f"\n{YLW}Press any key to continue...{RST}")
+                    self._wait_click_or_key()
+
+                except requests.exceptions.HTTPError as e:
+                    logger.error(f"ONVIF HTTP error: {e}")
+                    status_code = e.response.status_code if hasattr(e, 'response') else 'N/A'
+
+                    if status_code == 401:
+                        notify("Authentication failed", "error")
+                        print(f"\n{RED}🔐 Authentication failed (HTTP 401){RST}")
+                        print(f"\n{YLW}🔍 Debug:{RST}")
+                        print(f"  {GRN}•{RST} Current user: {BLU}{cam.user}{RST}")
+                        print(f"  {GRN}•{RST} Current pass: {BLU}{'*' * len(cam.password)}{RST}")
+                        print(f"  {GRN}•{RST} Try default credentials: admin/admin, admin/12345, admin/888888")
+                        print(f"  {GRN}•{RST} Some cameras use empty password")
                     else:
-                        print(f"\n{YLW}Press any key to continue...{RST}")
-                        self._wait_click_or_key()
-            
-            except Exception as e:
-                if DEBUG_MODE:
-                    logger.exception(f"ONVIF sync error: {e}")
-                else:
-                    logger.error(f"ONVIF sync error: {e}")
-                notify(f"ONVIF error: {str(e)[:30]}", "error")
-                print(f"\n{RED}Unexpected error: {type(e).__name__}{RST}")
-                print(f"{RED}{e}{RST}")
-                print(f"\n{YLW}🔍 Debug:{RST}")
-                print(f"  {GRN}•{RST} Run with {CYN}--debug{RST} for full stack trace")
-                print(f"  {GRN}•{RST} Check {CYN}{LOG_FILE}{RST} for details")
-                print(f"  {GRN}•{RST} Try manual RTSP scan with {CYN}'r'{RST}")
-                print(f"  {GRN}•{RST} Verify camera model supports ONVIF")
-                print(f"\n{YLW}Press any key to continue...{RST}")
-                self._wait_click_or_key()
-    
+                        notify(f"HTTP error {status_code}", "error")
+                        print(f"\n{RED}❌ HTTP error {status_code}{RST}")
+                        print(f"\n{YLW}🔍 Debug:{RST}")
+                        print(f"  {GRN}•{RST} HTTP Status: {status_code}")
+                        if raw_xml:
+                            print(f"  {GRN}•{RST} Press {CYN}d{RST} to view RAW response")
+                            print(f"\n{YLW}Press 'd' for XML debug, any other key to continue...{RST}")
+
+                            key_pressed = get_key()
+                            if key_pressed.lower() == 'd':
+                                self._show_debug_xml(raw_xml)
+                        else:
+                            print(f"\n{YLW}Press any key to continue...{RST}")
+                            self._wait_click_or_key()
+
+                except Exception as e:
+                    if DEBUG_MODE:
+                        logger.exception(f"ONVIF sync error: {e}")
+                    else:
+                        logger.error(f"ONVIF sync error: {e}")
+                    notify(f"ONVIF error: {str(e)[:30]}", "error")
+                    print(f"\n{RED}Unexpected error: {type(e).__name__}{RST}")
+                    print(f"{RED}{e}{RST}")
+                    print(f"\n{YLW}🔍 Debug:{RST}")
+                    print(f"  {GRN}•{RST} Run with {CYN}--debug{RST} for full stack trace")
+                    print(f"  {GRN}•{RST} Check {CYN}{LOG_FILE}{RST} for details")
+                    print(f"  {GRN}•{RST} Try manual RTSP scan with {CYN}'r'{RST}")
+                    print(f"  {GRN}•{RST} Verify camera model supports ONVIF")
+                    print(f"\n{YLW}Press any key to continue...{RST}")
+                    self._wait_click_or_key()
+
+        finally:
+            # Przywrócenie oryginalnych ustawień terminala i myszy
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
+            self._mouse_on()
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+
     # --------------------------------------------------------------------------
     # MPV LIVE CONTROL SCREEN  (key: x)  - wrapper dla trybu kamer
     # --------------------------------------------------------------------------
     def _mpv_control_screen_cam(self):
-        """Unified player TUI dla kamer — używa _mpv_control_screen_player w cam_mode."""
+        """Unified player TUI for cameras — uses _mpv_control_screen_player in cam_mode."""
         cameras = self.config.cameras
         if not cameras:
-            notify("Brak kamer", "warning"); return
+            notify("No cameras", "warning")
+            return
+
         idx = self.ui.current_idx
         cam = cameras[idx]
         prof = self.ui.current_profile
+
+        # Safety check: if still not running, show error and exit
         if not prof or not ProcessManager.is_running(prof.pid or 0):
-            notify("mpv nie gra — uruchom kamerę najpierw", "warning"); return
+            notify("mpv is not running – cannot open control screen", "error")
+            return
 
         while 0 <= idx < len(cameras):
             cam  = cameras[idx]
             prof = cam.profiles[cam.active_profile] if cam.profiles else None
             if not prof:
                 break
+
             result, _ = _mpv_control_screen_player(
                 cam, prof,
                 files=cameras,
@@ -5899,11 +5974,11 @@ class PTZMasterApp:
                 f" {YLW}(d){RST} DPI   : {GRN}{cam.scan_dpi}{RST}",
                 f" {YLW}(a){RST} Area  : {GRN}{cam.scan_area}{RST}",
             )
-            # Row 2: Format | Resize | Quality
+            # Row 2: Format | Resize | Compression
             row2 = row3col(
                 f" {YLW}(f){RST} Format: {GRN}{cam.scan_format}{RST}",
                 f" {YLW}(r){RST} Resize: {GRN}{cam.scan_resize}{RST}",
-                f" {YLW}(q){RST} Quality: {GRN}{cam.scan_quality}{RST}",
+                f" {YLW}(c){RST} Compression: {GRN}{cam.scan_quality}{RST}",
             )
             # Row 3: Date | Desc | Number
             today = datetime.date.today()
@@ -5980,8 +6055,8 @@ class PTZMasterApp:
                       else:
                           cam.scan_resize = RESIZES[key_]
                       self.config_mgr.save()
-              elif key == 'q':
-                  val = self._edit_param("Quality (0-100)", str(cam.scan_quality))
+              elif key == 'c':
+                  val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
                   try:
                       cam.scan_quality = max(0, min(100, int(val)))
                       self.config_mgr.save()
@@ -9185,7 +9260,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 row(full_line + " " * max(0, padding))
 
         sep()
-        row(f" {YLW}[,]{RST} Prev  {YLW}[.]{RST} Next  {YLW}[T]{RST} Screenshot  {YLW}[x/X]{RST}💾 Restore/Store Set  {YLW}[Q]{RST} Quit")
+        row(f" {YLW}[,]{RST} Prev  {YLW}[.]{RST} Next  {YLW}[T]{RST} Screenshot  {YLW}[x/X]{RST}💾 Restore/Store Set")
 
         # --- Linia statusu ----------------------------------------------------
         if last_msg not in ("OK", "Player mode", "mpv stopped", "mpv disconnected"):
@@ -9213,13 +9288,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         hdd_use = 100 - free_pct
         hdd_col = RED if hdd_use > 90 else (YLW if hdd_use > 75 else GRN)
         cpu_str = f"{cpu_n:3d}%"; ram_str = f"{ram_pct:3d}%"; hdd_str = f"{hdd_use:3d}%"
-        right = f"{CYN}v{VERSION}{RST}"
+        right = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit"
         _status_fixed = f" ⚙{cpu_str} 🧠[{'█'*_BW}]{ram_str} 💽[{'█'*_BW}]{hdd_str}  🔔 "
         _msg_max = W - ansilen(_status_fixed) - ansilen(right) - 2
         _msg_disp = last_msg if ansilen(last_msg) <= _msg_max else last_msg[:_msg_max-1] + "…"
         left = f" ⚙{cpu_col}{cpu_str}{RST} 🧠[{_bar8(ram_pct,ram_col)}]{ram_col}{ram_str}{RST} 💽[{_bar8(hdd_use,hdd_col)}]{hdd_col}{hdd_str}{RST}  🔔 {msg_col}{_msg_disp}{RST}"
         padding = W - ansilen(left) - ansilen(right) - 2
-        row(f"{left}{' ' * max(0,padding)}{right}")
+        row(f"{left}{' ' * max(0, padding)}{right}")
         _w(f"\r{BLU}╚{'═'*W}╝{RST}\033[K\r\n")
         sys.stdout.write("".join(_buf))
         sys.stdout.write("\033[J\033[?25h")
@@ -9744,7 +9819,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 elif 23 <= c <= 25:     _screenshot()                   # [T]
                 elif 39 <= c <= 40:     _restore_image_settings()       # [x] Restore
                 elif 42 <= c <= 43:     _save_image_params()            # [X] Store
-                elif 65 <= c <= 68:     running = False                 # [Q]
+
+            elif r == 18:
+                if 68 <= c <= 73:     running = False                 # [Q]
 # --- Mouse handling end -------------------------------------------------
 
 # --- Główna pętla -----------------------------------------------------
