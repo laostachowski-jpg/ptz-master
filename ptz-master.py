@@ -3976,8 +3976,8 @@ class UI:
             display_name = prof.name
             res_display  = ""
         elif cam.type == CameraType.SCANNER:
-            display_name = "🖨 Scanner"
-            res_display  = f" [{cam.scan_resize}]"
+            display_name = "🖨  Scanner"
+            res_display  = f" [{cam.scan_resize}] "
         else:
             display_name = prof.name
             res_display  = f" [{prof.res}]"
@@ -5865,11 +5865,16 @@ class PTZMasterApp:
                 print(f"║ {pad(txt, W-2)} ║")
 
             # Header – fixed length to ensure right border alignment
-            header = f"{CYN}🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
-            header_len = ansilen(header)
-            if header_len < W-2:
-                header += ' ' * (W-2 - header_len)
+            header = f"{CYN} 🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
+            # 2. Obliczamy szerokość wizualną:
+            # ansilen usuwa kolory, a "+ 1" rekompensuje podwójną szerokość ikony 🖨
+            header_visual_len = ansilen(header) + 1
+            # 3. Dopełniamy spacjami, używając skorygowanej długości
+            if header_visual_len < W:
+                header += ' ' * (W - header_visual_len)
+            # 4. Drukowanie ramki (uważaj na szerokość linii poziomych)
             print(f"╔{'═'*W}╗")
+            # Funkcja line() prawdopodobnie dodaje ║ na początku i końcu
             line(header)
             print(f"╠{'═'*W}╣")
 
@@ -6044,8 +6049,8 @@ class PTZMasterApp:
             "📡 Scan Network - ping sweep (fast)",
             "🎥 Scan V4L2 Devices (USB/local)",
             nmap_label,
-            "📂  Add File Camera (local video file)",
-            "🖨️  Add Scanner (SANE)",
+            "📂 Add File Camera (local video file)",
+            "🖨️ Add Scanner (SANE)",
             "✖  Cancel",
         ]
         idx = select_menu(items, selected=0, title="📷 Camera Discovery")
@@ -6068,12 +6073,12 @@ class PTZMasterApp:
             self._add_scanner_camera()
     
     def _add_scanner_camera(self):
-        """Wykryj skanery przez scanimage -L lub dodaj ręcznie."""
+        """Discover scanners via scanimage -L or add manually."""
         print_header("SCANNER DISCOVERY")
         scanners = []
 
         if shutil.which('scanimage'):
-            print(f"  {CYN}Szukam skanerów (scanimage -L)...{RST}")
+            print(f"  {CYN}Searching for scanners (scanimage -L)...{RST}")
             try:
                 r = subprocess.run(
                     ['scanimage', '-L'],
@@ -6081,53 +6086,71 @@ class PTZMasterApp:
                 )
                 out = r.stdout.decode('utf-8', errors='replace')
                 for line in out.splitlines():
-                    # format: device `pixma:04A91234' is a Canon...
                     import re
+                    # SANE format: device `backend:id' is description
                     m = re.match(r"device `([^']+)' is (.+)", line)
                     if m:
-                        scanners.append((m.group(1), m.group(2).strip()))
-                        print(f"  {GRN}✓{RST} {m.group(1)}  {DIM}{m.group(2)[:50]}{RST}")
+                        device_id = m.group(1)
+                        full_desc = m.group(2).strip()
+
+                        # --- CLEANING SANE DESCRIPTION ---
+                        # 1. Remove "a " or "an " at the start (reported by SANE)
+                        clean_desc = re.sub(r'^(a|an)\s+', '', full_desc, flags=re.IGNORECASE)
+                        # 2. Remove "flatbed scanner" or "scanner" to save space
+                        clean_desc = re.sub(r'\s+(flatbed|scanner).*$', '', clean_desc, flags=re.IGNORECASE)
+
+                        scanners.append((device_id, clean_desc))
+                        print(f"  {GRN}✓{RST} {device_id}  {DIM}{clean_desc}{RST}")
             except Exception as e:
                 print(f"  {YLW}scanimage -L error: {e}{RST}")
         else:
             print(f"  {RED}scanimage not found — install sane-utils{RST}")
 
         if not scanners:
-            print(f"  {YLW}Nie znaleziono skanerów.{RST}")
+            print(f"  {YLW}No scanners found.{RST}")
 
-        items = [f"🖨  {dev}  {DIM}{desc[:40]}{RST}" for dev, desc in scanners]
-        items += ["✏  Dodaj ręcznie (wpisz device)", "✖  Anuluj"]
+        # --- MENU ITEMS PREPARATION ---
+        items = []
+        for dev, desc in scanners:
+            # Shorten ID and description to fit the frame perfectly
+            dev_short = (dev[:18] + "..") if len(dev) > 20 else dev
+            desc_short = (desc[:20] + "..") if len(desc) > 22 else desc
 
-        idx = select_menu(items, selected=0, title="🖨  Dodaj skaner")
+            # Format line: Each emoji (🖨) and (▶ in select_menu) adds 1 extra visual width
+            # We must account for this by keeping the total string length shorter
+            items.append(f"🖨   {dev_short:<20}  {DIM}{desc_short}{RST}")
+
+        items += ["✏   Add manually (enter device)", "✖   Cancel"]
+
+        # --- DRAWING MENU ---
+        # Title correction: added a space at the end to offset the 🖨 width
+        idx = select_menu(items, selected=0, title="🖨   Add Scanner ")
+
         if idx == -1 or idx == len(items) - 1:
             return
 
         if idx == len(items) - 2:
-            # Ręczne dodanie
-            device_str = self._edit_param("Device (np. pixma:04A91234 lub ''=domyślny)", "")
-            name       = self._edit_param("Nazwa", "Scanner")
+            device_str = self._edit_param("Device (e.g. pixma:04A91234)", "")
+            name       = self._edit_param("Name", "Scanner")
         else:
             device_str, dev_desc = scanners[idx]
-            name = self._edit_param("Nazwa", dev_desc[:20].replace(" ", "_"))
+            # Create a clean name for the config file (no slashes, no spaces)
+            safe_name = dev_desc[:20].strip().replace(" ", "_").replace("/", "-")
+            name = self._edit_param("Name", safe_name)
 
-        # Sprawdź duplikat
         if any(c.type == CameraType.SCANNER and c.scan_device == device_str
                for c in self.config.cameras):
-            notify("Skaner już w liście", "warning")
+            notify("Scanner already in list", "warning")
             return
 
-        cam = Camera(
-            name=name,
-            cam_type=CameraType.SCANNER,
-            ip="", mac="UNKNOWN",
-        )
+        cam = Camera(name=name, cam_type=CameraType.SCANNER, ip="", mac="UNKNOWN")
         cam.scan_device = device_str
         cam.scan_dest   = SCAN_DIR
         cam.profiles    = [CameraProfile(name="scan", token="", res="A4")]
+
         self.config.cameras.append(cam)
         self.config_mgr.save()
-        notify(f"Dodano skaner: {name}", "info")
-        logger.info(f"Added scanner: {name} device={device_str}")
+        notify(f"Added scanner: {name}", "info")
 
     def _discover_network(self):
         print_header("NETWORK CAMERA DISCOVERY")
