@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.27"
+VERSION = "9.0.28"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4040,8 +4040,8 @@ class UI:
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
         _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
-        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}F6{RST} {YLW}(q){RST}"
-        footer_right = f"{CYN}v{VERSION}{RST} "
+        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}F6{RST}"
+        footer_right = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
         print(f"├" + "─" * FW + "┤")
         print(f"│{pad(footer_left, FW - ansilen(footer_right))}{footer_right}│")
 
@@ -5880,47 +5880,54 @@ class PTZMasterApp:
                     txt += ' ' * (width - cur)
                 return txt
 
-            col_w = 24
+            # Kolumny: 3 równe
+            c1w = (W - 2 - 4) // 3
+            c2w = (W - 2 - 4) // 3
+            c3w =  W - 2 - 4 - c1w - c2w
 
-            # Row 1
-            f1 = f" {YLW}(m){RST} Mode    : {GRN}{cam.scan_mode:<8}{RST}"
-            f2 = f" {YLW}(d){RST} DPI     : {GRN}{cam.scan_dpi:<4}{RST}"
-            f3 = f" {YLW}(a){RST} Area    : {GRN}{cam.scan_area}{RST}"
-            row1 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
+            def row3col(a, b, c):
+                return _pad_field(a, c1w) + "  " + _pad_field(b, c2w) + "  " + _pad_field(c, c3w)
 
-            # Row 2
-            f1 = f" {YLW}(f){RST} Format  : {GRN}{cam.scan_format:<5}{RST}"
-            f2 = f" {YLW}(r){RST} Resize  : {GRN}{cam.scan_resize:<10}{RST}"
-            f3 = f" {YLW}(q){RST} Quality : {GRN}{cam.scan_quality:<3}{RST}"
-            row2 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
-
-            # Row 3
-            dest_str = str(cam.scan_dest)
-            if len(dest_str) > 28:
-                dest_str = "…" + dest_str[-26:]
-            f1 = f" {YLW}(v){RST} Viewer  : {GRN}{cam.scan_viewer:<8}{RST}"
-            f2 = f" {YLW}(t){RST} Dest    : {GRN}{dest_str}{RST}"
-            row3 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field("", col_w)
-
-            # Row 4
+            # Row 1: Mode | DPI | Area
+            row1 = row3col(
+                f" {YLW}(m){RST} Mode  : {GRN}{cam.scan_mode}{RST}",
+                f" {YLW}(d){RST} DPI   : {GRN}{cam.scan_dpi}{RST}",
+                f" {YLW}(a){RST} Area  : {GRN}{cam.scan_area}{RST}",
+            )
+            # Row 2: Format | Resize | Quality
+            row2 = row3col(
+                f" {YLW}(f){RST} Format: {GRN}{cam.scan_format}{RST}",
+                f" {YLW}(r){RST} Resize: {GRN}{cam.scan_resize}{RST}",
+                f" {YLW}(q){RST} Quality: {GRN}{cam.scan_quality}{RST}",
+            )
+            # Row 3: Date | Desc | Number
             today = datetime.date.today()
             date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
             next_num = _get_next_number()
             num_str = _format_number(next_num)
             pad_indicator = {0:"0d", 2:"2d", 3:"3d"}[num_padding]
-            f1 = f" {YLW}(n){RST} Desc    : {GRN}{cam.scan_desc or '(none)'}{RST}"
-            f2 = f" {YLW}(h){RST} Date    : {GRN}{date_str}{RST}"
-            f3 = f" {YLW}(x){RST} Number  : {GRN}{num_str} [{pad_indicator}](y){RST}"
-            row4 = _pad_field(f1, col_w) + "  " + _pad_field(f2, col_w) + "  " + _pad_field(f3, col_w)
+            row3 = row3col(
+                f" {YLW}(h){RST} Date  : {GRN}{date_str}{RST}",
+                f" {YLW}(n){RST} Desc  : {GRN}{cam.scan_desc or '(none)'}{RST}",
+                f" {YLW}(x){RST} Number: {GRN}{num_str} [{pad_indicator}](y){RST}",
+            )
+            # Row 4: Viewer | Dest (pełna szerokość)
+            dest_str = str(cam.scan_dest)
+            row4 = f" {YLW}(v){RST} Viewer: {GRN}{cam.scan_viewer:<10}{RST}" +                    f"  {YLW}(t){RST} Dest  : {GRN}{dest_str}{RST}"
 
             for r in (row1, row2, row3, row4):
                 cur_len = ansilen(r)
                 if cur_len < W-2:
                     r += ' ' * (W-2 - cur_len)
+                elif cur_len > W-2:
+                    r = r[:W-2]
                 line(r)
 
             print(f"╠{'═'*W}╣")
-            line(f" {YLW}(p){RST} Scan   {YLW}(ESC){RST} Quit")
+            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(ESC){RST} Quit"
+            scan_btn = f" {YLW}(p){RST} Scan"
+            footer_row = scan_btn + ' ' * (W-2 - ansilen(scan_btn) - ansilen(ver_esc)) + ver_esc
+            line(footer_row)
             print(f"╚{'═'*W}╝")
 
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
