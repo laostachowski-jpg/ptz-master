@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.29"
+VERSION = "9.0.32"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -402,7 +402,8 @@ class Camera:
         if image_params:
             self.image_params.update(image_params)
         # Scanner params (CameraType.SCANNER)
-        self.scan_device  = ""            # SANE device string (e.g. "pixma:04A91234")
+        self.scan_device  = ""            # SANE device string (dynamiczny, zmienia się po restarcie)
+        self.scan_vidpid  = ""            # USB VID:PID np. "04a9:220e" — stały identyfikator
         self.scan_mode    = "gray"        # color | gray | lineart
         self.scan_dpi     = 300
         self.scan_area    = "0:0:215:297" # x:y:w:h mm
@@ -441,6 +442,7 @@ class Camera:
             result["image_params"] = self.image_params
         if self.type == CameraType.SCANNER:
             result["scan_device"]  = self.scan_device
+            result["scan_vidpid"]  = self.scan_vidpid
             result["scan_mode"]    = self.scan_mode
             result["scan_dpi"]     = self.scan_dpi
             result["scan_area"]    = self.scan_area
@@ -490,6 +492,7 @@ class Camera:
         )
         if cam_type == CameraType.SCANNER:
             obj.scan_device  = data.get("scan_device",  "")
+            obj.scan_vidpid  = data.get("scan_vidpid",  "")
             obj.scan_mode    = data.get("scan_mode",    "gray")
             obj.scan_dpi     = data.get("scan_dpi",     300)
             obj.scan_area    = data.get("scan_area",    "0:0:215:297")
@@ -3701,14 +3704,20 @@ class Player:
         return True
 
     @staticmethod
-    def _play_scanner(cam: 'Camera', skip_focus: bool = False) -> bool:
-        """Perform scan using scanimage + convert (logic from scan.sh)."""
+    def _play_scanner(cam: 'Camera', skip_focus: bool = False,
+                      progress_callback=None) -> bool:
+        """Perform scan using scanimage + convert (stable temporary file version).
+        If progress_callback is provided, it will be called with percentage (0-100)
+        based on scanimage --progress output.
+        """
         if not shutil.which('scanimage'):
             notify("scanimage not found! Install: sane-utils", "error")
             return False
 
         import datetime as _dt
         import tempfile as _tmp
+        import select
+        import re
 
         # --- Parameters ---
         mode    = cam.scan_mode
@@ -3719,7 +3728,16 @@ class Player:
         resize  = cam.scan_resize
         desc    = cam.scan_desc
         dest    = cam.scan_dest
-        device  = cam.scan_device        # "" = default SANE scanner
+
+        device = cam.scan_device
+        if cam.scan_vidpid:
+            resolved = PTZMasterApp._resolve_scanner_device(cam.scan_vidpid)
+            if resolved:
+                device = resolved
+                cam.scan_device = resolved
+            elif not device:
+                notify(f"Scanner VID:PID={cam.scan_vidpid} not found on USB", "error")
+                return False
 
         # Parse area
         try:
@@ -3734,10 +3752,11 @@ class Player:
             notify(f"Scan dest error: {e}", "error")
             return False
 
-        # Generate filename (YYYY-MM-DD_description_NNN.format)
+        # Generate filename
         today = _dt.date.today().strftime("%Y-%m-%d")
         desc_part = f"_{desc}" if desc else ""
         pattern = f"{today}{desc_part}_*.{fmt}"
+
         import glob as _gl
         existing = _gl.glob(os.path.join(dest, pattern))
         nums = []
@@ -3752,45 +3771,80 @@ class Player:
         fname = f"{today}{desc_part}_{next_num:03d}.{fmt}"
         dest_file = os.path.join(dest, fname)
 
-        # --- Temporary files ---
-        tmp_dir = _tmp.mkdtemp(prefix="ptz-scan-")
-        raw_file = os.path.join(tmp_dir, f"raw_scan.tiff")
-        out_file = os.path.join(tmp_dir, f"scan_out.{fmt}")
+        # Raw file handling
+        raw_file = os.path.join(dest, f"{today}{desc_part}_{next_num:03d}_raw.tiff")
+        out_file = dest_file
 
-        # Active profile — store path for status
         profile = cam.profiles[cam.active_profile] if cam.profiles else None
         if profile:
-            profile.pid = -1   # -1 = scanning in progress
+            profile.pid = -1
             profile.ipc_path = dest_file
 
-        logger.info(f"Scan START: {mode} {dpi}DPI → {dest_file}")
-        notify(f"Scanning... {mode} {dpi}DPI", "info")
+        # POPRAWKA: Wymuszamy dużą literę dla sterownika SANE (Gray, Color, Lineart)
+        sane_mode = mode.capitalize() if mode else "Gray"
+
+        logger.info(f"Scan START: {sane_mode} {dpi}DPI → {dest_file}")
+        notify(f"Scanning... {sane_mode} {dpi}DPI", "info")
 
         try:
-            # 1. scanimage
+            # 1. scanimage -> raw TIFF file
             scan_cmd = [
                 'scanimage',
-                '--mode', mode,
+                '--progress',                     # <-- WŁĄCZAMY RAPORTOWANIE POSTĘPU
+                '--mode', sane_mode,
                 '-l', xl, '-t', yt,
                 '-x', wd, '-y', ht,
                 '--resolution', str(dpi),
-                '--format', 'tiff',
+                '--format', 'tiff',               # Zawsze TIFF na tym etapie
+                '--output-file', raw_file
             ]
             if device:
                 scan_cmd += ['--device-name', device]
-            scan_cmd += ['--output-file', raw_file]
 
             logger.info(f"scanimage cmd: {' '.join(scan_cmd)}")
-            proc = subprocess.run(
+
+            # Uruchamiamy proces i monitorujemy stderr dla postępu
+            proc = subprocess.Popen(
                 scan_cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
-                timeout=120
+                universal_newlines=True,
+                bufsize=1
             )
-            if proc.returncode != 0:
-                err = proc.stderr.decode('utf-8', errors='replace')[:200]
-                logger.error(f"scanimage failed: {err}")
-                notify(f"Scan error: {err[:60]}", "error")
+
+            start_time = time.time()
+            timeout = 120  # sekund
+
+            # Odczytuj stderr linia po linii, parsuj postęp
+            while proc.poll() is None:
+                if time.time() - start_time > timeout:
+                    proc.kill()
+                    raise subprocess.TimeoutExpired(scan_cmd, timeout)
+
+                # Czekaj na dane na stderr (maks. 0.3s)
+                rlist, _, _ = select.select([proc.stderr], [], [], 0.3)
+                if proc.stderr in rlist:
+                    line = proc.stderr.readline()
+                    if not line:
+                        continue
+                    # Szukaj "Progress: 45.2%"
+                    match = re.search(r'Progress:\s*(\d+(?:\.\d+)?)%', line)
+                    if match and progress_callback:
+                        percent = int(float(match.group(1)))
+                        progress_callback(percent)
+                    else:
+                        logger.debug(f"scanimage stderr: {line.strip()}")
+
+            # Odczytaj ewentualne pozostałe dane
+            remaining = proc.stderr.read()
+            if remaining:
+                logger.debug(f"scanimage stderr (remaining): {remaining}")
+
+            returncode = proc.returncode
+
+            if returncode != 0:
+                logger.error(f"scanimage failed with code {returncode}")
+                notify(f"Scan failed (code {returncode})", "error")
                 return False
 
             if not os.path.isfile(raw_file) or os.path.getsize(raw_file) == 0:
@@ -3806,15 +3860,28 @@ class Player:
                     '-quality', str(quality),
                     '-strip', out_file
                 ]
-                subprocess.run(conv_cmd, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, timeout=60)
-                src = out_file if os.path.isfile(out_file) else raw_file
+                logger.info(f"convert cmd: {' '.join(conv_cmd)}")
+                conv_proc = subprocess.run(
+                    conv_cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    timeout=120
+                )
+                if conv_proc.returncode != 0:
+                    err = conv_proc.stderr.decode('utf-8', errors='replace')[:200]
+                    logger.error(f"convert failed: {err}")
+                    notify(f"Convert error, saving raw TIFF", "warning")
+                    src = raw_file
+                else:
+                    src = out_file
             else:
-                # No convert — copy raw
                 src = raw_file
+                notify("Raw TIFF saved (no convert)", "warning")
 
             # 3. Move to destination
-            shutil.copy2(src, dest_file)
+            if src != dest_file:
+                shutil.copy2(src, dest_file)
+
             logger.info(f"Scan saved: {dest_file}")
             notify(f"Scan saved: {fname}", "info")
 
@@ -3841,12 +3908,15 @@ class Player:
             notify("Scan timeout (>120s)", "error")
             return False
         except Exception as e:
-            logger.error(f"_play_scanner exception: {e}")
+            import traceback
+            logger.error(f"_play_scanner exception: {e}\n{traceback.format_exc()}")
             notify(f"Scan error: {str(e)[:50]}", "error")
             return False
         finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
+            if raw_file and os.path.isfile(raw_file):
+                if dest_file and os.path.isfile(dest_file) and raw_file != dest_file:
+                    try: os.unlink(raw_file)
+                    except OSError: pass
 # =============================================================================
 # UI - MAIN INTERFACE
 # =============================================================================
@@ -5941,26 +6011,19 @@ class PTZMasterApp:
 
             # Header – fixed length to ensure right border alignment
             header = f"{CYN} 🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
-            # 2. Obliczamy szerokość wizualną:
-            # ansilen usuwa kolory, a "+ 1" rekompensuje podwójną szerokość ikony 🖨
             header_visual_len = ansilen(header) + 1
-            # 3. Dopełniamy spacjami, używając skorygowanej długości
             if header_visual_len < W:
                 header += ' ' * (W - header_visual_len)
-            # 4. Drukowanie ramki (uważaj na szerokość linii poziomych)
             print(f"╔{'═'*W}╗")
-            # Funkcja line() prawdopodobnie dodaje ║ na początku i końcu
             line(header)
             print(f"╠{'═'*W}╣")
 
-            # Helper to pad a string (with ANSI) to exact visual width
             def _pad_field(txt, width):
                 cur = ansilen(txt)
                 if cur < width:
                     txt += ' ' * (width - cur)
                 return txt
 
-            # Kolumny: 3 równe
             c1w = (W - 2 - 4) // 3
             c2w = (W - 2 - 4) // 3
             c3w =  W - 2 - 4 - c1w - c2w
@@ -5968,19 +6031,16 @@ class PTZMasterApp:
             def row3col(a, b, c):
                 return _pad_field(a, c1w) + "  " + _pad_field(b, c2w) + "  " + _pad_field(c, c3w)
 
-            # Row 1: Mode | DPI | Area
             row1 = row3col(
                 f" {YLW}(m){RST} Mode  : {GRN}{cam.scan_mode}{RST}",
                 f" {YLW}(d){RST} DPI   : {GRN}{cam.scan_dpi}{RST}",
                 f" {YLW}(a){RST} Area  : {GRN}{cam.scan_area}{RST}",
             )
-            # Row 2: Format | Resize | Compression
             row2 = row3col(
                 f" {YLW}(f){RST} Format: {GRN}{cam.scan_format}{RST}",
                 f" {YLW}(r){RST} Resize: {GRN}{cam.scan_resize}{RST}",
                 f" {YLW}(c){RST} Compression: {GRN}{cam.scan_quality}{RST}",
             )
-            # Row 3: Date | Desc | Number
             today = datetime.date.today()
             date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
             next_num = _get_next_number()
@@ -5991,9 +6051,9 @@ class PTZMasterApp:
                 f" {YLW}(n){RST} Desc  : {GRN}{cam.scan_desc or '(none)'}{RST}",
                 f" {YLW}(x){RST} Number: {GRN}{num_str} [{pad_indicator}](y){RST}",
             )
-            # Row 4: Viewer | Dest (pełna szerokość)
             dest_str = str(cam.scan_dest)
-            row4 = f" {YLW}(v){RST} Viewer: {GRN}{cam.scan_viewer:<10}{RST}" +                    f"  {YLW}(t){RST} Dest  : {GRN}{dest_str}{RST}"
+            row4 = f" {YLW}(v){RST} Viewer: {GRN}{cam.scan_viewer:<10}{RST}" + \
+                   f"  {YLW}(t){RST} Dest  : {GRN}{dest_str}{RST}"
 
             for r in (row1, row2, row3, row4):
                 cur_len = ansilen(r)
@@ -6004,7 +6064,7 @@ class PTZMasterApp:
                 line(r)
 
             print(f"╠{'═'*W}╣")
-            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(ESC){RST} Quit"
+            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(?){RST} Help {YLW}(ESC){RST} Quit"
             scan_btn = f" {YLW}(p){RST} Scan"
             footer_row = scan_btn + ' ' * (W-2 - ansilen(scan_btn) - ansilen(ver_esc)) + ver_esc
             line(footer_row)
@@ -6095,19 +6155,79 @@ class PTZMasterApp:
                           notify("Number must be 1-999", "warning")
                   except ValueError:
                       pass
+
               elif key == 'p':
                   self.config_mgr.save()
                   _draw()
-                  print("\n  Scanning... please wait")
-                  ok = Player._play_scanner(cam)
-                  status = f"{GRN}✓ OK{RST}" if ok else f"{RED}✗ ERROR{RST}"
-                  print(f"\n  {status} — press any key...")
-                  sys.stdin.read(1)
+
+                  fd = sys.stdin.fileno()
+                  old_termios = termios.tcgetattr(fd)
+
+                  # Disable mouse tracking during scanning
+                  sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                  sys.stdout.flush()
+
+                  term_height = shutil.get_terminal_size().lines
+                  sys.stdout.write(f'\033[{term_height-1};1H\033[2K')
+                  sys.stdout.write("🖨️ Preparing scan...")
+                  sys.stdout.flush()
+
+                  scan_done = threading.Event()
+                  scan_ok = [False]
+
+                  def update_progress(pct):
+                      # Called from the scanner thread – safe to write to terminal
+                      term_h = shutil.get_terminal_size().lines
+                      sys.stdout.write(f'\033[{term_h-1};1H\033[2K')
+                      bar_len = 20
+                      filled = int(pct / 100 * bar_len)
+                      bar = '█' * filled + '░' * (bar_len - filled)
+                      sys.stdout.write(f"🖨️ Scanning... {pct:3d}% [{bar}]")
+                      sys.stdout.flush()
+
+                  def scan_task():
+                      try:
+                          ok = Player._play_scanner(cam, progress_callback=update_progress)
+                          scan_ok[0] = ok
+                      finally:
+                          scan_done.set()
+
+                  threading.Thread(target=scan_task, daemon=True).start()
+
+                  # Wait for scan to complete, ignoring all input
+                  while not scan_done.is_set():
+                      time.sleep(0.05)
+
+                  # Clear progress line
+                  term_h = shutil.get_terminal_size().lines
+                  sys.stdout.write(f'\033[{term_h-1};1H\033[2K')
+                  sys.stdout.flush()
+
+                  # Restore terminal state and redraw interface
+                  sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                  sys.stdout.flush()
+                  termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
+
+                  sys.stdout.write('\033[2J\033[H')
+                  sys.stdout.flush()
+                  _draw()
+
+                  if scan_ok[0]:
+                      notify("Scan saved successfully", "info")
+                  else:
+                      notify("Scan failed", "error")
+
+              elif key == '?':
+                  self._show_scanner_help()
+                  _draw()
+              elif key in ('q', 'Q'):
+                  running = False
               elif key == Key.ESC:
                   running = False
         finally:
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
             sys.stdout.flush()
+
 # --------------------------------------------------------------------------
 # Scanner configuration TUI (x) end
 # --------------------------------------------------------------------------
@@ -6147,85 +6267,292 @@ class PTZMasterApp:
         elif idx == 4:
             self._add_scanner_camera()
     
-    def _add_scanner_camera(self):
-        """Discover scanners via scanimage -L or add manually."""
-        print_header("SCANNER DISCOVERY")
-        scanners = []
 
-        if shutil.which('scanimage'):
-            print(f"  {CYN}Searching for scanners (scanimage -L)...{RST}")
+    @staticmethod
+    def _discover_scanners_usb() -> list:
+        """Wykryj skanery SANE z VID:PID przez scanimage -f + udevadm.
+        Zwraca listę słowników:
+          {vendor, model, sane_type, device, vidpid, display}
+        device = aktualny device string (zmienia się przy hot-plug)
+        vidpid = VID:PID np. "04a9:220e" (stały)
+        """
+        import re as _re
+        found = []
+
+        if not shutil.which('scanimage'):
+            return found
+
+        # --- Krok 1: scanimage -f — strukturalne pola ---
+        try:
+            r = subprocess.run(
+                ['scanimage', '-f', '%v|%m|%t|%d\n'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, timeout=15
+            )
+            lines = r.stdout.strip().splitlines()
+        except Exception as e:
+            logger.warning(f"scanimage -f failed: {e}")
+            # Fallback do -L
             try:
-                r = subprocess.run(
-                    ['scanimage', '-L'],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15
-                )
-                out = r.stdout.decode('utf-8', errors='replace')
-                for line in out.splitlines():
-                    import re
-                    # SANE format: device `backend:id' is description
-                    m = re.match(r"device `([^']+)' is (.+)", line)
+                r = subprocess.run(['scanimage', '-L'],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    universal_newlines=True, timeout=15)
+                lines = []
+                for ln in r.stdout.splitlines():
+                    m = _re.match(r"device `([^']+)' is (.+)", ln)
                     if m:
-                        device_id = m.group(1)
-                        full_desc = m.group(2).strip()
+                        d, desc = m.group(1), m.group(2)
+                        lines.append(f"?|{desc}|scanner|{d}")
+            except Exception:
+                return found
 
-                        # --- CLEANING SANE DESCRIPTION ---
-                        # 1. Remove "a " or "an " at the start (reported by SANE)
-                        clean_desc = re.sub(r'^(a|an)\s+', '', full_desc, flags=re.IGNORECASE)
-                        # 2. Remove "flatbed scanner" or "scanner" to save space
-                        clean_desc = re.sub(r'\s+(flatbed|scanner).*$', '', clean_desc, flags=re.IGNORECASE)
+        for line in lines:
+            parts = line.strip().split('|')
+            if len(parts) < 4:
+                continue
+            vendor, model, sane_type, device = (p.strip() for p in parts[:4])
+            if not device:
+                continue
 
-                        scanners.append((device_id, clean_desc))
-                        print(f"  {GRN}✓{RST} {device_id}  {DIM}{clean_desc}{RST}")
-            except Exception as e:
-                print(f"  {YLW}scanimage -L error: {e}{RST}")
-        else:
-            print(f"  {RED}scanimage not found — install sane-utils{RST}")
+            # --- Krok 2: wyciągnij VID:PID przez udevadm ---
+            vidpid = ""
+            # device string: "backend:libusb:BUS:DEV" np. plustek:libusb:001:006
+            m = _re.search(r'libusb:(\d+):(\d+)', device)
+            if m:
+                bus, dev = m.group(1).zfill(3), m.group(2).zfill(3)
+                usb_path = f"/dev/bus/usb/{bus}/{dev}"
+                try:
+                    ud = subprocess.run(
+                        ['udevadm', 'info', '--query=property', '--name', usb_path],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                        universal_newlines=True, timeout=3
+                    )
+                    props = dict(ln.split('=', 1) for ln in ud.stdout.splitlines() if '=' in ln)
+                    vid = props.get('ID_VENDOR_ID', '')
+                    pid = props.get('ID_MODEL_ID', '')
+                    if vid and pid:
+                        vidpid = f"{vid}:{pid}"
+                        # Uzupełnij vendor/model z udev jeśli SANE nie podał
+                        if vendor in ('?', ''):
+                            vendor = props.get('ID_VENDOR_ENC', props.get('ID_VENDOR', vendor)).replace('\\x20', ' ')
+                        if model in ('?', ''):
+                            model  = props.get('ID_MODEL_ENC',  props.get('ID_MODEL',  model )).replace('\\x20', ' ')
+                except Exception as e:
+                    logger.debug(f"udevadm for {usb_path}: {e}")
+
+            # Wyczyść prefix "a " i suffix "flatbed scanner" z typu
+            import re as _re2
+            clean_type = _re2.sub(r'^(a|an)\s+', '', sane_type, flags=_re2.IGNORECASE)
+            clean_type = _re2.sub(r'\s+(flatbed|scanner).*$', '', clean_type, flags=_re2.IGNORECASE)
+
+            display = f"{vendor} {model}".strip() or device
+            found.append({
+                'vendor':    vendor,
+                'model':     model,
+                'sane_type': clean_type,
+                'device':    device,
+                'vidpid':    vidpid,
+                'display':   display,
+            })
+            logger.info(f"Scanner found: {display}  device={device}  VID:PID={vidpid or 'unknown'}")
+
+        return found
+
+    @staticmethod
+    def _resolve_scanner_device(vidpid: str) -> str:
+        """Znajdź aktualny device string SANE dla danego VID:PID.
+        Wywołuje scanimage -f przy każdym skanie — adresuje hot-plug.
+        Zwraca device string lub "" jeśli nie znaleziono.
+        """
+        if not vidpid:
+            return ""
+        scanners = PTZMasterApp._discover_scanners_usb()
+        for s in scanners:
+            if s['vidpid'] == vidpid:
+                return s['device']
+        return ""
+
+    def _add_scanner_camera(self):
+        """Wykryj skanery SANE z VID:PID (stały identyfikator USB)."""
+        print_header("SCANNER DISCOVERY")
+        if not shutil.which('scanimage'):
+            notify("scanimage not found! Install: sane-utils", "error")
+            print(f"  {RED}scanimage not found{RST}")
+            print(f"  {DIM}sudo apt install sane-utils{RST}")
+            time.sleep(3)
+            return
+
+        print(f"  {CYN}Searching for scanners (scanimage -f)...{RST}")
+        scanners = PTZMasterApp._discover_scanners_usb()
 
         if not scanners:
             print(f"  {YLW}No scanners found.{RST}")
 
-        # --- MENU ITEMS PREPARATION ---
+        for s in scanners:
+            vidpid_str = f"  {DIM}VID:PID={s['vidpid']}{RST}" if s['vidpid'] else ""
+            print(f"  {GRN}✓{RST} {s['display']:<30}  {DIM}{s['device']}{RST}{vidpid_str}")
+
         items = []
-        for dev, desc in scanners:
-            # Shorten ID and description to fit the frame perfectly
-            dev_short = (dev[:18] + "..") if len(dev) > 20 else dev
-            desc_short = (desc[:20] + "..") if len(desc) > 22 else desc
+        for s in scanners:
+            disp = s['display'][:26]
+            vp   = f" [{s['vidpid']}]" if s['vidpid'] else ""
+            items.append(f" [SCN] {disp:<26}{DIM}{vp}{RST}")
+        items += [" [ + ] Add manually (enter VID:PID)", " [ x ] Cancel"]
 
-            # Format line: Each emoji (🖨) and (▶ in select_menu) adds 1 extra visual width
-            # We must account for this by keeping the total string length shorter
-            items.append(f"🖨   {dev_short:<20}  {DIM}{desc_short}{RST}")
-
-        items += ["✏   Add manually (enter device)", "✖   Cancel"]
-
-        # --- DRAWING MENU ---
-        # Title correction: added a space at the end to offset the 🖨 width
-        idx = select_menu(items, selected=0, title="🖨   Add Scanner ")
-
+        idx = select_menu(items, selected=0, title="Add Scanner (SANE)")
         if idx == -1 or idx == len(items) - 1:
             return
 
         if idx == len(items) - 2:
-            device_str = self._edit_param("Device (e.g. pixma:04A91234)", "")
-            name       = self._edit_param("Name", "Scanner")
+            vidpid_str  = self._edit_param("USB VID:PID (e.g. 04a9:220e)", "")
+            device_str  = self._edit_param("SANE device (leave empty = auto)", "")
+            name        = self._edit_param("Name", "Scanner")
         else:
-            device_str, dev_desc = scanners[idx]
-            # Create a clean name for the config file (no slashes, no spaces)
-            safe_name = dev_desc[:20].strip().replace(" ", "_").replace("/", "-")
-            name = self._edit_param("Name", safe_name)
+            s           = scanners[idx]
+            vidpid_str  = s['vidpid']
+            device_str  = s['device']
+            default_name = s['display'][:20].replace(" ", "_").replace("/", "-")
+            name = self._edit_param("Name", default_name)
 
-        if any(c.type == CameraType.SCANNER and c.scan_device == device_str
+        if vidpid_str and any(c.type == CameraType.SCANNER and c.scan_vidpid == vidpid_str
                for c in self.config.cameras):
-            notify("Scanner already in list", "warning")
+            notify("Scanner VID:PID already in list", "warning")
             return
 
         cam = Camera(name=name, cam_type=CameraType.SCANNER, ip="", mac="UNKNOWN")
+        cam.scan_vidpid = vidpid_str
         cam.scan_device = device_str
         cam.scan_dest   = SCAN_DIR
         cam.profiles    = [CameraProfile(name="scan", token="", res="A4")]
-
         self.config.cameras.append(cam)
         self.config_mgr.save()
-        notify(f"Added scanner: {name}", "info")
+        notify(f"Added scanner: {name}  VID:PID={vidpid_str or 'unknown'}", "info")
+        logger.info(f"Added scanner: {name} vidpid={vidpid_str} device={device_str}")
+
+    def _show_scanner_help(self):
+        """Display scanner help with right edge fixed at column 78.
+           Redraws automatically when terminal is resized.
+           Mouse click on (ESC) Quit closes the help."""
+        mouse_off()
+        fd = sys.stdin.fileno()
+        old_term = termios.tcgetattr(fd)
+
+        import signal
+        resized = [False]
+        def handle_winch(sig, frame):
+            resized[0] = True
+        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
+        try:
+            # Ustawiamy tryb RAW dla poprawnej obsługi klawiszy i myszy
+            tty.setraw(fd)
+            # Włączamy śledzenie myszy (SGR)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+
+            RIGHT_EDGE = 78
+            # footer_len liczymy bez kolorów ANSI dla poprawnego pozycjonowania
+            footer_label = f"v{VERSION}  (ESC) Quit "
+            footer_len = len(footer_label)
+
+            while True:
+                resized[0] = False
+                total_lines = 0
+                # Czyścimy ekran i ustawiamy kursor na 1,1
+                sys.stdout.write('\033[2J\033[H')
+
+                def line(content=""):
+                    nonlocal total_lines
+                    # Dodajemy \r\n na końcu dla trybu RAW
+                    sys.stdout.write(f"{YLW}║{RST} {content}\033[{RIGHT_EDGE}G{YLW}║{RST}\r\n")
+                    total_lines += 1
+
+                def sep():
+                    nonlocal total_lines
+                    sys.stdout.write(f"{YLW}╠{'═'*(RIGHT_EDGE-2)}╣{RST}\r\n")
+                    total_lines += 1
+
+                # 1. Górna ramka
+                sys.stdout.write(f"{YLW}╔{'═'*(RIGHT_EDGE-2)}╗{RST}\r\n")
+                total_lines += 1
+
+                # 2. Nagłówek
+                title = "📐 SCANNER GEOMETRY & 🖼️ IMAGE WORKFLOW REFERENCE"
+                line(f"{BLU}{title.center(75)}{RST}")
+                sep()
+
+                # 3. Treść sekcji
+                line(f"{WHT}STANDARD PAPER SIZES (Width x Height in mm):{RST}")
+                line("   • A4            : 210.0 x 297.0 (International)")
+                line("   • Letter (US)   : 215.9 x 279.4 (8.5 x 11 in)")
+                line("   • Legal (US)    : 215.9 x 355.6 (8.5 x 14 in)")
+                line("   • Ledger (US)   : 279.4 x 431.8 (11 x 17 in)")
+                line(f"   {DIM}(Scanner width is typically max 215-216 mm){RST}")
+                line()
+
+                line(f"{WHT}DPI TO PIXELS (For A4 @ 210x297 mm):{RST}")
+                line("   • 600 DPI : 4960 x 7016 (Master/Archive)")
+                line("   • 300 DPI : 2480 x 3508 (OCR/Translation)")
+                line("   • 150 DPI : 1240 x 1754 (Web/Screen)")
+                line("   • 100 DPI :  827 x 1169 (Fast preview)")
+                line("   •  75 DPI :  620 x  877 (Thumbnail)")
+                line()
+
+                line(f"{WHT}⚙️  RECOMMENDED WORKFLOW (High Quality):{RST}")
+                line("   1. Scan → TIFF @ 600 DPI (Raw data)")
+                line("   2. Save to /tmp/ (Use RAM disk for speed)")
+                line("   3. Process with ImageMagick (convert):")
+                line(f"      {DIM}-sharpen 0x1.0 -resize 2480x3508 -quality 85%{RST}")
+                line("   4. Send to Google Translate / Tesseract OCR")
+                line()
+
+                line(f"{WHT}🌐 ISO 639-1 LANGUAGE CODES (for OCR/Translation):{RST}")
+                line(f"   {GRN}pl{RST} Polish    {GRN}en{RST} English   {GRN}de{RST} German    {GRN}fr{RST} French")
+                line(f"   {GRN}es{RST} Spanish   {GRN}it{RST} Italian   {GRN}uk{RST} Ukrainian {GRN}ru{RST} Russian")
+                line()
+
+                sep()
+
+                # 4. Stopka (interaktywna)
+                footer_content = f"{CYN}v{VERSION}{RST}  {YLW}(ESC){RST} Quit "
+                sys.stdout.write(f"{YLW}║{RST}")
+                # Pozycjonujemy tekst stopki do prawej krawędzi
+                sys.stdout.write(f"\033[{RIGHT_EDGE - footer_len - 1}G")
+                sys.stdout.write(f"{footer_content}\033[{RIGHT_EDGE}G{YLW}║{RST}\r\n")
+                total_lines += 1
+
+                # 5. Dolna ramka
+                sys.stdout.write(f"{YLW}╚{'═'*(RIGHT_EDGE-2)}╝{RST}\r\n")
+                total_lines += 1
+
+                sys.stdout.flush()
+
+                # Indeks rzędu stopki dla obsługi myszy
+                footer_row = total_lines - 1 # W setraw() rzędy w MouseEvent mogą być od 1 lub 0
+
+                # Pętla oczekiwania na klawisz lub zmianę rozmiaru
+                while not resized[0]:
+                    key = get_key(timeout=0.2)
+                    if key == Key.TIMEOUT:
+                        continue
+                    if key in (Key.ESC, 'q', 'Q'):
+                        return
+
+                    # Obsługa myszy
+                    if isinstance(key, MouseEvent) and not key.release:
+                        # Sprawdzamy czy kliknięto w rzędzie stopki
+                        if key.row == footer_row:
+                            btn_start = RIGHT_EDGE - footer_len
+                            if btn_start <= key.col <= RIGHT_EDGE:
+                                return
+
+        finally:
+            # Przywracanie ustawień terminala
+            signal.signal(signal.SIGWINCH, old_winch)
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+            mouse_on()
 
     def _discover_network(self):
         print_header("NETWORK CAMERA DISCOVERY")
