@@ -5958,9 +5958,9 @@ class PTZMasterApp:
             self.ui.set_progress(0)
             self.ui.draw()
 
-# --------------------------------------------------------------------------
-# Scanner configuration TUI (x) start
-# --------------------------------------------------------------------------
+    # --------------------------------------------------------------------------
+    # Scanner configuration TUI (x) start
+    # --------------------------------------------------------------------------
     def _scanner_control_screen(self):
         """Scanner configuration TUI – aligned columns, ESC to quit."""
         cam = self.ui.current_camera
@@ -5992,6 +5992,27 @@ class PTZMasterApp:
         num_padding = 3
         date_format = 0   # 0 = YYYY-MM-DD, 1 = DD-MM-YYYY
         override_num = None
+
+        # --- Stan skanowania ---
+        scan_phase = 0          # 0: idle, 1: preparing, 2: scanning, 3: done
+        scan_pct = 0
+        scan_info_msg = ""
+        scan_ok = [False]
+
+        # --- Stałe geometrii ---
+        W_TOTAL = 78            # całkowita szerokość okna (z krawędziami)
+        W_INNER = W_TOTAL - 4   # przestrzeń między ║ (74 znaki)
+
+        def _shorten_path(path, max_len):
+            """Skraca ścieżkę, zachowując początek i końcówkę."""
+            if ansilen(path) <= max_len:
+                return path
+            # Pokaż pierwsze 30% i ostatnie 70% długości
+            keep_start = int(max_len * 0.3)
+            keep_end = max_len - keep_start - 3
+            if keep_end <= 0:
+                return path[:max_len-3] + "..."
+            return path[:keep_start] + "..." + path[-keep_end:]
 
         def _cycled(lst, val):
             try:
@@ -6028,28 +6049,27 @@ class PTZMasterApp:
         def _draw():
             sys.stdout.write('\033[2J\033[H')
             sys.stdout.flush()
-            W = 76
-            def line(txt=""):
-                print(f"║ {pad(txt, W-2)} ║")
 
-            # Header – fixed length to ensure right border alignment
-            header = f"{CYN} 🖨  Scanner: {YLW}{cam.name}{RST}{CYN}   device: {DIM}{cam.scan_device or '(default)'}{RST}"
-            header_visual_len = ansilen(header) + 1
-            if header_visual_len < W:
-                header += ' ' * (W - header_visual_len)
-            print(f"╔{'═'*W}╗")
-            line(header)
-            print(f"╠{'═'*W}╣")
+            # --- 1. Nagłówek ---
+            header_left = f"{CYN} 🖨  Scanner: {YLW}{cam.name}{RST}{CYN}  dev: {DIM}{cam.scan_device or '(default)'}{RST}"
+            header_right = f"{YLW}F1 Help{RST}"
+            pad_len = W_INNER - ansilen(header_left) - ansilen(header_right)
+            header = f"{header_left}{' ' * max(0, pad_len)}{header_right}"
+
+            print(f"╔{'═'*(W_TOTAL-2)}╗")
+            print(f"║ {pad(header, W_INNER)} ║")
+            print(f"╠{'═'*(W_TOTAL-2)}╣")
+
+            # --- 2. Parametry (siatka 3-kolumnowa) ---
+            c1w = (W_INNER - 4) // 3
+            c2w = (W_INNER - 4) // 3
+            c3w = W_INNER - 4 - c1w - c2w
 
             def _pad_field(txt, width):
                 cur = ansilen(txt)
                 if cur < width:
                     txt += ' ' * (width - cur)
                 return txt
-
-            c1w = (W - 2 - 4) // 3
-            c2w = (W - 2 - 4) // 3
-            c3w =  W - 2 - 4 - c1w - c2w
 
             def row3col(a, b, c):
                 return _pad_field(a, c1w) + "  " + _pad_field(b, c2w) + "  " + _pad_field(c, c3w)
@@ -6080,204 +6100,275 @@ class PTZMasterApp:
 
             for r in (row1, row2, row3, row4):
                 cur_len = ansilen(r)
-                if cur_len < W-2:
-                    r += ' ' * (W-2 - cur_len)
-                elif cur_len > W-2:
-                    r = r[:W-2]
-                line(r)
+                if cur_len < W_INNER:
+                    r += ' ' * (W_INNER - cur_len)
+                elif cur_len > W_INNER:
+                    r = r[:W_INNER]
+                print(f"║ {pad(r, W_INNER)} ║")
 
-            print(f"╠{'═'*W}╣")
-            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(?){RST} Help {YLW}(ESC){RST} Quit"
-            scan_btn = f" {YLW}(p){RST} Scan"
-            footer_row = scan_btn + ' ' * (W-2 - ansilen(scan_btn) - ansilen(ver_esc)) + ver_esc
-            line(footer_row)
-            print(f"╚{'═'*W}╝")
+            print(f"╠{'═'*(W_TOTAL-2)}╣")
+
+            # --- 3. Dynamiczna linia skanowania ---
+            file_base = f"{date_str}_{cam.scan_desc or 'none'}_{num_str}.{cam.scan_format}"
+            full_path = os.path.join(cam.scan_dest, file_base)
+
+            if scan_phase == 0:      # Idle
+                line = f" {YLW}(p){RST} Scan {DIM}{_shorten_path(full_path, W_INNER - 10)}{RST}"
+            elif scan_phase == 1:    # Preparing
+                line = f" 🖨  Preparing scan... {DIM}{_shorten_path(full_path, W_INNER - 20)}{RST}"
+            elif scan_phase == 2:    # Scanning
+                bar_len = 15
+                filled = int((scan_pct / 100) * bar_len)
+                bar = '█' * filled + '░' * (bar_len - filled)
+                line = f" 🖨  Scanning... {scan_pct:3d}% [{bar}] {DIM}{_shorten_path(file_base, W_INNER - 25)}{RST}"
+            else:                    # Done
+                result_color = GRN if scan_ok[0] else RED
+                result_text = scan_info_msg if scan_info_msg else ("OK" if scan_ok[0] else "ERR")
+                line = f" {YLW}(p){RST} Scan  {DIM}{_shorten_path(full_path, W_INNER - 15)}{RST} {result_color}{result_text}{RST}"
+
+            print(f"║ {pad(line, W_INNER)}  ║")
+            print(f"╠{'═'*(W_TOTAL-2)}╣")
+
+            # --- 4. Linia zasobów i statusu ---
+            cpu_str = get_cpu_usage()
+            free_pct = get_free_space_percent()
+            hdd_use = 100 - free_pct
+
+            try:
+                with open('/proc/meminfo') as _mf:
+                    _ml = {l.split(':')[0]: int(l.split()[1]) for l in _mf if ':' in l}
+                ram_pct = int(100 * (1 - _ml.get('MemAvailable', 0) / max(_ml.get('MemTotal', 1), 1)))
+            except:
+                ram_pct = 0
+
+            def _b(pct, width=7):
+                f = int(pct / 100 * width)
+                return f"{'█'*f}{DIM}{'░'*(width-f)}{RST}"
+
+            cpu_n = int(cpu_str.replace('%','').strip() or 0)
+            cpu_col = RED if cpu_n > 80 else (YLW if cpu_n > 50 else GRN)
+            ram_col = RED if ram_pct > 80 else (YLW if ram_pct > 60 else GRN)
+            hdd_col = RED if hdd_use > 90 else (YLW if hdd_use > 75 else GRN)
+
+            sys_stats = f" ⚙{cpu_col}{cpu_n:3d}%{RST} 🧠[{_b(ram_pct)}]{ram_col}{ram_pct:2d}%{RST} 💽[{_b(hdd_use)}]{hdd_col}{hdd_use:2d}%{RST}"
+
+            notifs = NotificationManager().get_active()
+            status_msg = notifs[-1] if notifs else "OK"
+            # Skróć długie powiadomienia
+            if len(status_msg) > 20:
+                status_msg = status_msg[:17] + "..."
+            msg_col = GRN if "OK" in status_msg else (RED if "ERR" in status_msg else YLW)
+            status_disp = f"🔔 {msg_col}{status_msg}{RST}"
+
+            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(ESC){RST} Quit"
+
+            # Jeśli brak miejsca, ukryj statystyki
+            left_part = f"{sys_stats}  {status_disp}"
+            if ansilen(left_part) + ansilen(ver_esc) > W_INNER - 2:
+                left_part = f" {status_disp}"  # Pokaż tylko powiadomienie
+
+            padding = W_INNER - ansilen(left_part) - ansilen(ver_esc)
+            footer = f"{left_part}{' ' * max(0, padding)}{ver_esc}"
+
+            print(f"║ {pad(footer, W_INNER)} ║")
+            print(f"╚{'═'*(W_TOTAL-2)}╝")
+            sys.stdout.flush()
 
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         running = True
         try:
             while running:
-              _draw()
-              key = get_key()
-              _mk = key  # domyślnie: klawisz z klawiatury
+                _draw()
+                key = get_key()
+                _mk = key
 
-              if _mk == 'm':
-                  cam.scan_mode = _cycled(MODES, cam.scan_mode)
-                  self.config_mgr.save()
-              elif _mk == 'd':
-                  try:
-                      idx = DPIS.index(cam.scan_dpi)
-                  except ValueError:
-                      idx = 4
-                  cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
-                  self.config_mgr.save()
-              elif _mk == 'f':
-                  cam.scan_format = _cycled(FORMATS, cam.scan_format)
-                  self.config_mgr.save()
-              elif _mk == 'a':
-                  items = list(AREAS.keys())
-                  ai = select_menu(items, selected=0, title="Scan area")
-                  if ai >= 0:
-                      key_ = items[ai]
-                      if key_ == "Custom":
-                          new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
-                          if new_area:
-                              cam.scan_area = new_area
-                      else:
-                          cam.scan_area = AREAS[key_]
-                      self.config_mgr.save()
-              elif _mk == 'r':
-                  items = list(RESIZES.keys())
-                  ri = select_menu(items, selected=0, title="Output resize")
-                  if ri >= 0:
-                      key_ = items[ri]
-                      if key_ == "Custom":
-                          new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
-                          if new_resize:
-                              cam.scan_resize = new_resize
-                      else:
-                          cam.scan_resize = RESIZES[key_]
-                      self.config_mgr.save()
-              elif _mk == 'c':
-                  val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
-                  try:
-                      cam.scan_quality = max(0, min(100, int(val)))
-                      self.config_mgr.save()
-                  except ValueError:
-                      pass
-              elif _mk == 'v':
-                  cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
-                  self.config_mgr.save()
-              elif _mk == 't':
-                  new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
-                  if new_dest:
-                      cam.scan_dest = new_dest
-                      self.config_mgr.save()
-              elif _mk == 'n':
-                  new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
-                  if new_desc is not None:
-                      cam.scan_desc = new_desc
-                      self.config_mgr.save()
-              elif _mk == 'h':
-                  date_format = 1 - date_format
-              elif _mk == 'x':
-                  if num_padding == 0:
-                      num_padding = 2
-                  elif num_padding == 2:
-                      num_padding = 3
-                  else:
-                      num_padding = 0
-                  self.config_mgr.save()
-              elif _mk == 'y':
-                  val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
-                  try:
-                      num = int(val)
-                      if 1 <= num <= 999:
-                          override_num = num
-                      else:
-                          notify("Number must be 1-999", "warning")
-                  except ValueError:
-                      pass
+                if _mk == 'm':
+                    cam.scan_mode = _cycled(MODES, cam.scan_mode)
+                    self.config_mgr.save()
+                elif _mk == 'd':
+                    try:
+                        idx = DPIS.index(cam.scan_dpi)
+                    except ValueError:
+                        idx = 4
+                    cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
+                    self.config_mgr.save()
+                elif _mk == 'f':
+                    cam.scan_format = _cycled(FORMATS, cam.scan_format)
+                    self.config_mgr.save()
+                elif _mk == 'a':
+                    items = list(AREAS.keys())
+                    ai = select_menu(items, selected=0, title="Scan area")
+                    if ai >= 0:
+                        key_ = items[ai]
+                        if key_ == "Custom":
+                            new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
+                            if new_area:
+                                cam.scan_area = new_area
+                        else:
+                            cam.scan_area = AREAS[key_]
+                        self.config_mgr.save()
+                elif _mk == 'r':
+                    items = list(RESIZES.keys())
+                    ri = select_menu(items, selected=0, title="Output resize")
+                    if ri >= 0:
+                        key_ = items[ri]
+                        if key_ == "Custom":
+                            new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
+                            if new_resize:
+                                cam.scan_resize = new_resize
+                        else:
+                            cam.scan_resize = RESIZES[key_]
+                        self.config_mgr.save()
+                elif _mk == 'c':
+                    val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
+                    try:
+                        cam.scan_quality = max(0, min(100, int(val)))
+                        self.config_mgr.save()
+                    except ValueError:
+                        pass
+                elif _mk == 'v':
+                    cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
+                    self.config_mgr.save()
+                elif _mk == 't':
+                    new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
+                    if new_dest:
+                        cam.scan_dest = new_dest
+                        self.config_mgr.save()
+                elif _mk == 'n':
+                    new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
+                    if new_desc is not None:
+                        cam.scan_desc = new_desc
+                        self.config_mgr.save()
+                elif _mk == 'h':
+                    date_format = 1 - date_format
+                elif _mk == 'x':
+                    if num_padding == 0:
+                        num_padding = 2
+                    elif num_padding == 2:
+                        num_padding = 3
+                    else:
+                        num_padding = 0
+                    self.config_mgr.save()
+                elif _mk == 'y':
+                    val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
+                    try:
+                        num = int(val)
+                        if 1 <= num <= 999:
+                            override_num = num
+                        else:
+                            notify("Number must be 1-999", "warning")
+                    except ValueError:
+                        pass
 
-              elif _mk == 'p':
-                  self.config_mgr.save()
-                  _draw()
+                elif _mk == 'p':
+                    self.config_mgr.save()
 
-                  fd = sys.stdin.fileno()
-                  old_termios = termios.tcgetattr(fd)
+                    scan_phase = 1
+                    scan_pct = 0
+                    scan_info_msg = ""
+                    scan_ok[0] = False
+                    _draw()
 
-                  # Disable mouse tracking during scanning
-                  sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-                  sys.stdout.flush()
+                    fd = sys.stdin.fileno()
+                    old_termios = termios.tcgetattr(fd)
 
-                  term_height = shutil.get_terminal_size().lines
-                  sys.stdout.write(f'\033[{term_height-1};1H\033[2K')
-                  sys.stdout.write("🖨️ Preparing scan...")
-                  sys.stdout.flush()
+                    sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                    sys.stdout.flush()
 
-                  scan_done = threading.Event()
-                  scan_ok = [False]
+                    scan_done = threading.Event()
 
-                  def update_progress(pct):
-                      # Called from the scanner thread – safe to write to terminal
-                      term_h = shutil.get_terminal_size().lines
-                      sys.stdout.write(f'\033[{term_h-1};1H\033[2K')
-                      bar_len = 20
-                      filled = int(pct / 100 * bar_len)
-                      bar = '█' * filled + '░' * (bar_len - filled)
-                      sys.stdout.write(f"🖨️ Scanning... {pct:3d}% [{bar}]")
-                      sys.stdout.flush()
+                    def update_progress(pct):
+                        nonlocal scan_phase, scan_pct
+                        scan_phase = 2
+                        scan_pct = pct
+                        _draw()
 
-                  def scan_task():
-                      try:
-                          ok = Player._play_scanner(cam, progress_callback=update_progress)
-                          scan_ok[0] = ok
-                      finally:
-                          scan_done.set()
+                    def scan_task():
+                        try:
+                            ok = Player._play_scanner(cam, progress_callback=update_progress)
+                            scan_ok[0] = ok
+                        finally:
+                            scan_done.set()
 
-                  threading.Thread(target=scan_task, daemon=True).start()
+                    threading.Thread(target=scan_task, daemon=True).start()
 
-                  # Wait for scan to complete, ignoring all input
-                  while not scan_done.is_set():
-                      time.sleep(0.05)
+                    # Czekamy, ale odświeżamy UI
+                    while not scan_done.is_set():
+                        _draw()
+                        time.sleep(0.2)
 
-                  # Clear progress line
-                  term_h = shutil.get_terminal_size().lines
-                  sys.stdout.write(f'\033[{term_h-1};1H\033[2K')
-                  sys.stdout.flush()
+                    sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                    sys.stdout.flush()
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
 
-                  # Restore terminal state and redraw interface
-                  sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-                  sys.stdout.flush()
-                  termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
+                    scan_phase = 3
+                    if scan_ok[0]:
+                        try:
+                            today = datetime.date.today()
+                            date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
+                            desc_part = f"_{cam.scan_desc}" if cam.scan_desc else ""
+                            pattern = f"{date_str}{desc_part}_*.{cam.scan_format}"
+                            import glob as _gl
+                            files = sorted(_gl.glob(os.path.join(cam.scan_dest, pattern)))
+                            if files:
+                                size = os.path.getsize(files[-1])
+                                if size < 1024:
+                                    scan_info_msg = f"({size}B)"
+                                elif size < 1024*1024:
+                                    scan_info_msg = f"({size/1024:.1f}K)"
+                                else:
+                                    scan_info_msg = f"({size/(1024*1024):.1f}M)"
+                            else:
+                                scan_info_msg = "(OK)"
+                        except:
+                            scan_info_msg = "(OK)"
+                        notify("Scan saved successfully", "info")
+                    else:
+                        scan_info_msg = "(ERR)"
+                        notify("Scan failed", "error")
 
-                  sys.stdout.write('\033[2J\033[H')
-                  sys.stdout.flush()
-                  _draw()
+                    _draw()
 
-                  if scan_ok[0]:
-                      notify("Scan saved successfully", "info")
-                  else:
-                      notify("Scan failed", "error")
-
-              elif _mk == '?':
-                  self._show_scanner_help()
-                  _draw()
-              elif key in ('q', 'Q'):
-                  running = False
-              elif isinstance(key, MouseEvent) and not key.release:
-                  r, c = key.row, key.col
-                  _C1 = c <= 26; _C2 = 27 <= c <= 52; _C3 = c >= 53
-                  _mk = None  # mapped key
-                  if r == 4:
-                      if _C1: _mk = 'm'
-                      elif _C2: _mk = 'd'
-                      elif _C3: _mk = 'a'
-                  elif r == 5:
-                      if _C1: _mk = 'f'
-                      elif _C2: _mk = 'r'
-                      elif _C3: _mk = 'c'
-                  elif r == 6:
-                      if _C1: _mk = 'h'
-                      elif _C2: _mk = 'n'
-                      elif _C3: _mk = 'x'
-                  elif r == 7:
-                      _mk = 'v' if c <= 40 else 't'
-                  elif r == 9:
-                      if c <= 10: _mk = 'p'
-                      elif 11 <= c <= 20: _mk = '?'
-                      else: running = False; continue
-              elif _mk == Key.ESC:
-                  running = False
+                elif _mk == Key.F1:
+                    self._show_scanner_help()
+                    _draw()
+                elif key in ('q', 'Q'):
+                    running = False
+                elif isinstance(key, MouseEvent) and not key.release:
+                    r, c = key.row, key.col
+                    _C1 = c <= 26; _C2 = 27 <= c <= 52; _C3 = c >= 53
+                    _mk = None
+                    if r == 4:
+                        if _C1: _mk = 'm'
+                        elif _C2: _mk = 'd'
+                        elif _C3: _mk = 'a'
+                    elif r == 5:
+                        if _C1: _mk = 'f'
+                        elif _C2: _mk = 'r'
+                        elif _C3: _mk = 'c'
+                    elif r == 6:
+                        if _C1: _mk = 'h'
+                        elif _C2: _mk = 'n'
+                        elif _C3: _mk = 'x'
+                    elif r == 7:
+                        _mk = 'v' if c <= 40 else 't'
+                    elif r == 9:   # Linia z (p) Scan
+                        if c <= 10:
+                            _mk = 'p'
+                        else:
+                            running = False
+                    elif r == 11:  # Linia zasobów – kliknięcie w (ESC) Quit
+                        if c >= 60:
+                            running = False
+                elif _mk == Key.ESC:
+                    running = False
         finally:
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
             sys.stdout.flush()
-
-# --------------------------------------------------------------------------
-# Scanner configuration TUI (x) end
-# --------------------------------------------------------------------------
-
+    # --------------------------------------------------------------------------
+    # Scanner configuration TUI (x) end
+    # --------------------------------------------------------------------------
     def _discover_cameras(self):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         W = 57
