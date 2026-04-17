@@ -1156,6 +1156,17 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '',
     sys.stdout.write(f'\r{prefix} |{bar}| {pct:.1f}% {suffix}'.ljust(80))
     sys.stdout.flush()
 
+def format_progress_line(percent: float, width: int = 20, label: str = "", subnet: str = "") -> str:
+    """
+    Tworzy linię statusu z paskiem postępu.
+    Przykład: "Auto-check: [████████░░░░░░░░░░░░]  40%  192.168.1.0/24"
+    """
+    filled = int(percent / 100 * width)
+    bar = '█' * filled + '░' * (width - filled)
+    label_part = f"{label}: " if label else ""
+    subnet_part = f"  {subnet}" if subnet else ""
+    return f"{label_part}[{bar}] {percent:3.0f}%{subnet_part}"
+
 def print_header(text: str):
     width = 59
     print(f"\n{YLW}╔{'═' * (width-2)}╗{RST}")
@@ -6591,33 +6602,38 @@ class PTZMasterApp:
 
     def _discover_network(self):
         print_header("NETWORK CAMERA DISCOVERY")
-        
+
         prefix = NetworkUtils.get_local_prefix()
         logger.info(f"Scanning network {prefix}0/24")
-        
+
         print(f"  Scanning {prefix}0/24...")
         def _disc_progress(pct, i, total, msg):
-            bar_len = 30
-            filled = int(bar_len * pct / 100)
-            bar = '█' * filled + '░' * (bar_len - filled)
-            sys.stdout.write(f"\r  [{bar}] {pct:3d}%")
-            sys.stdout.flush()
+            # Aktualizuj linię statusu w głównym UI
+            self.ui.set_scan_status(
+                format_progress_line(pct, width=25, label="📡 Scanning", subnet=prefix+"0/24")
+            )
+            # Odśwież ekran, aby pokazać zmieniony status
+            self.ui.draw()
+
         active = NetworkUtils.scan_subnet(prefix, progress_cb=_disc_progress)
+        self.ui.set_scan_status("")  # Wyczyść linię statusu po zakończeniu
+        self.ui.draw()
+
         print()
         if not active:
             print(f"\n{RED}No active hosts found.{RST}")
             time.sleep(2)
             return
-        
+
         logger.info(f"Found {len(active)} active hosts")
-        
+
         print(f"\n{CYN}Phase 2: Deep Scan...{RST}")
         found = []
-        
+
         for i, ip in enumerate(active, 1):
             cam = Camera(ip=ip)
             cam_type, port = CameraDetector.detect(cam, show_progress=False)
-            
+
             if cam_type != CameraType.UNKNOWN:
                 mac = NetworkUtils.get_mac_from_ip(ip)
                 found.append({
@@ -6626,16 +6642,16 @@ class PTZMasterApp:
                     "port": port,
                     "mac": mac
                 })
-        
+
         if not found:
             print(f"\n{RED}No cameras found.{RST}")
             time.sleep(2)
             return
-        
+
         to_add = self._pick_scan_results(found)
         if to_add is None:
             return
-        
+
         added = 0
         for cam_data in to_add:
             _mac = cam_data["mac"]
@@ -6657,7 +6673,7 @@ class PTZMasterApp:
                 else:
                     print(f"  {YLW}Skipping {_ip} (MAC already in list){RST}")
                 continue
-            
+
             ports = CameraPorts()
             if cam_data["type"] == CameraType.DVRIP:
                 ports.dvrip = cam_data["port"] or 34567
@@ -6665,7 +6681,7 @@ class PTZMasterApp:
                 ports.rtsp = cam_data["port"] or 554
             else:
                 ports.onvif = cam_data["port"] or 80
-            
+
             cam = Camera(
                 name=f"Cam_{_ip.split('.')[-1]}",
                 ip=_ip,
@@ -6673,11 +6689,11 @@ class PTZMasterApp:
                 ports=ports,
                 cam_type=cam_data["type"]
             )
-            
+
             self.config.cameras.append(cam)
             added += 1
             logger.info(f"Added camera: {_ip} ({cam_data['type'].value}) MAC={_mac}")
-        
+
         if added > 0:
             self.config_mgr.save()
             print(f"\n{GRN}Added {added} cameras to config{RST}")
@@ -6782,14 +6798,18 @@ class PTZMasterApp:
 
     def _discover_network_nmap(self):
         print_header("NMAP NETWORK DISCOVERY")
-        
+
         prefix = NetworkUtils.get_local_prefix()
         subnet = f"{prefix}0/24"
-        
+
         print(f"{CYN}Running nmap host discovery on {subnet}...{RST}")
         print(f"{YLW}This may take 10-30 seconds{RST}\n")
         logger.info(f"nmap discovery: {subnet}")
-        
+
+        # Ustaw status w UI na czas działania nmap
+        self.ui.set_scan_status(f"{CYN}🔍 nmap scanning {subnet}... (this may take a while){RST}")
+        self.ui.draw()
+
         try:
             result = subprocess.run(
                 ["nmap", "-sn", "--open", "-T4", subnet],
@@ -6800,48 +6820,68 @@ class PTZMasterApp:
             )
             output = result.stdout
         except subprocess.TimeoutExpired:
+            self.ui.set_scan_status(f"{RED}nmap timed out{RST}")
+            self.ui.draw()
             print(f"{RED}nmap timed out{RST}")
             time.sleep(2)
+            self.ui.set_scan_status("")
             return
         except OSError as e:
+            self.ui.set_scan_status(f"{RED}nmap error: {e}{RST}")
+            self.ui.draw()
             print(f"{RED}nmap error: {e}{RST}")
             time.sleep(2)
+            self.ui.set_scan_status("")
             return
-        
+
         active = re.findall(r'Nmap scan report for (?:\S+ \()?(\d+\.\d+\.\d+\.\d+)\)?', output)
-        
+
         if not active:
+            self.ui.set_scan_status(f"{RED}nmap found no active hosts.{RST}")
+            self.ui.draw()
             print(f"\n{RED}nmap found no active hosts.{RST}")
             time.sleep(2)
+            self.ui.set_scan_status("")
             return
-        
+
         print(f"{GRN}nmap found {len(active)} active hosts{RST}")
         print(f"\n{CYN}Phase 2: Deep scan (port check + type detect)...{RST}")
-        
+
+        # Deep scan z paskiem postępu
         found = []
-        for ip in active:
+        total = len(active)
+        for i, ip in enumerate(active, 1):
+            # Aktualizuj status co kilka hostów, żeby nie migało za często
+            if i % 5 == 0 or i == total:
+                pct = (i / total) * 100
+                self.ui.set_scan_status(
+                    format_progress_line(pct, width=20, label="🔍 Deep scan", subnet=f"{i}/{total} hosts")
+                )
+                self.ui.draw()
+
             cam = Camera(ip=ip)
             cam_type, port = CameraDetector.detect(cam, show_progress=False)
             if cam_type != CameraType.UNKNOWN:
                 mac = NetworkUtils.get_mac_from_ip(ip)
                 found.append({"ip": ip, "type": cam_type, "port": port, "mac": mac})
-        
+
+        self.ui.set_scan_status("")
+        self.ui.draw()
+
         if not found:
             print(f"\n{RED}No cameras detected.{RST}")
             time.sleep(2)
             return
-        
+
         to_add = self._pick_scan_results(found)
         if to_add is None:
             return
-        
+
         added = 0
         for cam_data in to_add:
             _mac = cam_data["mac"]
             _ip  = cam_data["ip"]
             _mac_known = _mac not in ("", "UNKNOWN")
-            # MAC = tożsamość kamery, IP = adres (może się zmienić)
-            # Priorytet: najpierw szukaj po MAC, potem po IP
             if _mac_known:
                 _by_mac = next((c for c in self.config.cameras if c.mac == _mac), None)
                 if _by_mac:
@@ -6855,8 +6895,7 @@ class PTZMasterApp:
             if any(c.ip == _ip for c in self.config.cameras):
                 print(f"  {DIM}Skipping {_ip} — known camera (IP){RST}")
                 continue
-            # Nowa kamera — MAC nieznany lub nie pasuje do żadnej istniejącej
-            
+
             ports = CameraPorts()
             if cam_data["type"] == CameraType.DVRIP:
                 ports.dvrip = cam_data["port"] or 34567
@@ -6864,7 +6903,7 @@ class PTZMasterApp:
                 ports.rtsp = cam_data["port"] or 554
             else:
                 ports.onvif = cam_data["port"] or 80
-            
+
             cam = Camera(
                 name=f"Cam_{_ip.split('.')[-1]}",
                 ip=_ip,
@@ -6875,7 +6914,7 @@ class PTZMasterApp:
             self.config.cameras.append(cam)
             added += 1
             logger.info(f"Added camera: {_ip} ({cam_data['type'].value}) MAC={_mac}")
-        
+
         if added > 0:
             self.config_mgr.save()
             print(f"\n{GRN}Added {added} cameras to config{RST}")
@@ -7380,10 +7419,10 @@ class PTZMasterApp:
             return
 
         def _auto_progress(pct, i, total, msg):
-            bar_len = 24
-            filled = int(bar_len * pct / 100)
-            bar = '█' * filled + '░' * (bar_len - filled)
-            self.ui._scan_status = f"{CYN}Auto-check: [{bar}] {pct:3d}%  {msg}{RST}"
+            # Ładnie sformatowany pasek postępu w linii statusu
+            self.ui._scan_status = format_progress_line(
+                pct, width=20, label=f"{CYN}Auto-check{RST}", subnet=msg
+            )
 
         for subnet in subnets:
             logger.info(f"Auto-check: scanning {subnet}0/24")
