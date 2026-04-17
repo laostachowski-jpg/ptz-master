@@ -1076,8 +1076,8 @@ def _extract_clip(filepath: str, start: float, end: float,
 
 def ansilen(s: str) -> int:
     """Dokładne liczenie długości dla pozycjonowania myszy"""
-    # Poprawiony regex usuwający kody ANSI
-    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', s)
+    # Używamy standardowego ciągu znaków (bez 'r'), aby \x1b zostało zinterpretowane jako znak Escape.
+    clean = re.sub('\x1b\\[[0-9;]*[a-zA-Z]', '', s)
     total = 0
     for c in clean:
         cp = ord(c)
@@ -1694,8 +1694,9 @@ class ConfigManager:
             logger.error(f"Error saving configuration: {e}")
             notify(f"Save error: {e}", "error")
             return False
+
+        tmp = self.filename + ".tmp"
         try:
-            tmp = self.filename + ".tmp"
             with open(tmp, 'w') as f:
                 f.write(data)
                 f.flush()
@@ -1712,6 +1713,14 @@ class ConfigManager:
             logger.error(f"Error saving configuration: {e}")
             notify(f"Save error: {e}", "error")
             return False
+        finally:
+            # Ten blok zawsze się wykona. Jeśli plik .tmp nadal istnieje, bezpiecznie go usuwamy.
+            if os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                    logger.debug(f"Cleaned up temporary file: {tmp}")
+                except OSError:
+                    pass
     
     def _to_dict(self) -> dict:
         return self.config.to_dict()
@@ -2109,6 +2118,53 @@ class ONVIFClient:
         
         self._session = session
         return self._session
+
+    def _send_onvif_request(self, url: str, body: str, timeout: tuple = (1.5, 3.5)) -> Optional[str]:
+        """
+        Bezpieczne wysyłanie żądania SOAP do kamery ONVIF z rozdzielonym timeoutem.
+
+        Args:
+            url: Pełny adres URL endpointu ONVIF
+            body: Treść żądania SOAP (XML)
+            timeout: Krotka (connect_timeout, read_timeout) w sekundach
+
+        Returns:
+            Odpowiedź serwera jako string lub None w przypadku błędu
+        """
+        try:
+            session = self._get_session()
+            # Używamy krotki (connect, read) – szybko wykrywamy niedostępne kamery
+            response = session.post(url, data=body, timeout=timeout)
+
+            # Akceptujemy również kody 400, 401, 500 – często oznaczają one, że kamera
+            # odpowiedziała, ale wymaga autoryzacji lub ma błąd w zapytaniu
+            if response.status_code in (200, 400, 401, 403, 405, 500):
+                logger.debug(f"ONVIF response HTTP {response.status_code} from {url}")
+                return response.text
+            else:
+                logger.warning(f"ONVIF unexpected status {response.status_code} from {url}")
+                return None
+
+        except requests.exceptions.ConnectTimeout:
+            logger.warning(f"ONVIF connection timeout – camera {self.cam.ip}:{self.cam.ports.onvif} unreachable")
+            return None
+
+        except requests.exceptions.ReadTimeout:
+            logger.warning(f"ONVIF read timeout – camera {self.cam.ip} connected but not responding")
+            return None
+
+        except requests.exceptions.ConnectionError as e:
+            logger.debug(f"ONVIF connection error for {self.cam.ip}: {e}")
+            return None
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"ONVIF request failed for {self.cam.ip}: {e}")
+            return None
+
+        except Exception as e:
+            logger.exception(f"Unexpected error in ONVIF request to {url}: {e}")
+            return None
+
     
     def get_profiles(self) -> Tuple[List[CameraProfile], str]:
         url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/Media"
@@ -2116,99 +2172,82 @@ class ONVIFClient:
 <s:Header>{self._get_auth_header()}</s:Header>
 <s:Body><trt:GetProfiles/></s:Body>
 </s:Envelope>'''
-        
-        logger.info(f"Getting ONVIF profiles from {url}")
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=body, timeout=5)
-            logger.debug(f"GetProfiles response: HTTP {r.status_code}")
-            
-            if r.status_code != 200:
-                logger.warning(f"GetProfiles returned {r.status_code}")
-                return ([], "")
-            
-            xml = r.text
-            logger.debug(f"XML response (first 200 chars): {xml[:200]}")
-            
-            profiles = []
-            blocks = re.findall(r'<trt:Profiles[^>]*token="([^"]+)"[^>]*>(.*?)</trt:Profiles>', xml, re.DOTALL)
-            logger.debug(f"Found {len(blocks)} profile blocks")
-            
-            for token, block in blocks:
-                name_match = re.search(r'<tt:Name>([^<]+)</tt:Name>', block)
-                name = name_match.group(1) if name_match else "Unknown"
-                
-                uri = self._get_stream_uri(token)
-                
-                res = "N/A"
-                v_enc = re.search(r'<tt:VideoEncoderConfiguration[^>]*>(.*?)</tt:VideoEncoderConfiguration>', block, re.DOTALL)
-                if v_enc:
-                    w = re.search(r'<tt:Width>(\d+)</tt:Width>', v_enc.group(1))
-                    h = re.search(r'<tt:Height>(\d+)</tt:Height>', v_enc.group(1))
-                    if w and h:
-                        res = f"{w.group(1)}x{h.group(1)}"
-                
-                if res in ["640x360", "N/A", ""] and uri and shutil.which('ffprobe'):
-                    logger.debug(f"Verifying resolution for {name} with ffprobe...")
-                    try:
-                        verify_uri = uri
-                        
-                        args = [
-                            'ffprobe',
-                            '-v', 'error',
-                            '-select_streams', 'v:0',
-                            '-show_entries', 'stream=width,height',
-                            '-of', 'csv=s=x:p=0',
-                            '-rtsp_transport', 'tcp',
-                            '-timeout', '3000000',
-                            verify_uri
-                        ]
-                        
-                        real_res = subprocess.check_output(
-                            args, 
-                            timeout=4, 
-                            stderr=subprocess.DEVNULL,
-                            universal_newlines=True
-                        ).strip()
-                        
-                        if "x" in real_res and real_res != res:
-                            logger.info(f"FFprobe detected different resolution for {name}: {res} -> {real_res}")
-                            res = real_res
-                        elif "x" in real_res:
-                            logger.debug(f"FFprobe confirmed resolution: {real_res}")
-                            
-                    except subprocess.TimeoutExpired:
-                        logger.warning(f"FFprobe timeout for {name}")
-                    except subprocess.CalledProcessError as e:
-                        logger.debug(f"FFprobe error for {name}: {e}")
-                    except Exception as e:
-                        logger.error(f"FFprobe unexpected error for {name}: {e}")
-                
-                logger.debug(f"Profile: {name}, token={token}, res={res}, uri={uri[:50]}...")
-                
-                profiles.append(CameraProfile(
-                    name=name,
-                    token=token,
-                    uri=uri,
-                    res=res
-                ))
-            
-            logger.info(f"Retrieved {len(profiles)} profiles")
-            return (profiles, xml)
 
-        except requests.exceptions.ConnectionError as e:
-            logger.error(f"ONVIF connection error for {self.cam.ip}:{self.cam.ports.onvif}: {e}")
+        logger.info(f"Getting ONVIF profiles from {url}")
+
+        # Używamy nowej, bezpiecznej metody z rozdzielonym timeoutem
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.5))
+        if xml is None:
+            # Błąd został już zalogowany wewnątrz _send_onvif_request
             return ([], "")
-        except requests.exceptions.Timeout:
-            logger.error(f"ONVIF timeout for {self.cam.ip}:{self.cam.ports.onvif}")
-            return ([], "")
-        except Exception as e:
-            if DEBUG_MODE:
-                logger.exception(f"ONVIF GetProfiles error: {e}")
-            else:
-                logger.error(f"ONVIF GetProfiles error: {e}")
-            return ([], "")
+
+        logger.debug(f"XML response (first 200 chars): {xml[:200]}")
+
+        profiles = []
+        blocks = re.findall(r'<trt:Profiles[^>]*token="([^"]+)"[^>]*>(.*?)</trt:Profiles>', xml, re.DOTALL)
+        logger.debug(f"Found {len(blocks)} profile blocks")
+
+        for token, block in blocks:
+            name_match = re.search(r'<tt:Name>([^<]+)</tt:Name>', block)
+            name = name_match.group(1) if name_match else "Unknown"
+
+            uri = self._get_stream_uri(token)
+
+            res = "N/A"
+            v_enc = re.search(r'<tt:VideoEncoderConfiguration[^>]*>(.*?)</tt:VideoEncoderConfiguration>', block, re.DOTALL)
+            if v_enc:
+                w = re.search(r'<tt:Width>(\d+)</tt:Width>', v_enc.group(1))
+                h = re.search(r'<tt:Height>(\d+)</tt:Height>', v_enc.group(1))
+                if w and h:
+                    res = f"{w.group(1)}x{h.group(1)}"
+
+            if res in ["640x360", "N/A", ""] and uri and shutil.which('ffprobe'):
+                logger.debug(f"Verifying resolution for {name} with ffprobe...")
+                try:
+                    verify_uri = uri
+
+                    args = [
+                        'ffprobe',
+                        '-v', 'error',
+                        '-select_streams', 'v:0',
+                        '-show_entries', 'stream=width,height',
+                        '-of', 'csv=s=x:p=0',
+                        '-rtsp_transport', 'tcp',
+                        '-timeout', '3000000',
+                        verify_uri
+                    ]
+
+                    real_res = subprocess.check_output(
+                        args,
+                        timeout=4,
+                        stderr=subprocess.DEVNULL,
+                        universal_newlines=True
+                    ).strip()
+
+                    if "x" in real_res and real_res != res:
+                        logger.info(f"FFprobe detected different resolution for {name}: {res} -> {real_res}")
+                        res = real_res
+                    elif "x" in real_res:
+                        logger.debug(f"FFprobe confirmed resolution: {real_res}")
+
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"FFprobe timeout for {name}")
+                except subprocess.CalledProcessError as e:
+                    logger.debug(f"FFprobe error for {name}: {e}")
+                except Exception as e:
+                    logger.error(f"FFprobe unexpected error for {name}: {e}")
+
+            logger.debug(f"Profile: {name}, token={token}, res={res}, uri={uri[:50]}...")
+
+            profiles.append(CameraProfile(
+                name=name,
+                token=token,
+                uri=uri,
+                res=res
+            ))
+
+        logger.info(f"Retrieved {len(profiles)} profiles")
+        return (profiles, xml)
     
     def _get_stream_uri(self, token: str) -> str:
         token = html.escape(token)
@@ -2225,45 +2264,42 @@ class ONVIFClient:
 </trt:GetStreamUri>
 </s:Body>
 </s:Envelope>'''
-        
+
         logger.debug(f"Getting URI for token {token}")
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=body, timeout=4)
-            
-            if r.status_code == 200 and '<tt:Uri>' in r.text:
-                uri = r.text.split('<tt:Uri>')[1].split('</tt:Uri>')[0].strip()
-                if "://" in uri:
-                    proto, rest = uri.split('://', 1)
-                    host_part = rest.split('/')[0].split('@')[-1]
-                    host_only = host_part.split(':')[0]
 
-                    bad_hosts = ('', '0.0.0.0', '127.0.0.1', 'localhost')
-                    if host_only in bad_hosts:
-                        if host_part and ':' in host_part:
-                            port_str = host_part.split(':', 1)[1]
-                            good_host = f"{self.cam.ip}:{port_str}"
-                        else:
-                            good_host = self.cam.ip
-                        if rest.startswith('/'):
-                            rest = good_host + rest
-                        else:
-                            rest = rest.replace(host_part, good_host, 1)
-                        logger.debug(f"URI bad host '{host_part}' -> '{good_host}'")
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.5))
+        if xml is None:
+            return ""
 
-                    uri = f"{proto}://{rest}"
-                    auth_uri = f"{proto}://{self.cam.user}:{self.cam.password}@{rest}"
-                    safe_uri = re.sub(r'(://)[^:]+:[^@]+(@)', r'\1*:*\2', auth_uri)
-                    logger.debug(f"URI with auth: {safe_uri[:60]}...")
-                    return auth_uri
-                logger.debug(f"URI without protocol: {uri}")
-                return uri
-            else:
-                logger.warning(f"GetStreamUri returned {r.status_code}")
-        except Exception as e:
-            logger.debug(f"GetStreamUri error: {e}")
-        
+        if '<tt:Uri>' in xml:
+            uri = xml.split('<tt:Uri>')[1].split('</tt:Uri>')[0].strip()
+            if "://" in uri:
+                proto, rest = uri.split('://', 1)
+                host_part = rest.split('/')[0].split('@')[-1]
+                host_only = host_part.split(':')[0]
+
+                bad_hosts = ('', '0.0.0.0', '127.0.0.1', 'localhost')
+                if host_only in bad_hosts:
+                    if host_part and ':' in host_part:
+                        port_str = host_part.split(':', 1)[1]
+                        good_host = f"{self.cam.ip}:{port_str}"
+                    else:
+                        good_host = self.cam.ip
+                    if rest.startswith('/'):
+                        rest = good_host + rest
+                    else:
+                        rest = rest.replace(host_part, good_host, 1)
+                    logger.debug(f"URI bad host '{host_part}' -> '{good_host}'")
+
+                uri = f"{proto}://{rest}"
+                auth_uri = f"{proto}://{self.cam.user}:{self.cam.password}@{rest}"
+                safe_uri = re.sub(r'(://)[^:]+:[^@]+(@)', r'\1*:*\2', auth_uri)
+                logger.debug(f"URI with auth: {safe_uri[:60]}...")
+                return auth_uri
+            logger.debug(f"URI without protocol: {uri}")
+            return uri
+
+        logger.warning(f"GetStreamUri response missing <tt:Uri>")
         return ""
     
     def move_continuous(self, token: str, pan: float, tilt: float, zoom: float) -> bool:
@@ -2276,17 +2312,11 @@ class ONVIFClient:
 <tt:Zoom x="{zoom:.2f}"/>
 </tptz:Velocity>
 </tptz:ContinuousMove>'''
-        
+
         envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>{self._get_auth_header()}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=envelope, timeout=2)
-            logger.debug(f"Continuous move: HTTP {r.status_code}")
-            return r.status_code == 200
-        except Exception as e:
-            logger.debug(f"Move error: {e}")
-            return False
+
+        xml = self._send_onvif_request(url, envelope, timeout=(1.0, 2.0))
+        return xml is not None
     
     def stop(self, token: str) -> bool:
         token = html.escape(token)
@@ -2296,17 +2326,11 @@ class ONVIFClient:
 <tptz:PanTilt>true</tptz:PanTilt>
 <tptz:Zoom>true</tptz:Zoom>
 </tptz:Stop>'''
-        
+
         envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>{self._get_auth_header()}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=envelope, timeout=2)
-            logger.debug(f"Stop: HTTP {r.status_code}")
-            return r.status_code == 200
-        except Exception as e:
-            logger.debug(f"Stop error: {e}")
-            return False
+
+        xml = self._send_onvif_request(url, envelope, timeout=(1.0, 2.0))
+        return xml is not None
     
     def get_position(self, token: str) -> Optional[PresetPosition]:
         token = html.escape(token)
@@ -2319,34 +2343,29 @@ class ONVIFClient:
 </tptz:GetStatus>
 </s:Body>
 </s:Envelope>'''
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=body, timeout=3)
-            
-            if r.status_code == 200:
-                pan_tilt = re.search(
-                    r'<tt:PanTilt[^/]* x="([^"]+)"[^/]* y="([^"]+)"',
-                    r.text
-                )
-                zoom_tag = re.search(
-                    r'<tt:Zoom[^/]* x="([^"]+)"',
-                    r.text
-                )
-                
-                if pan_tilt:
-                    pos = PresetPosition(
-                        pan=float(pan_tilt.group(1)),
-                        tilt=float(pan_tilt.group(2)),
-                        zoom=float(zoom_tag.group(1)) if zoom_tag else 0.0
-                    )
-                    logger.debug(f"Position: P={pos.pan:.2f}, T={pos.tilt:.2f}, Z={pos.zoom:.2f}")
-                    return pos
-        except (ValueError, AttributeError) as e:
-            logger.debug(f"Get position parse error: {e}")
-        except Exception as e:
-            logger.debug(f"Get position error: {e}")
-        
+
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 2.5))
+        if xml is None:
+            return None
+
+        pan_tilt = re.search(
+            r'<tt:PanTilt[^/]* x="([^"]+)"[^/]* y="([^"]+)"',
+            xml
+        )
+        zoom_tag = re.search(
+            r'<tt:Zoom[^/]* x="([^"]+)"',
+            xml
+        )
+
+        if pan_tilt:
+            pos = PresetPosition(
+                pan=float(pan_tilt.group(1)),
+                tilt=float(pan_tilt.group(2)),
+                zoom=float(zoom_tag.group(1)) if zoom_tag else 0.0
+            )
+            logger.debug(f"Position: P={pos.pan:.2f}, T={pos.tilt:.2f}, Z={pos.zoom:.2f}")
+            return pos
+
         return None
     
     def absolute_move(self, token: str, pos: PresetPosition) -> bool:
@@ -2364,15 +2383,9 @@ class ONVIFClient:
 </tptz:AbsoluteMove>
 </s:Body>
 </s:Envelope>'''
-        
-        try:
-            session = self._get_session()
-            r = session.post(url, data=body, timeout=3)
-            logger.debug(f"Absolute move: HTTP {r.status_code}")
-            return r.status_code == 200
-        except Exception as e:
-            logger.debug(f"Absolute move error: {e}")
-            return False
+
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
+        return xml is not None
 
     def _get_video_source_tokens(self) -> list:
         url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/Media"
@@ -2382,17 +2395,18 @@ class ONVIFClient:
             f'<s:Header>{self._get_auth_header()}</s:Header>'
             f'<s:Body><trt:GetVideoSources/></s:Body></s:Envelope>'
         )
-        try:
-            r = self._get_session().post(url, data=body, timeout=3)
-            if r.status_code == 200:
-                tokens = re.findall(r'<trt:VideoSources[^>]*token="([^"]+)"', r.text)
-                if not tokens:
-                    tokens = re.findall(r'token="([^"]+)"', r.text)
-                if tokens:
-                    logger.debug(f"VideoSource tokens: {tokens}")
-                    return tokens
-        except Exception as e:
-            logger.debug(f"GetVideoSources error: {e}")
+
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
+        if xml is None:
+            return ["VideoSource_1", "VideoSourceToken_1", "000", "0", "1"]
+
+        tokens = re.findall(r'<trt:VideoSources[^>]*token="([^"]+)"', xml)
+        if not tokens:
+            tokens = re.findall(r'token="([^"]+)"', xml)
+        if tokens:
+            logger.debug(f"VideoSource tokens: {tokens}")
+            return tokens
+
         return ["VideoSource_1", "VideoSourceToken_1", "000", "0", "1"]
 
     def _imaging_endpoint(self) -> str:
@@ -2434,7 +2448,6 @@ class ONVIFClient:
             "http://www.onvif.org/ver20/imaging/wsdl",
             "http://www.onvif.org/ver10/imaging/wsdl",
         ]
-        session = self._get_session()
         dead_endpoints = set()
 
         for url in endpoints:
@@ -2451,49 +2464,48 @@ class ONVIFClient:
                         f'<timg:VideoSourceToken>{vs_token}</timg:VideoSourceToken>'
                         f'</timg:GetImagingSettings></s:Body></s:Envelope>'
                     )
-                    try:
-                        r = session.post(url, data=body, timeout=2)
-                        if r.status_code == 200 and ("Brightness" in r.text or "Contrast" in r.text):
-                            xml = r.text.replace("\n", "").replace("\r", "")
-                            
-                            # Fixed: extract values safely with type checking
-                            brightness = "N/A"
-                            contrast = "N/A"
-                            saturation = "N/A"
-                            sharpness = "N/A"
-                            
-                            b_match = re.search(r'<tt:Brightness>([^<]+)</tt:Brightness>', xml)
-                            if b_match:
-                                brightness = b_match.group(1)
-                            
-                            c_match = re.search(r'<tt:Contrast>([^<]+)</tt:Contrast>', xml)
-                            if c_match:
-                                contrast = c_match.group(1)
-                                
-                            s_match = re.search(r'<tt:ColorSaturation>([^<]+)</tt:ColorSaturation>', xml)
-                            if s_match:
-                                saturation = s_match.group(1)
-                                
-                            sh_match = re.search(r'<tt:Sharpness>([^<]+)</tt:Sharpness>', xml)
-                            if sh_match:
-                                sharpness = sh_match.group(1)
-                            
-                            logger.debug(f"Imaging OK: token={vs_token} url={url}")
-                            return {
-                                "brightness": brightness,
-                                "contrast":   contrast,
-                                "saturation": saturation,
-                                "sharpness":  sharpness,
-                                "vs_token":   vs_token,
-                                "endpoint":   url,
-                                "ns":         "v2.0" if "ver20" in ns else "v1.0",
-                            }
-                    except requests.exceptions.ConnectionError:
-                        logger.debug(f"Imaging endpoint dead: {url}")
-                        dead_endpoints.add(url)
-                        break
-                    except Exception as e:
-                        logger.debug(f"Imaging attempt {url} token={vs_token}: {e}")
+
+                    xml = self._send_onvif_request(url, body, timeout=(1.5, 2.5))
+                    if xml is None:
+                        if "ConnectionError" in str(xml) or "ConnectTimeout" in str(xml):
+                            dead_endpoints.add(url)
+                            break
+                        continue
+
+                    if "Brightness" in xml or "Contrast" in xml:
+                        xml_clean = xml.replace("\n", "").replace("\r", "")
+
+                        brightness = "N/A"
+                        contrast = "N/A"
+                        saturation = "N/A"
+                        sharpness = "N/A"
+
+                        b_match = re.search(r'<tt:Brightness>([^<]+)</tt:Brightness>', xml_clean)
+                        if b_match:
+                            brightness = b_match.group(1)
+
+                        c_match = re.search(r'<tt:Contrast>([^<]+)</tt:Contrast>', xml_clean)
+                        if c_match:
+                            contrast = c_match.group(1)
+
+                        s_match = re.search(r'<tt:ColorSaturation>([^<]+)</tt:ColorSaturation>', xml_clean)
+                        if s_match:
+                            saturation = s_match.group(1)
+
+                        sh_match = re.search(r'<tt:Sharpness>([^<]+)</tt:Sharpness>', xml_clean)
+                        if sh_match:
+                            sharpness = sh_match.group(1)
+
+                        logger.debug(f"Imaging OK: token={vs_token} url={url}")
+                        return {
+                            "brightness": brightness,
+                            "contrast":   contrast,
+                            "saturation": saturation,
+                            "sharpness":  sharpness,
+                            "vs_token":   vs_token,
+                            "endpoint":   url,
+                            "ns":         "v2.0" if "ver20" in ns else "v1.0",
+                        }
         return {}
 
     def get_snapshot_uri(self, token: str) -> str:
@@ -2506,14 +2518,14 @@ class ONVIFClient:
             f'<trt:ProfileToken>{token}</trt:ProfileToken>'
             f'</trt:GetSnapshotUri></s:Body></s:Envelope>'
         )
-        try:
-            r = self._get_session().post(url, data=body, timeout=4)
-            if r.status_code == 200:
-                m = re.search(r'<tt:Uri>([^<]+)</tt:Uri>', r.text)
-                if m:
-                    return m.group(1).strip()
-        except Exception as e:
-            logger.debug(f"GetSnapshotUri error: {e}")
+
+        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
+        if xml is None:
+            return ""
+
+        m = re.search(r'<tt:Uri>([^<]+)</tt:Uri>', xml)
+        if m:
+            return m.group(1).strip()
         return ""
 
 # =============================================================================
@@ -6453,9 +6465,7 @@ class PTZMasterApp:
         logger.info(f"Added scanner: {name} vidpid={vidpid_str} device={device_str}")
 
     def _show_scanner_help(self):
-        """Display scanner help with right edge fixed at column 78.
-           Redraws automatically when terminal is resized.
-           Mouse click on (ESC) Quit closes the help."""
+        """Display scanner help with right edge fixed at column 78."""
         mouse_off()
         fd = sys.stdin.fileno()
         old_term = termios.tcgetattr(fd)
@@ -6464,17 +6474,18 @@ class PTZMasterApp:
         resized = [False]
         def handle_winch(sig, frame):
             resized[0] = True
-        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
+        old_winch = None # Inicjalizujemy pustą zmienną
 
         try:
-            # Ustawiamy tryb RAW dla poprawnej obsługi klawiszy i myszy
+            # Przypisujemy sygnał dopiero wewnątrz bloku try
+            old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
             tty.setraw(fd)
-            # Włączamy śledzenie myszy (SGR)
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
 
             RIGHT_EDGE = 78
-            # footer_len liczymy bez kolorów ANSI dla poprawnego pozycjonowania
             footer_label = f"v{VERSION}  (ESC) Quit "
             footer_len = len(footer_label)
 
@@ -6570,8 +6581,9 @@ class PTZMasterApp:
                                 return
 
         finally:
-            # Przywracanie ustawień terminala
-            signal.signal(signal.SIGWINCH, old_winch)
+            # Przywracanie ustawień terminala i sygnałów – teraz w 100% bezpieczne
+            if old_winch is not None:
+                signal.signal(signal.SIGWINCH, old_winch)
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
