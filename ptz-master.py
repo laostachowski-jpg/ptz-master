@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.32"
+VERSION = "9.0.34"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1076,8 +1076,8 @@ def _extract_clip(filepath: str, start: float, end: float,
 
 def ansilen(s: str) -> int:
     """Dokładne liczenie długości dla pozycjonowania myszy"""
-    # Usuń kody ANSI kolorów
-    clean = re.sub(r'\[[0-9;]*[a-zA-Z]', '', s)
+    # Poprawiony regex usuwający kody ANSI
+    clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', s)
     total = 0
     for c in clean:
         cp = ord(c)
@@ -6053,7 +6053,7 @@ class PTZMasterApp:
             )
             dest_str = str(cam.scan_dest)
             row4 = f" {YLW}(v){RST} Viewer: {GRN}{cam.scan_viewer:<10}{RST}" + \
-                   f"  {YLW}(t){RST} Dest  : {GRN}{dest_str}{RST}"
+                   f"   {YLW}(t){RST} Dest  : {GRN}{dest_str}{RST}"
 
             for r in (row1, row2, row3, row4):
                 cur_len = ansilen(r)
@@ -6077,21 +6077,22 @@ class PTZMasterApp:
             while running:
               _draw()
               key = get_key()
+              _mk = key  # domyślnie: klawisz z klawiatury
 
-              if key == 'm':
+              if _mk == 'm':
                   cam.scan_mode = _cycled(MODES, cam.scan_mode)
                   self.config_mgr.save()
-              elif key == 'd':
+              elif _mk == 'd':
                   try:
                       idx = DPIS.index(cam.scan_dpi)
                   except ValueError:
                       idx = 4
                   cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
                   self.config_mgr.save()
-              elif key == 'f':
+              elif _mk == 'f':
                   cam.scan_format = _cycled(FORMATS, cam.scan_format)
                   self.config_mgr.save()
-              elif key == 'a':
+              elif _mk == 'a':
                   items = list(AREAS.keys())
                   ai = select_menu(items, selected=0, title="Scan area")
                   if ai >= 0:
@@ -6103,7 +6104,7 @@ class PTZMasterApp:
                       else:
                           cam.scan_area = AREAS[key_]
                       self.config_mgr.save()
-              elif key == 'r':
+              elif _mk == 'r':
                   items = list(RESIZES.keys())
                   ri = select_menu(items, selected=0, title="Output resize")
                   if ri >= 0:
@@ -6115,29 +6116,29 @@ class PTZMasterApp:
                       else:
                           cam.scan_resize = RESIZES[key_]
                       self.config_mgr.save()
-              elif key == 'c':
+              elif _mk == 'c':
                   val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
                   try:
                       cam.scan_quality = max(0, min(100, int(val)))
                       self.config_mgr.save()
                   except ValueError:
                       pass
-              elif key == 'v':
+              elif _mk == 'v':
                   cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
                   self.config_mgr.save()
-              elif key == 't':
+              elif _mk == 't':
                   new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
                   if new_dest:
                       cam.scan_dest = new_dest
                       self.config_mgr.save()
-              elif key == 'n':
+              elif _mk == 'n':
                   new_desc = self._edit_param("Description (added to filename)", cam.scan_desc)
                   if new_desc is not None:
                       cam.scan_desc = new_desc
                       self.config_mgr.save()
-              elif key == 'h':
+              elif _mk == 'h':
                   date_format = 1 - date_format
-              elif key == 'x':
+              elif _mk == 'x':
                   if num_padding == 0:
                       num_padding = 2
                   elif num_padding == 2:
@@ -6145,7 +6146,7 @@ class PTZMasterApp:
                   else:
                       num_padding = 0
                   self.config_mgr.save()
-              elif key == 'y':
+              elif _mk == 'y':
                   val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
                   try:
                       num = int(val)
@@ -6156,7 +6157,7 @@ class PTZMasterApp:
                   except ValueError:
                       pass
 
-              elif key == 'p':
+              elif _mk == 'p':
                   self.config_mgr.save()
                   _draw()
 
@@ -6217,12 +6218,34 @@ class PTZMasterApp:
                   else:
                       notify("Scan failed", "error")
 
-              elif key == '?':
+              elif _mk == '?':
                   self._show_scanner_help()
                   _draw()
               elif key in ('q', 'Q'):
                   running = False
-              elif key == Key.ESC:
+              elif isinstance(key, MouseEvent) and not key.release:
+                  r, c = key.row, key.col
+                  _C1 = c <= 26; _C2 = 27 <= c <= 52; _C3 = c >= 53
+                  _mk = None  # mapped key
+                  if r == 4:
+                      if _C1: _mk = 'm'
+                      elif _C2: _mk = 'd'
+                      elif _C3: _mk = 'a'
+                  elif r == 5:
+                      if _C1: _mk = 'f'
+                      elif _C2: _mk = 'r'
+                      elif _C3: _mk = 'c'
+                  elif r == 6:
+                      if _C1: _mk = 'h'
+                      elif _C2: _mk = 'n'
+                      elif _C3: _mk = 'x'
+                  elif r == 7:
+                      _mk = 'v' if c <= 40 else 't'
+                  elif r == 9:
+                      if c <= 10: _mk = 'p'
+                      elif 11 <= c <= 20: _mk = '?'
+                      else: running = False; continue
+              elif _mk == Key.ESC:
                   running = False
         finally:
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
