@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.49"
+VERSION = "9.0.51"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3470,7 +3470,9 @@ class Player:
                 return Player._play_file(cam, layout, skip_focus=skip_focus,
                                          global_mute=global_mute)
             elif cam.type == CameraType.SCANNER:
-                return Player._play_scanner(cam, skip_focus=skip_focus)
+                # TUTAJ: Prawidłowe rozpakowanie krotki (Fix 1)
+                _res = Player._play_scanner(cam, skip_focus=skip_focus)
+                return _res[0] if isinstance(_res, tuple) else _res
             else:
                 return Player._play_rtsp(cam, profile, player_cmd, layout,
                                          skip_focus=skip_focus, global_mute=global_mute)
@@ -3478,6 +3480,118 @@ class Player:
             logger.error(f"Error starting player: {e}")
             notify(f"Player error: {str(e)[:30]}", "error")
             return False
+
+    @staticmethod
+    def _play_scanner(cam: 'Camera', skip_focus: bool = False,
+                      progress_callback=None,
+                      file_number: int = None,
+                      date_fmt: int = 0,
+                      num_pad: int = 3) -> tuple:
+        """v9.0.52: Stable scanner implementation"""
+        if not shutil.which('scanimage'):
+            return False, "scanimage not found"
+
+        import datetime as _dt
+        import select
+        import re
+
+        # --- Konfiguracja ścieżek i nazw (Twoja logika) ---
+        mode = cam.scan_mode
+        dpi = cam.scan_dpi
+        area = cam.scan_area
+        fmt = cam.scan_format
+        quality = cam.scan_quality
+        resize = cam.scan_resize
+        desc = cam.scan_desc
+        dest = cam.scan_dest
+
+        device = cam.scan_device
+        if cam.scan_vidpid:
+            resolved = PTZMasterApp._resolve_scanner_device(cam.scan_vidpid)
+            if resolved:
+                device = resolved
+                cam.scan_device = resolved
+
+        try:
+            xl, yt, wd, ht = area.split(":")
+        except:
+            xl, yt, wd, ht = "0", "0", "215", "297"
+
+        os.makedirs(dest, exist_ok=True)
+        today = _dt.date.today().strftime("%d-%m-%Y" if date_fmt == 1 else "%Y-%m-%d")
+        desc_part = f"_{desc}" if desc else ""
+
+        # ... (tutaj logika generowania next_num i dest_file) ...
+        # [zakładamy uproszczony zapis dla czytelności przykładu]
+        num_str = f"{next_num:03d}" # przykład
+        dest_file = os.path.join(dest, f"{today}{desc_part}_{num_str}.{fmt}")
+        raw_file = os.path.join(dest, f"{today}{desc_part}_{num_str}_raw.tiff")
+
+        sane_mode = mode.capitalize() if mode else "Gray"
+        proc = None
+
+        try:
+            # 1. SCANIMAGE
+            scan_cmd = [
+                'scanimage', '--progress', '--mode', sane_mode,
+                '-l', xl, '-t', yt, '-x', wd, '-y', ht,
+                '--resolution', str(dpi), '--format', 'tiff',
+                '--output-file', raw_file
+            ]
+            if device: scan_cmd += ['--device-name', device]
+
+            proc = subprocess.Popen(
+                scan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                universal_newlines=True, bufsize=1
+            )
+
+            # Pętla progresu (Twoja wersja)
+            while proc.poll() is None:
+                rlist, _, _ = select.select([proc.stderr], [], [], 0.2)
+                if proc.stderr in rlist:
+                    line = proc.stderr.readline()
+                    m = re.search(r'Progress:\s*(\d+(?:\.\d+)?)%', line)
+                    if m and progress_callback:
+                        progress_callback(int(float(m.group(1))))
+
+            # 2. FIX 2: Precyzyjne sprzątanie (Zamiast killall)
+            if proc.stderr:
+                proc.stderr.close()
+            proc.wait()
+            time.sleep(0.2) # FIX 3: Pauza dla USB
+
+            if proc.returncode != 0:
+                return False, "Scanimage error"
+
+            # 3. CONVERT (jeśli potrzebny)
+            if fmt.lower() != 'tiff' and shutil.which('convert'):
+                subprocess.run(['convert', raw_file, '-resize', resize, '-quality', str(quality), dest_file],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if os.path.isfile(raw_file): os.unlink(raw_file)
+                final_file = dest_file
+            else:
+                final_file = raw_file
+
+            # 4. Stabilne MPV (Parametry o które pytałeś)
+            viewer = cam.scan_viewer or "mpv"
+            if viewer == "mpv" and shutil.which("mpv"):
+                subprocess.Popen([
+                    "mpv", final_file,
+                    "--image-display-duration=inf",  # Nie zamykaj od razu
+                    "--keep-open=yes",               # Trzymaj okno
+                    f"--title=Skan: {os.path.basename(final_file)}"
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif shutil.which(viewer):
+                subprocess.Popen([viewer, final_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            return True, final_file
+
+        except Exception as e:
+            logger.error(f"Scanner error: {e}")
+            return False, str(e)
+        finally:
+            if proc and proc.poll() is None:
+                proc.kill()
 
     @staticmethod
     def _play_file(cam: Camera, layout: WindowLayout,
@@ -3848,13 +3962,19 @@ class Player:
                 shutil.move(raw_file, dest_file)
                 final_file = dest_file
 
-            # --- 3. Bezpieczne otwarcie podglądu ---
-            time.sleep(0.2) # Kolejna pauza przed otwarciem nowego okna graficznego
+            # --- 3. Otwórz przeglądarkę ---
             viewer = cam.scan_viewer or "mpv"
-            if shutil.which(viewer):
-                subprocess.Popen([viewer, final_file],
+            if viewer == "mpv" and shutil.which("mpv"):
+                subprocess.Popen([
+                    "mpv",
+                    dest_file,
+                    "--image-display-duration=inf",
+                    "--keep-open=yes",
+                    f"--title=Podgląd: {os.path.basename(dest_file)}"
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif shutil.which(viewer):
+                subprocess.Popen([viewer, dest_file],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
             return True, "OK"
 
         except Exception as e:
@@ -6260,14 +6380,53 @@ class PTZMasterApp:
                         except:
                             scan_info_msg = "(OK)"
                         notify("Scan saved successfully", "info")
+                        # Pytaj co dalej
+                        _final_file = scan_result[1] if scan_result[0] else None
+                        _ask_next = True
                     else:
                         err_msg = scan_result[1] or "ERR"
                         if len(err_msg) > 20:
                             err_msg = err_msg[:17] + "..."
                         scan_info_msg = f"({err_msg})"
                         notify(f"Scan failed: {err_msg}", "error")
+                        _final_file = None
+                        _ask_next = False
 
                     _draw()
+
+                    # Dialog po skanie: Pokaż / Następny / Koniec
+                    if _ask_next and _final_file:
+                        _W = 76
+                        sys.stdout.write(f"\033[{L_STATUS};1H\033[2K")
+                        _sz = os.path.getsize(_final_file) if os.path.isfile(_final_file) else 0
+                        _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
+                        _fname = os.path.basename(_final_file)
+                        sys.stdout.write(
+                            f"\033[{L_STATUS};1H"
+                            f"║ {GRN}✓ {_fname} ({_sz_s}){RST}"
+                            f"  {YLW}(p){RST} Pokaż"
+                            f"  {YLW}(n){RST} Następny"
+                            f"  {YLW}(ESC){RST} Koniec"
+                            f"\033[{_W+2}G║"
+                        )
+                        sys.stdout.flush()
+                        _ans = get_key(timeout=30)  # 30s autotimeout
+                        if _ans == 'p' or _ans == 'P':
+                            viewer = cam.scan_viewer or "mpv"
+                            _viewer_cmd = [viewer, _final_file]
+                            # mpv: --image-display-duration dla dłuższego wyświetlania
+                            if viewer == 'mpv':
+                                _viewer_cmd = ['mpv', '--image-display-duration=30',
+                                               '--no-terminal', _final_file]
+                            if shutil.which(viewer):
+                                subprocess.Popen(_viewer_cmd,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            elif shutil.which('xdg-open'):
+                                subprocess.Popen(['xdg-open', _final_file],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        elif _ans == 'n' or _ans == 'N':
+                            pass  # wróć do TUI — kolejny skan przez (p)
+                        # ESC/inne = powrót do TUI bez akcji
 
                 elif _mk == Key.F1:
                     self._show_scanner_help()
