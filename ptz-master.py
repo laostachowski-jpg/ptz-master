@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.51"
+VERSION = "9.0.52"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3487,7 +3487,7 @@ class Player:
                       file_number: int = None,
                       date_fmt: int = 0,
                       num_pad: int = 3) -> tuple:
-        """v9.0.52: Stable scanner implementation"""
+        """v9.0.52: Stabilna obsługa skanowania z poprawkami bezpieczeństwa."""
         if not shutil.which('scanimage'):
             return False, "scanimage not found"
 
@@ -3495,7 +3495,6 @@ class Player:
         import select
         import re
 
-        # --- Konfiguracja ścieżek i nazw (Twoja logika) ---
         mode = cam.scan_mode
         dpi = cam.scan_dpi
         area = cam.scan_area
@@ -3521,9 +3520,25 @@ class Player:
         today = _dt.date.today().strftime("%d-%m-%Y" if date_fmt == 1 else "%Y-%m-%d")
         desc_part = f"_{desc}" if desc else ""
 
-        # ... (tutaj logika generowania next_num i dest_file) ...
-        # [zakładamy uproszczony zapis dla czytelności przykładu]
-        num_str = f"{next_num:03d}" # przykład
+        if file_number is not None:
+            next_num = file_number
+        else:
+            pattern = f"{today}{desc_part}_*.{fmt}"
+            import glob as _gl
+            existing = _gl.glob(os.path.join(dest, pattern))
+            nums = []
+            for f in existing:
+                try:
+                    n = int(os.path.basename(f).split("_")[-1].split(".")[0])
+                    nums.append(n)
+                except: pass
+            next_num = max(nums, default=0) + 1
+
+        if num_pad == -1:  num_str = ""
+        elif num_pad == 1: num_str = str(next_num)
+        elif num_pad == 2: num_str = f"{next_num:02d}"
+        else:              num_str = f"{next_num:03d}"
+
         dest_file = os.path.join(dest, f"{today}{desc_part}_{num_str}.{fmt}")
         raw_file = os.path.join(dest, f"{today}{desc_part}_{num_str}_raw.tiff")
 
@@ -3531,7 +3546,6 @@ class Player:
         proc = None
 
         try:
-            # 1. SCANIMAGE
             scan_cmd = [
                 'scanimage', '--progress', '--mode', sane_mode,
                 '-l', xl, '-t', yt, '-x', wd, '-y', ht,
@@ -3541,11 +3555,15 @@ class Player:
             if device: scan_cmd += ['--device-name', device]
 
             proc = subprocess.Popen(
-                scan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                scan_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
                 universal_newlines=True, bufsize=1
             )
 
-            # Pętla progresu (Twoja wersja)
+            # Pętla progresu
             while proc.poll() is None:
                 rlist, _, _ = select.select([proc.stderr], [], [], 0.2)
                 if proc.stderr in rlist:
@@ -3554,31 +3572,54 @@ class Player:
                     if m and progress_callback:
                         progress_callback(int(float(m.group(1))))
 
-            # 2. FIX 2: Precyzyjne sprzątanie (Zamiast killall)
+            # Bezpieczne zakończenie – tylko ten proces, nie globalny killall
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            else:
+                proc.wait()
+
             if proc.stderr:
                 proc.stderr.close()
-            proc.wait()
-            time.sleep(0.2) # FIX 3: Pauza dla USB
+            time.sleep(0.2)
 
             if proc.returncode != 0:
-                return False, "Scanimage error"
+                return False, f"Scanimage error {proc.returncode}"
 
-            # 3. CONVERT (jeśli potrzebny)
+            # Konwersja jeśli potrzeba
             if fmt.lower() != 'tiff' and shutil.which('convert'):
-                subprocess.run(['convert', raw_file, '-resize', resize, '-quality', str(quality), dest_file],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                if os.path.isfile(raw_file): os.unlink(raw_file)
-                final_file = dest_file
+                try:
+                    subprocess.run(
+                        ['convert', raw_file, '-resize', resize, '-quality', str(quality), dest_file],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                        timeout=60, check=True
+                    )
+                    if os.path.isfile(raw_file):
+                        try:
+                            os.unlink(raw_file)
+                        except OSError:
+                            pass
+                    final_file = dest_file
+                except subprocess.TimeoutExpired:
+                    logger.error("convert timed out after 60s")
+                    return False, "convert timeout"
+                except subprocess.CalledProcessError as e:
+                    logger.error(f"convert failed: {e.stderr}")
+                    return False, "convert error"
             else:
                 final_file = raw_file
 
-            # 4. Stabilne MPV (Parametry o które pytałeś)
+            # Otwórz przeglądarkę
             viewer = cam.scan_viewer or "mpv"
             if viewer == "mpv" and shutil.which("mpv"):
                 subprocess.Popen([
                     "mpv", final_file,
-                    "--image-display-duration=inf",  # Nie zamykaj od razu
-                    "--keep-open=yes",               # Trzymaj okno
+                    "--image-display-duration=inf",
+                    "--keep-open=yes",
                     f"--title=Skan: {os.path.basename(final_file)}"
                 ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif shutil.which(viewer):
@@ -3839,150 +3880,6 @@ class Player:
 
         return True
 
-    @staticmethod
-    def _play_scanner(cam: 'Camera', skip_focus: bool = False,
-                      progress_callback=None,
-                      file_number: int = None,
-                      date_fmt: int = 0,
-                      num_pad: int = 3) -> tuple:
-        """
-        Wersja v9.0.50: Stabilna obsługa skanowania.
-        Naprawia błąd crashu X11 poprzez wymuszone czyszczenie procesów.
-        """
-        if not shutil.which('scanimage'):
-            return False, "scanimage not found"
-
-        import datetime as _dt
-        import select
-        import re
-
-        # --- Parametry wejściowe ---
-        mode    = cam.scan_mode
-        dpi     = cam.scan_dpi
-        area    = cam.scan_area
-        fmt     = cam.scan_format
-        quality = cam.scan_quality
-        resize  = cam.scan_resize
-        desc    = cam.scan_desc
-        dest    = cam.scan_dest
-        device  = cam.scan_device
-
-        # --- Logika nazewnictwa (z v49) ---
-        if date_fmt == 1:
-            today = _dt.date.today().strftime("%d-%m-%Y")
-        else:
-            today = _dt.date.today().strftime("%Y-%m-%d")
-
-        desc_part = f"_{desc}" if desc else ""
-
-        if file_number is not None:
-            next_num = file_number
-        else:
-            pattern = f"{today}{desc_part}_*.{fmt}"
-            import glob as _gl
-            existing = _gl.glob(os.path.join(dest, pattern))
-            nums = []
-            for f in existing:
-                try:
-                    n = int(os.path.basename(f).split("_")[-1].split(".")[0])
-                    nums.append(n)
-                except: pass
-            next_num = max(nums, default=0) + 1
-
-        if num_pad == -1:  num_str = ""
-        elif num_pad == 1: num_str = str(next_num)
-        elif num_pad == 2: num_str = f"{next_num:02d}"
-        else:              num_str = f"{next_num:03d}"
-
-        _sep      = f"_{num_str}" if num_str else ""
-        fname     = f"{today}{desc_part}{_sep}.{fmt}"
-        dest_file = os.path.join(dest, fname)
-        raw_file  = os.path.join(dest, f"{today}{desc_part}{_sep}_raw.tiff")
-
-        os.makedirs(dest, exist_ok=True)
-        sane_mode = mode.capitalize() if mode else "Gray"
-
-        try:
-            # --- 1. scanimage (wymuszone czyste wywołanie) ---
-            scan_cmd = [
-                'scanimage', '--progress', '--mode', sane_mode,
-                '-l', area.split(":")[0], '-t', area.split(":")[1],
-                '-x', area.split(":")[2], '-y', area.split(":")[3],
-                '--resolution', str(dpi), '--format', 'tiff',
-                '--output-file', raw_file
-            ]
-            if device: scan_cmd += ['--device-name', device]
-
-            logger.info(f"Scan START: {fname}")
-
-            # Flush stdout przed startem procesu zewnętrznego
-            sys.stdout.flush()
-
-            proc = subprocess.Popen(
-                scan_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                universal_newlines=True, bufsize=1
-            )
-
-            # Obsługa progresu (z v34/v49)
-            start_time = time.time()
-            while proc.poll() is None:
-                if time.time() - start_time > 300: # Timeout 5min
-                    proc.kill()
-                    return False, "Timeout"
-
-                rlist, _, _ = select.select([proc.stderr], [], [], 0.2)
-                if proc.stderr in rlist:
-                    line = proc.stderr.readline()
-                    if line:
-                        m = re.search(r'Progress:\s*(\d+(?:\.\d+)?)%', line)
-                        if m and progress_callback:
-                            progress_callback(int(float(m.group(1))))
-
-            # KRYTYCZNE CZYSZCZENIE PO SKANOWANIU
-            proc.stderr.close()
-            proc.wait()
-            os.system("killall -9 scanimage 2>/dev/null") # Twardy reset sesji USB
-            time.sleep(0.3) # Pauza synchronizacyjna dla X11
-
-            if proc.returncode != 0:
-                return False, f"Scan error {proc.returncode}"
-
-            # --- 2. convert ---
-            if fmt.lower() != 'tiff' and shutil.which('convert'):
-                conv_cmd = [
-                    'convert', raw_file,
-                    '-limit', 'memory', '512MiB',
-                    '-sharpen', '0x1.0', '-resize', resize,
-                    '-quality', str(quality), '-strip', dest_file
-                ]
-                subprocess.run(conv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                if os.path.exists(raw_file): os.unlink(raw_file)
-                final_file = dest_file
-            else:
-                shutil.move(raw_file, dest_file)
-                final_file = dest_file
-
-            # --- 3. Otwórz przeglądarkę ---
-            viewer = cam.scan_viewer or "mpv"
-            if viewer == "mpv" and shutil.which("mpv"):
-                subprocess.Popen([
-                    "mpv",
-                    dest_file,
-                    "--image-display-duration=inf",
-                    "--keep-open=yes",
-                    f"--title=Podgląd: {os.path.basename(dest_file)}"
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif shutil.which(viewer):
-                subprocess.Popen([viewer, dest_file],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True, "OK"
-
-        except Exception as e:
-            logger.exception("Scanner crash")
-            return False, str(e)
-        finally:
-            # Ostateczne sprzątanie śmieci
-            os.system("killall -9 scanimage convert 2>/dev/null")
 # =============================================================================
 # UI - MAIN INTERFACE
 # =============================================================================
@@ -6047,6 +5944,17 @@ class PTZMasterApp:
             notify("No scanner selected", "warning")
             return
 
+        # Sprawdź prawa zapisu do katalogu docelowego
+        dest_dir = cam.scan_dest or SCAN_DIR
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            if not os.access(dest_dir, os.W_OK):
+                notify(f"No write permission to {dest_dir}", "error")
+                return
+        except OSError as e:
+            notify(f"Cannot create dest dir: {e}", "error")
+            return
+
         MODES   = ["gray", "color", "lineart"]
         FORMATS = ["jpg", "png", "pdf", "tiff"]
         VIEWERS = ["mpv", "gwenview", "xdg-open", "eog", "feh"]
@@ -6327,10 +6235,13 @@ class PTZMasterApp:
 
                     scan_done = threading.Event()
                     scan_result = [False, ""]
+                    # Zapamiętaj oryginalne ustawienia terminala
+                    mouse_was_on = True
 
                     def update_progress(pct):
                         nonlocal scan_phase, scan_pct
-                        scan_phase = 2
+                        if scan_phase != 2:
+                            scan_phase = 2
                         scan_pct = pct
 
                     def scan_task():
@@ -6353,11 +6264,17 @@ class PTZMasterApp:
                         _draw()
                         time.sleep(0.2)
 
+                    # Przywróć ustawienia terminala nawet w przypadku błędu
                     sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
                     sys.stdout.flush()
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
 
-                    scan_phase = 3
+                    # Sprawdź, czy skanowanie zostało anulowane przez ESC
+                    if not scan_done.is_set():
+                        scan_phase = 0
+                        scan_ok[0] = False
+                    else:
+                        scan_phase = 3
                     scan_ok[0] = scan_result[0]
                     if scan_ok[0]:
                         try:
