@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.37"
+VERSION = "9.0.44"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4023,8 +4023,12 @@ class UI:
             display_name = prof.name
             res_display  = f" [{prof.res}]"
         l4     = f" 📺 {BLU}{display_name[:20]}{RST}{res_display}{preset_info}"
-        t_info = f" {YLW}(t){RST} Token: {BLU}{prof.token[:10] if prof.token else prof.name[:10]}{RST}"
-        rlines.append(("normal", f"│{pad(l4, W - ansilen(t_info))}{t_info}│"))
+        # Stała pozycja prawej ramki — token dopasowany do wolnego miejsca
+        # Prawa ramka │ na sztywno przez cursor jump — bez liczenia emoji/ANSI
+        _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=57 → 79)
+        _tok_raw   = prof.token if prof.token else prof.name
+        t_info     = f" {YLW}(t){RST} Token: {BLU}{_tok_raw[:13]}{RST} "
+        rlines.append(("normal", f"│{pad(l4, W - ansilen(t_info))}{t_info}\033[{_COL_RIGHT}G│"))
         rlines.append(("sep",    f"├" + "─" * W + "┤"))
 
         player_short = self.config.player_cmd[:13]
@@ -4785,7 +4789,7 @@ class PTZMasterApp:
                     if key in (Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT,
                                '+', '=', '-', Key.SPACE,
                                'g', 'r', 'o', 'u', 'h', 's', 'f', 'm', 'l',
-                               'z', 't', 'i', 'I', '?', '\\'):
+                               'z', 'i', 'I', '?', '\\'):
                         notify("SCANNER: operation not available", "warning")
                         self.ui.draw()
                         continue
