@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.52"
+VERSION = "9.0.58"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1157,15 +1157,12 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '',
     sys.stdout.flush()
 
 def format_progress_line(percent: float, width: int = 20, label: str = "", subnet: str = "") -> str:
-    """
-    Tworzy linię statusu z paskiem postępu.
-    Przykład: "Auto-check: [████████░░░░░░░░░░░░]  40%  192.168.1.0/24"
-    """
+    """Pasek postępu bez kodów ANSI — kolory dodaje draw()."""
     filled = int(percent / 100 * width)
-    bar = '█' * filled + '░' * (width - filled)
-    label_part = f"{label}: " if label else ""
+    bar    = '█' * filled + '░' * (width - filled)
     subnet_part = f"  {subnet}" if subnet else ""
-    return f"{label_part}[{bar}] {percent:3.0f}%{subnet_part}"
+    label_part  = f"{label}: " if label else ""
+    return f"{label_part}[{bar}]{percent:4.0f}%{subnet_part}"
 
 def print_header(text: str):
     width = 59
@@ -4077,26 +4074,61 @@ class UI:
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
         _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
-        footer_left  = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
-        footer_right = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
-        print(f"├" + "─" * FW + "┤")
-        print(f"│{pad(footer_left, FW - ansilen(footer_right))}{footer_right}│")
+        _COL_R = FW + 2  # prawa │ absolutna
+        _scan  = getattr(self, '_scan_status', '')
 
-        scan = getattr(self, '_scan_status', '')
+        # --- Linia 1: F2/F3... LUB Auto-check podczas skanowania ---
+        print(f"├" + "─" * FW + "┤")
+        if _scan:
+            # Auto-check podmienia linie nawigacyjną
+            _sl = str(_scan)[:FW - 2]
+            sys.stdout.write(f"│ ")
+            sys.stdout.write(_sl)
+            sys.stdout.write(f"\033[{_COL_R}G│\n")
+        else:
+            # Normalna linia nawigacyjna
+            _nav_l = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
+            sys.stdout.write(f"│")
+            sys.stdout.write(_nav_l)
+            sys.stdout.write(f"\033[{_COL_R}G│\n")
+
+        # --- Stały pasek systemowy — jak w player TUI (get_cpu_usage + /proc/meminfo) ---
+        _cpu_s = get_cpu_usage()
+        _cpu_n = int(_cpu_s.replace('%','').strip() or 0)
+        _free  = get_free_space_percent('/')
+        try:
+            with open('/proc/meminfo') as _mf:
+                _ml = {l.split(':')[0]: int(l.split()[1]) for l in _mf if ':' in l}
+            _ram_n = int(100 * (1 - _ml.get('MemAvailable', 0) / max(_ml.get('MemTotal', 1), 1)))
+        except Exception:
+            _ram_n = 0
+        _disk_n = 100 - _free
+        _BW = 8
+        def _sb_bar(pct, col):
+            f = int(pct / 100 * _BW)
+            return f"{col}{'█'*f}{DIM}{'░'*(_BW-f)}{RST}"
+        _c_col = RED if _cpu_n  > 80 else (YLW if _cpu_n  > 50 else GRN)
+        _r_col = RED if _ram_n  > 80 else (YLW if _ram_n  > 60 else GRN)
+        _d_col = RED if _disk_n > 90 else (YLW if _disk_n > 75 else GRN)
+        _sysbar = (
+            f" ⚙{_c_col}{_cpu_n:3d}%{RST}"
+            f" 🧠[{_sb_bar(_ram_n,_r_col)}]{_r_col}{_ram_n:3d}%{RST}"
+            f" 💽[{_sb_bar(_disk_n,_d_col)}]{_d_col}{_disk_n:3d}%{RST}"
+        )
+
+        # --- Linia 2: ⚙ CPU 🧠 RAM 💽  🔔  + version/ESC po prawej (jak player TUI) ---
         notifs = NotificationManager().get_active()
-        status_line = scan if scan else (notifs[-1] if notifs else None)
-        if status_line:
-            print(f"├" + "─" * FW + "┤")
-            # CPU/RAM po prawej stronie paska statusu
-            try:
-                import psutil as _psu
-                _cpu = _psu.cpu_percent(interval=None)
-                _ram = _psu.virtual_memory().percent
-                _sys = f" {DIM}⚙{_cpu:.0f}% 🧠{_ram:.0f}%{RST}"
-            except ImportError:
-                _sys = ""
-            _sl_pad = FW - ansilen(status_line) - ansilen(_sys) - 1
-            print(f"│ {status_line}{DIM}{' ' * max(0, _sl_pad)}{RST}{_sys}│")
+        _notif = notifs[-1] if notifs else "OK"
+        _msg_col = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else DIM)
+        _ver_r  = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
+        # Lewa część: sysbar + notif
+        _left2  = f"{_sysbar}  🔔 {_msg_col}{_notif[:20]}{RST}"
+        # Prawa część: version — absolutna pozycja przez cursor jump
+        sys.stdout.write(f"│")
+        sys.stdout.write(_left2)
+        # Wyczyść do prawej krawędzi, wstaw version przed │
+        _ver_col = _COL_R - len(_ver_r.replace(chr(27)+"[0m","").replace(chr(27)+"[36m","").replace(chr(27)+"[33m","")) - 1
+        sys.stdout.write(f"\033[{_ver_col}G{_ver_r}\033[{_COL_R}G│\n")
 
         print(f"└" + "─" * FW + "┘")
 
@@ -7526,16 +7558,27 @@ class PTZMasterApp:
             logger.warning("Auto-check: no active subnets found")
             return
 
-        def _auto_progress(pct, i, total, msg):
-            # Ładnie sformatowany pasek postępu w linii statusu
-            self.ui._scan_status = format_progress_line(
-                pct, width=20, label=f"{CYN}Auto-check{RST}", subnet=msg
-            )
+        # Kolory per subnet — sekwencyjne, nie nakrywają się
+        _SUBNET_COLORS = [CYN, YLW, MAG, GRN, BLU]
+        _n_subnets = len(subnets)
 
-        for subnet in subnets:
+        for _si, subnet in enumerate(subnets):
+            _sc = _SUBNET_COLORS[_si % len(_SUBNET_COLORS)]
+            _prefix = f"[{_si+1}/{_n_subnets}] " if _n_subnets > 1 else ""
+
+            def _auto_progress(pct, i, total, msg,
+                               _sc=_sc, _prefix=_prefix):
+                filled = int(pct / 100 * 20)
+                bar = f"{_sc}{'█' * filled}{DIM}{'░' * (20-filled)}{RST}"
+                subnet_part = f"  {DIM}{msg}{RST}" if msg else ""
+                self.ui._scan_status = (
+                    f"{_prefix}{_sc}Auto-check{RST}: [{bar}]{_sc}{pct:4.0f}%{RST}{subnet_part}"
+                )
+
             logger.info(f"Auto-check: scanning {subnet}0/24")
             NetworkUtils.scan_subnet(subnet, max_workers=30,
                                      progress_cb=_auto_progress)
+
         self.ui._scan_status = ''
 
         changes = []
