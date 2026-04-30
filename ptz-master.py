@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.58"
+VERSION = "9.0.60"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3913,7 +3913,7 @@ class UI:
             return
 
         prof = self.current_profile
-        W  = 57
+        W  = 58
         LW = 19
 
         sym = {
@@ -4014,7 +4014,7 @@ class UI:
         l4     = f" 📺 {BLU}{display_name[:20]}{RST}{res_display}{preset_info}"
         # Stała pozycja prawej ramki — token dopasowany do wolnego miejsca
         # Prawa ramka │ na sztywno przez cursor jump — bez liczenia emoji/ANSI
-        _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=57 → 79)
+        _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=58 → 80)
         _tok_raw   = prof.token if prof.token else prof.name
         t_info     = f" {YLW}(t){RST} Token: {BLU}{_tok_raw[:13]}{RST} "
         rlines.append(("normal", f"│{pad(l4, W - ansilen(t_info))}{t_info}\033[{_COL_RIGHT}G│"))
@@ -4067,14 +4067,36 @@ class UI:
 
         FW = LW + 1 + W
         print('├' + '─' * LW + rlines[-1][1])
-        dsU=dir_sym["U"]; dsD=dir_sym["D"]; dsL=dir_sym["L"]; dsR=dir_sym["R"]; dsC=dir_sym["C"]; dsZP=dir_sym["Z+"]; dsZM=dir_sym["Z-"]
-        print('│'+pad(f'    {dsU}    │ Progress: {p_view}', 33)+'│'+pad(f' {YLW}(m/l){RST} Dur: {GRN}{cam.duration:4.1f}s{RST} ', FW-34)+'│')
-        print('│'+pad(f'  {dsL} {dsC} {dsR}  │  Zoom: [{dsZP}] [{dsZM}]', 33)+'│'+pad(f' {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST} ', FW-34)+'│')
-        print('│'+pad(f'    {dsD}    │', 33)+'│'+pad(f' {YLW}(z){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save', FW-34)+'│')
+        dsU=dir_sym["U"]; dsD=dir_sym["D"]; dsL=dir_sym["L"]; dsR=dir_sym["R"]
+        dsC=dir_sym["C"]; dsZP=dir_sym["Z+"]; dsZM=dir_sym["Z-"]
+        _zoom_s = f"{GRN}{cam.zoom_level:.1f}x{RST}" if hasattr(cam, "zoom_level") else f"{GRN}1.0x{RST}"
+        _pan_x  = getattr(cam, "pan_x", 0.0)
+        _pan_y  = getattr(cam, "pan_y", 0.0)
+        _pan_s  = f"{GRN}1.0x{RST}"
+        _xy_s   = f"x:{_pan_x:+.2f} y:{_pan_y:+.2f}"
+        _COL79  = FW + 2  # prawa │ absolutna (FW=78 → col 80)
+        # Separator środkowy na stałej kolumnie 34 (│ po krzyżu)
+        # Prawa │ każdego wiersza absolutnie na _COL79
+        _C34 = LW + 14   # kolumna wewnętrznego │ (krzyż+spacje = 10 znaków)
+        # Wiersz 1: ▲  │ Progress: [---]               │ (m/l) Dur:  Xs
+        sys.stdout.write(f"│    {dsU}    │ Progress: {p_view:<23}")
+        sys.stdout.write(f"\033[{_C34}G│")
+        sys.stdout.write(f" {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
+        sys.stdout.write(f"\033[{_COL79}G│\n")
+        # Wiersz 2: ◄■► │ [Z]oom[+][-]  Xx [P]an[+][-]  Xx │ (s/f) Speed:
+        sys.stdout.write(f"│  {dsL} {dsC} {dsR}  │ {YLW}[Z]{RST}oom{YLW}[+][-]{RST}  {_zoom_s} {YLW}[P]{RST}an{YLW}[+][-]{RST}  {_pan_s}")
+        sys.stdout.write(f"\033[{_C34}G│")
+        sys.stdout.write(f" {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
+        sys.stdout.write(f"\033[{_COL79}G│\n")
+        # Wiersz 3: ▼  │                  x:+0.00 y:+0.00 │ (0) Reset F4 F5
+        sys.stdout.write(f"│    {dsD}    │                    {DIM}{_xy_s}{RST}")
+        sys.stdout.write(f"\033[{_C34}G│")
+        sys.stdout.write(f" {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
+        sys.stdout.write(f"\033[{_COL79}G│\n")
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
         _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
-        _COL_R = FW + 2  # prawa │ absolutna
+        _COL_R = FW + 2  # prawa │ absolutna (FW=78 → col 80)
         _scan  = getattr(self, '_scan_status', '')
 
         # --- Linia 1: F2/F3... LUB Auto-check podczas skanowania ---
@@ -4122,13 +4144,16 @@ class UI:
         _msg_col = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else DIM)
         _ver_r  = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
         # Lewa część: sysbar + notif
-        _left2  = f"{_sysbar}  🔔 {_msg_col}{_notif[:20]}{RST}"
-        # Prawa część: version — absolutna pozycja przez cursor jump
+        # Sysbar: ⚙ CPU 🧠 RAM 💽 disk  🔔 notif  (lewa część)
+        _left2 = f"{_sysbar}  🔔 {_msg_col}{_notif[:20]}{RST}"
+        # Version w środku, (ESC/Q) Quit na stałej pozycji absolutnej
+        _ver_mid = f" {CYN}v{VERSION}{RST}"
+        _quit_r  = f" {YLW}(ESC/Q){RST} Quit "
+        _QUIT_COL = _COL_R - 14  # "(ESC/Q) Quit " = 13 znaków + spacja
         sys.stdout.write(f"│")
         sys.stdout.write(_left2)
-        # Wyczyść do prawej krawędzi, wstaw version przed │
-        _ver_col = _COL_R - len(_ver_r.replace(chr(27)+"[0m","").replace(chr(27)+"[36m","").replace(chr(27)+"[33m","")) - 1
-        sys.stdout.write(f"\033[{_ver_col}G{_ver_r}\033[{_COL_R}G│\n")
+        sys.stdout.write(_ver_mid)
+        sys.stdout.write(f"\033[{_QUIT_COL}G{_quit_r}\033[{_COL_R}G│\n")
 
         print(f"└" + "─" * FW + "┘")
 
@@ -5106,13 +5131,28 @@ class PTZMasterApp:
                            "warning" if _gm else "info")
                     logger.info(f"Global mute toggled: {_gm}")
                     self.ui.draw()
-                elif key.lower() == 'z':
+                elif key == '0':
+                    # 0 = reset speed/duration do defaults (było: z)
                     cam = self.ui.current_camera
                     if cam:
                         cam.speed = 0.5
                         cam.duration = 0.4
                         notify("Reset to defaults", "info")
                         logger.info("Reset speed/duration to defaults")
+                    self.ui.draw()
+                elif key.lower() == 'z':
+                    # z = toggle PTZ ↔ PAN mode (jak w player TUI)
+                    cam = self.ui.current_camera
+                    if cam and cam.type not in (CameraType.FILE, CameraType.SCANNER):
+                        if cam.type == CameraType.V4L2:
+                            notify("PTZ not available for V4L2", "warning")
+                        else:
+                            # Cykluj: SELECT → PAN → PTZ → SELECT
+                            _modes = ["SELECT", "PAN", "PTZ"]
+                            _cur   = getattr(self.ui, '_ptz_mode', "SELECT")
+                            _next  = _modes[(_modes.index(_cur) + 1) % len(_modes)] if _cur in _modes else "SELECT"
+                            self.ui._ptz_mode = _next
+                            notify(f"Mode: {_next}", "info")
                     self.ui.draw()
                 
         except KeyboardInterrupt:
