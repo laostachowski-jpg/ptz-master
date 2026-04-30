@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.60"
+VERSION = "9.0.61"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4075,23 +4075,15 @@ class UI:
         _pan_s  = f"{GRN}1.0x{RST}"
         _xy_s   = f"x:{_pan_x:+.2f} y:{_pan_y:+.2f}"
         _COL79  = FW + 2  # prawa │ absolutna (FW=78 → col 80)
-        # Separator środkowy na stałej kolumnie 34 (│ po krzyżu)
-        # Prawa │ każdego wiersza absolutnie na _COL79
-        _C34 = LW + 14   # kolumna wewnętrznego │ (krzyż+spacje = 10 znaków)
-        # Wiersz 1: ▲  │ Progress: [---]               │ (m/l) Dur:  Xs
-        sys.stdout.write(f"│    {dsU}    │ Progress: {p_view:<23}")
-        sys.stdout.write(f"\033[{_C34}G│")
-        sys.stdout.write(f" {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
+        _C34 = 50  # środkowy │ — absolutna kolumna 50
+        sys.stdout.write(f"│    {dsU}    │ Progress: {p_view}")
+        sys.stdout.write(f"\033[{_C34}G│ {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
-        # Wiersz 2: ◄■► │ [Z]oom[+][-]  Xx [P]an[+][-]  Xx │ (s/f) Speed:
         sys.stdout.write(f"│  {dsL} {dsC} {dsR}  │ {YLW}[Z]{RST}oom{YLW}[+][-]{RST}  {_zoom_s} {YLW}[P]{RST}an{YLW}[+][-]{RST}  {_pan_s}")
-        sys.stdout.write(f"\033[{_C34}G│")
-        sys.stdout.write(f" {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
+        sys.stdout.write(f"\033[{_C34}G│ {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
-        # Wiersz 3: ▼  │                  x:+0.00 y:+0.00 │ (0) Reset F4 F5
-        sys.stdout.write(f"│    {dsD}    │                    {DIM}{_xy_s}{RST}")
-        sys.stdout.write(f"\033[{_C34}G│")
-        sys.stdout.write(f" {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
+        sys.stdout.write(f"│    {dsD}    │                      {DIM}{_xy_s}{RST}")
+        sys.stdout.write(f"\033[{_C34}G│ {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
         sys.stdout.write(f"\033[{_COL79}G│\n")
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
@@ -5141,18 +5133,18 @@ class PTZMasterApp:
                         logger.info("Reset speed/duration to defaults")
                     self.ui.draw()
                 elif key.lower() == 'z':
-                    # z = toggle PTZ ↔ PAN mode (jak w player TUI)
+                    # z = toggle PTZ kamery <-> PAN mpv (jak w player TUI)
                     cam = self.ui.current_camera
-                    if cam and cam.type not in (CameraType.FILE, CameraType.SCANNER):
-                        if cam.type == CameraType.V4L2:
-                            notify("PTZ not available for V4L2", "warning")
+                    if cam and cam.type not in (CameraType.FILE, CameraType.SCANNER, CameraType.V4L2):
+                        prof = self.ui.current_profile
+                        if ProcessManager.is_running(prof.pid if prof else None):
+                            _cur  = getattr(cam, '_ctrl_mode', 'PTZ')
+                            _next = 'PAN' if _cur == 'PTZ' else 'PTZ'
+                            cam._ctrl_mode = _next
+                            _lbl = 'kamera PTZ' if _next == 'PTZ' else 'mpv PAN'
+                            notify(f'Ctrl: {_lbl}', 'info')
                         else:
-                            # Cykluj: SELECT → PAN → PTZ → SELECT
-                            _modes = ["SELECT", "PAN", "PTZ"]
-                            _cur   = getattr(self.ui, '_ptz_mode', "SELECT")
-                            _next  = _modes[(_modes.index(_cur) + 1) % len(_modes)] if _cur in _modes else "SELECT"
-                            self.ui._ptz_mode = _next
-                            notify(f"Mode: {_next}", "info")
+                            notify('mpv nie gra — uruchom najpierw (p)', 'warning')
                     self.ui.draw()
                 
         except KeyboardInterrupt:
