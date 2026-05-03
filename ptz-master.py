@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.61"
+VERSION = "9.0.66"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4092,62 +4092,61 @@ class UI:
         _scan  = getattr(self, '_scan_status', '')
 
         # --- Linia 1: F2/F3... LUB Auto-check podczas skanowania ---
-        print(f"├" + "─" * FW + "┤")
-        if _scan:
-            # Auto-check podmienia linie nawigacyjną
-            _sl = str(_scan)[:FW - 2]
-            sys.stdout.write(f"│ ")
-            sys.stdout.write(_sl)
-            sys.stdout.write(f"\033[{_COL_R}G│\n")
-        else:
-            # Normalna linia nawigacyjna
-            _nav_l = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
-            sys.stdout.write(f"│")
-            sys.stdout.write(_nav_l)
-            sys.stdout.write(f"\033[{_COL_R}G│\n")
+        print("├" + "─" * FW + "┤")
 
-        # --- Stały pasek systemowy — jak w player TUI (get_cpu_usage + /proc/meminfo) ---
+        # Sysbar
         _cpu_s = get_cpu_usage()
-        _cpu_n = int(_cpu_s.replace('%','').strip() or 0)
-        _free  = get_free_space_percent('/')
+        _cpu_n = int(_cpu_s.replace("%","").strip() or 0)
+        _free  = get_free_space_percent("/")
         try:
-            with open('/proc/meminfo') as _mf:
-                _ml = {l.split(':')[0]: int(l.split()[1]) for l in _mf if ':' in l}
-            _ram_n = int(100 * (1 - _ml.get('MemAvailable', 0) / max(_ml.get('MemTotal', 1), 1)))
+            with open("/proc/meminfo") as _mf:
+                _ml = {l2.split(":")[0]: int(l2.split()[1]) for l2 in _mf if ":" in l2}
+            _ram_n = int(100*(1-_ml.get("MemAvailable",0)/max(_ml.get("MemTotal",1),1)))
         except Exception:
             _ram_n = 0
         _disk_n = 100 - _free
-        _BW = 8
-        def _sb_bar(pct, col):
-            f = int(pct / 100 * _BW)
-            return f"{col}{'█'*f}{DIM}{'░'*(_BW-f)}{RST}"
-        _c_col = RED if _cpu_n  > 80 else (YLW if _cpu_n  > 50 else GRN)
-        _r_col = RED if _ram_n  > 80 else (YLW if _ram_n  > 60 else GRN)
-        _d_col = RED if _disk_n > 90 else (YLW if _disk_n > 75 else GRN)
-        _sysbar = (
-            f" ⚙{_c_col}{_cpu_n:3d}%{RST}"
-            f" 🧠[{_sb_bar(_ram_n,_r_col)}]{_r_col}{_ram_n:3d}%{RST}"
-            f" 💽[{_sb_bar(_disk_n,_d_col)}]{_d_col}{_disk_n:3d}%{RST}"
-        )
-
-        # --- Linia 2: ⚙ CPU 🧠 RAM 💽  🔔  + version/ESC po prawej (jak player TUI) ---
+        def _bc(pct,col,w=10):
+            f2=int(pct/100*w); return f"{col}{chr(9608)*f2}{DIM}{chr(9617)*(w-f2)}{RST}"
+        _cc = RED if _cpu_n>80  else (YLW if _cpu_n>50  else GRN)
+        _rc = RED if _ram_n>80  else (YLW if _ram_n>60  else GRN)
+        _dc = RED if _disk_n>90 else (YLW if _disk_n>75 else GRN)
         notifs = NotificationManager().get_active()
         _notif = notifs[-1] if notifs else "OK"
-        _msg_col = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else DIM)
-        _ver_r  = f"{CYN}v{VERSION}{RST} {YLW}(ESC){RST} Quit "
-        # Lewa część: sysbar + notif
-        # Sysbar: ⚙ CPU 🧠 RAM 💽 disk  🔔 notif  (lewa część)
-        _left2 = f"{_sysbar}  🔔 {_msg_col}{_notif[:20]}{RST}"
-        # Version w środku, (ESC/Q) Quit na stałej pozycji absolutnej
-        _ver_mid = f" {CYN}v{VERSION}{RST}"
-        _quit_r  = f" {YLW}(ESC/Q){RST} Quit "
-        _QUIT_COL = _COL_R - 14  # "(ESC/Q) Quit " = 13 znaków + spacja
-        sys.stdout.write(f"│")
-        sys.stdout.write(_left2)
-        sys.stdout.write(_ver_mid)
-        sys.stdout.write(f"\033[{_QUIT_COL}G{_quit_r}\033[{_COL_R}G│\n")
+        _ncol  = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else YLW)
+        _scan  = getattr(self, "_scan_status", "")
 
-        print(f"└" + "─" * FW + "┘")
+        # L1: F2 Discovery + tryb
+        _cur_cam  = self.current_camera
+        _cmode    = getattr(_cur_cam, "_ctrl_mode", "PTZ") if _cur_cam else "PTZ"
+        _mode_tag = f" {DIM}[{_cmode.lower()}]{RST}"
+        _nav_l    = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
+        sys.stdout.write("│" + _nav_l + _mode_tag)
+        sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
+        print("├" + "─" * FW + "┤")
+
+        # L2: notif albo auto-check
+        if _scan:
+            _sl = str(_scan)[:FW-2]
+            sys.stdout.write("│ " + _sl)
+        else:
+            sys.stdout.write("│ " + _ncol + "🔔 " + _notif[:FW-5] + RST)
+        sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
+
+        # L3: CPU RAM DISK
+        _srow = (" CPU: ⚙ " + _cc + f"{_cpu_n:4.1f}%" + RST + " " + _bc(_cpu_n,_cc)
+                 + "   RAM: 🧠 " + _rc + f"{_ram_n}%" + RST + " " + _bc(_ram_n,_rc)
+                 + "   DISK: 💽 " + _dc + f"{_disk_n}%" + RST + " " + _bc(_disk_n,_dc))
+        sys.stdout.write("│" + _srow)
+        sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
+
+        # Dolna ramka z nazwą i ESC/Q
+        _vtag    = f" ptz-master v {VERSION} "
+        # Oblicz plain długość prawej części bez ANSI
+        _right_plain = f"[{_vtag}]-(ESC/Q)-"
+        _right_plain = f"[{_vtag}]\u2500(ESC/Q)\u2500\u2518"  # z ramkami
+        _ld      = max(0, FW - len(_right_plain) + 1)
+        _right   = "[" + CYN + _vtag + RST + "]\u2500(" + YLW + "ESC/Q" + RST + ")\u2500\u2518"
+        sys.stdout.write("\u2514" + "\u2500"*_ld + _right + "\n")
 
     def set_scan_status(self, msg: str):
         self._scan_status = msg
@@ -4931,20 +4930,46 @@ class PTZMasterApp:
                     self.ui.draw()
                     continue
                 
-                elif key == Key.UP:
-                    self._move_timed(0.0, 1.0, 0.0, "U")
-                elif key == Key.DOWN:
-                    self._move_timed(0.0, -1.0, 0.0, "D")
-                elif key == Key.LEFT:
-                    self._move_timed(-1.0, 0.0, 0.0, "L")
-                elif key == Key.RIGHT:
-                    self._move_timed(1.0, 0.0, 0.0, "R")
-                elif key in ['+', '=']:
-                    self._move_timed(0.0, 0.0, 1.0, "Z+")
-                elif key == '-':
-                    self._move_timed(0.0, 0.0, -1.0, "Z-")
-                elif key == Key.SPACE:
-                    self._move_timed(0.0, 0.0, 0.0, "C")
+                elif key in (Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT,
+                             '+', '=', '-', Key.SPACE):
+                    _cam = self.ui.current_camera
+                    _mode = getattr(_cam, '_ctrl_mode', 'PTZ') if _cam else 'PTZ'
+                    if _mode == 'PAN':
+                        # PAN mode — steruj video-pan-x/y w mpv przez IPC
+                        _prof = self.ui.current_profile
+                        _pid  = _prof.pid if _prof else None
+                        _ipc  = _prof.ipc_path if _prof else None
+                        if _pid and ProcessManager.is_running(_pid) and _ipc:
+                            _ctrl = MpvController(_ipc)
+                            _PAN_STEP = 0.05
+                            _ZOOM_STEP = 0.1
+                            _px = float(_ctrl.get_property('video-pan-x') or 0)
+                            _py = float(_ctrl.get_property('video-pan-y') or 0)
+                            _zv = float(_ctrl.get_property('video-zoom') or 0)
+                            if   key == Key.UP:    _py = max(-0.5, _py - _PAN_STEP)
+                            elif key == Key.DOWN:  _py = min(0.5,  _py + _PAN_STEP)
+                            elif key == Key.LEFT:  _px = max(-0.5, _px - _PAN_STEP)
+                            elif key == Key.RIGHT: _px = min(0.5,  _px + _PAN_STEP)
+                            elif key in ('+', '='): _zv = min(3.0, _zv + _ZOOM_STEP)
+                            elif key == '-':        _zv = max(-1.0, _zv - _ZOOM_STEP)
+                            elif key == Key.SPACE:  _px = 0.0; _py = 0.0; _zv = 0.0
+                            _ctrl.set_property('video-pan-x', _px)
+                            _ctrl.set_property('video-pan-y', _py)
+                            _ctrl.set_property('video-zoom',  _zv)
+                            if _cam:
+                                _cam.pan_x = _px; _cam.pan_y = _py
+                            notify(f'PAN x:{_px:+.2f} y:{_py:+.2f}', 'info')
+                        else:
+                            notify('mpv nie gra — uruchom (p)', 'warning')
+                    else:
+                        # PTZ mode — steruj kamerą jak dotychczas
+                        if   key == Key.UP:    self._move_timed(0.0, 1.0, 0.0, 'U')
+                        elif key == Key.DOWN:  self._move_timed(0.0, -1.0, 0.0, 'D')
+                        elif key == Key.LEFT:  self._move_timed(-1.0, 0.0, 0.0, 'L')
+                        elif key == Key.RIGHT: self._move_timed(1.0, 0.0, 0.0, 'R')
+                        elif key in ('+', '='): self._move_timed(0.0, 0.0, 1.0, 'Z+')
+                        elif key == '-':        self._move_timed(0.0, 0.0, -1.0, 'Z-')
+                        elif key == Key.SPACE:  self._move_timed(0.0, 0.0, 0.0, 'C')
                 
                 elif key == '.':
                     if self.config.cameras:
