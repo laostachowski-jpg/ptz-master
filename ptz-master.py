@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.66"
+VERSION = "9.0.68"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3920,10 +3920,12 @@ class UI:
             "U": "▲", "D": "▼", "L": "◄", "R": "►",
             "C": "■", "Z+": "+", "Z-": "-"
         }
-        dir_sym = {
-            k: (f"{RED}█{RST}" if self.active_dir == k else f"{GRN}{v}{RST}")
+        # Surowe symbole (bez koloru) — kolor nakładany później w PTZ panelu
+        dir_sym_raw = {
+            k: ("█" if self.active_dir == k else v)
             for k, v in sym.items()
         }
+        dir_sym_active = {k: (self.active_dir == k) for k in sym}
 
         if getattr(prof, 'error', False):
             p_status = f"{RED}[ERR]{RST}"
@@ -4067,8 +4069,15 @@ class UI:
 
         FW = LW + 1 + W
         print('├' + '─' * LW + rlines[-1][1])
-        dsU=dir_sym["U"]; dsD=dir_sym["D"]; dsL=dir_sym["L"]; dsR=dir_sym["R"]
-        dsC=dir_sym["C"]; dsZP=dir_sym["Z+"]; dsZM=dir_sym["Z-"]
+        # Kolor krzyża: zielony=PTZ, żółty=PAN
+        _arrow_col = YLW if getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN' else GRN
+        def _ds(k):
+            sym_char = dir_sym_raw[k]
+            col = RED if dir_sym_active[k] else _arrow_col
+            return f"{col}{sym_char}{RST}"
+        dsU = _ds('U'); dsD = _ds('D'); dsL = _ds('L'); dsR = _ds('R')
+        dsC = _ds('C')
+        dsZP = dir_sym_raw['Z+']; dsZM = dir_sym_raw['Z-']
         _zoom_s = f"{GRN}{cam.zoom_level:.1f}x{RST}" if hasattr(cam, "zoom_level") else f"{GRN}1.0x{RST}"
         _pan_x  = getattr(cam, "pan_x", 0.0)
         _pan_y  = getattr(cam, "pan_y", 0.0)
@@ -4390,20 +4399,50 @@ class PTZMasterApp:
                 if c >= S+2:
                     self._mouse_off(); self._uri_menu(); self._mouse_on(); self.ui.draw(); return
 
+        _cmode = getattr(cam, '_ctrl_mode', 'PTZ') if cam else 'PTZ'
+
+        def _do_move(px, py, pz, tag):
+            """PTZ lub PAN w mpv zależnie od trybu."""
+            if _cmode == 'PAN':
+                _prof = self.ui.current_profile
+                _pid  = _prof.pid if _prof else None
+                _ipc  = _prof.ipc_path if _prof else None
+                if _pid and ProcessManager.is_running(_pid) and _ipc:
+                    _ct = MpvController(_ipc)
+                    _S  = 0.05
+                    _px = float(_ct.get_property('video-pan-x') or 0)
+                    _py = float(_ct.get_property('video-pan-y') or 0)
+                    _zv = float(_ct.get_property('video-zoom') or 0)
+                    if tag == 'U':  _py = max(-0.5, _py - _S)
+                    elif tag == 'D': _py = min(0.5,  _py + _S)
+                    elif tag == 'L': _px = max(-0.5, _px - _S)
+                    elif tag == 'R': _px = min(0.5,  _px + _S)
+                    elif tag == 'Z+': _zv = min(3.0, _zv + 0.1)
+                    elif tag == 'Z-': _zv = max(-1.0, _zv - 0.1)
+                    elif tag == 'C':  _px = 0.0; _py = 0.0; _zv = 0.0
+                    _ct.set_property('video-pan-x', _px)
+                    _ct.set_property('video-pan-y', _py)
+                    _ct.set_property('video-zoom',  _zv)
+                    if cam: cam.pan_x = _px; cam.pan_y = _py
+                else:
+                    notify('mpv nie gra — uruchom (p)', 'warning')
+            else:
+                self._move_timed(px, py, pz, tag)
+
         if r == 12:
             if c == 6:
-                self._move_timed(0.0, 1.0, 0.0, "U"); self.ui.draw(); return
+                _do_move(0.0, 1.0, 0.0, 'U'); self.ui.draw(); return
             if 37 <= c <= 38 and cam:
                 cam.duration = round(cam.duration + 0.1, 1); self.ui.draw(); return
             if 40 <= c <= 41 and cam:
                 cam.duration = max(0.1, round(cam.duration - 0.1, 1)); self.ui.draw(); return
 
         if r == 13:
-            if c == 4:    self._move_timed(-1.0, 0.0, 0.0, "L"); self.ui.draw(); return
-            if c == 6:    self._move_timed( 0.0, 0.0, 0.0, "C"); self.ui.draw(); return
-            if c == 8:    self._move_timed( 1.0, 0.0, 0.0, "R"); self.ui.draw(); return
-            if 20 <= c <= 22: self._move_timed(0.0, 0.0,  1.0, "Z+"); self.ui.draw(); return
-            if 24 <= c <= 26: self._move_timed(0.0, 0.0, -1.0, "Z-"); self.ui.draw(); return
+            if c == 4:    _do_move(-1.0, 0.0, 0.0, 'L'); self.ui.draw(); return
+            if c == 6:    _do_move( 0.0, 0.0, 0.0, 'C'); self.ui.draw(); return
+            if c == 8:    _do_move( 1.0, 0.0, 0.0, 'R'); self.ui.draw(); return
+            if 20 <= c <= 22: _do_move(0.0, 0.0,  1.0, 'Z+'); self.ui.draw(); return
+            if 24 <= c <= 26: _do_move(0.0, 0.0, -1.0, 'Z-'); self.ui.draw(); return
             if 37 <= c <= 38 and cam:
                 cam.speed = max(0.1, round(cam.speed - 0.1, 1)); self.ui.draw(); return
             if 40 <= c <= 41 and cam:
@@ -4411,10 +4450,10 @@ class PTZMasterApp:
 
         if r == 14:
             if c == 6:
-                self._move_timed(0.0, -1.0, 0.0, "D"); self.ui.draw(); return
+                _do_move(0.0, -1.0, 0.0, 'D'); self.ui.draw(); return
             if 35 <= c <= 43 and cam:
                 cam.speed = 0.5; cam.duration = 0.4
-                notify("Reset to defaults", "info"); self.ui.draw(); return
+                notify('Reset to defaults', 'info'); self.ui.draw(); return
             if 47 <= c <= 48:
                 self._mouse_off(); self._recall_preset(); self._mouse_on(); self.ui.draw(); return
             if 57 <= c <= 58:
