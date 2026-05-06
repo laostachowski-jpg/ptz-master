@@ -369,6 +369,19 @@ class Camera:
         "gamma": 0, "hue": 0, "volume": 100, "mute": False, "speed": 1.0
     }
 
+    def get_mpv_filters(params: dict) -> List[str]:
+        """Konwertuje parametry obrazu na flagi filtrów mpv."""
+        filters = []
+        # mpv używa filtrów video 'eq' dla jasności, kontrastu itp.
+        eq = []
+        if params.get("brightness", 0) != 0: eq.append(f"brightness={params['brightness']/100}")
+        if params.get("contrast", 0) != 0: eq.append(f"contrast={1 + params['contrast']/100}")
+        if params.get("saturation", 0) != 0: eq.append(f"saturation={1 + params['saturation']/100}")
+
+        if eq:
+            filters.append(f"--vf-add=eq={':'.join(eq)}")
+        return filters
+
     def __init__(self, name: str = "New Camera", ip: str = "192.168.1.10",
                  mac: str = "UNKNOWN", ports: Optional[CameraPorts] = None,
                  user: str = "admin", password: str = "admin",
@@ -2379,20 +2392,29 @@ class ONVIFClient:
     def absolute_move(self, token: str, pos: PresetPosition) -> bool:
         token = html.escape(token)
         url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/PTZ"
-        body = f'''<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
-<s:Header>{self._get_auth_header()}</s:Header>
-<s:Body>
-<tptz:AbsoluteMove>
-<tptz:ProfileToken>{token}</tptz:ProfileToken>
-<tptz:Position>
-<tt:PanTilt x="{pos.pan}" y="{pos.tilt}"/>
-<tt:Zoom x="{pos.zoom}"/>
-</tptz:Position>
-</tptz:AbsoluteMove>
-</s:Body>
-</s:Envelope>'''
+        body = f'''<tptz:AbsoluteMove xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+            <tptz:ProfileToken>{token}</tptz:ProfileToken>
+            <tptz:Position>
+                <tt:PanTilt x="{pos.pan:.2f}" y="{pos.tilt:.2f}"/>
+                <tt:Zoom x="{pos.zoom:.2f}"/>
+            </tptz:Position>
+        </tptz:AbsoluteMove>'''
 
-        xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
+        envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>{self._get_auth_header()}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
+        xml = self._send_onvif_request(url, envelope)
+        return xml is not None
+
+    def goto_preset(self, token: str, preset_token: str) -> bool:
+        """Przesuwa kamerę do zapisanego punktu (presetu)."""
+        token = html.escape(token)
+        url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/PTZ"
+        body = f'''<tptz:GotoPreset xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+            <tptz:ProfileToken>{token}</tptz:ProfileToken>
+            <tptz:PresetToken>{preset_token}</tptz:PresetToken>
+        </tptz:GotoPreset>'''
+
+        envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>{self._get_auth_header()}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
+        xml = self._send_onvif_request(url, envelope)
         return xml is not None
 
     def _get_video_source_tokens(self) -> list:
@@ -3245,58 +3267,95 @@ class PlayerWatchdog:
         self.restart_fn(self.cam, self.profile)
 
 
+
+from typing import List, Optional
+
+# Założenie: Logger i PlayerWatchdog są zdefiniowane wcześniej w projekcie
+logger = logging.getLogger(__name__)
+
 class ProcessManager:
+    """
+    Klasa odpowiedzialna za zarządzanie procesami zewnętrznymi (np. odtwarzaczem mpv).
+    Pozwala na sprawdzanie statusu, bezpieczne zamykanie i masowe czyszczenie procesów.
+    """
+
     @staticmethod
     def is_running(pid: Optional[int]) -> bool:
-        if pid is None:
+        """Sprawdza, czy proces o danym ID nadal działa."""
+        if pid is None or pid <= 0:
             return False
         try:
+            # Sygnał 0 nie zabija procesu, ale sprawdza czy można do niego wysłać sygnał
             os.kill(pid, 0)
             return True
-        except OSError:
+        except (OSError, ProcessLookupError):
+            # Jeśli proces nie istnieje lub nie mamy uprawnień
             return False
-    
+
     @staticmethod
     def wait_for_start(pid: int, timeout: float = 2.0) -> bool:
+        """Czeka określoną ilość czasu, aż proces pojawi się w systemie."""
         start = time.time()
         while time.time() - start < timeout:
             if ProcessManager.is_running(pid):
+                # Dodatkowa chwila na pełną inicjalizację zasobów procesu
                 time.sleep(0.2)
-                logger.debug(f"Process {pid} confirmed after {time.time()-start:.2f}s")
+                logger.debug(f"Proces {pid} potwierdzony po {time.time()-start:.2f}s")
                 return True
             time.sleep(0.05)
-        logger.warning(f"Process {pid} not detected after {timeout}s")
+
+        logger.warning(f"Nie wykryto procesu {pid} w ciągu {timeout}s")
         return False
-    
+
     @staticmethod
     def kill(pid: int, force: bool = False) -> bool:
-        PlayerWatchdog.stop_for_pid(pid)
+        """
+        Zamyka proces. Najpierw próbuje prośbą (SIGTERM),
+        a jeśli to nie zadziała lub force=True – wymusza zamknięcie (SIGKILL).
+        """
+        # Powiadomienie strażnika (watchdoga), żeby nie próbował restartować tego procesu
+        if 'PlayerWatchdog' in globals():
+            PlayerWatchdog.stop_for_pid(pid)
+
         try:
             if force:
-                os.kill(pid, 9)
+                os.kill(pid, 9)  # SIGKILL - natychmiastowe ubicie
             else:
-                os.kill(pid, 15)
-                time.sleep(0.1)
+                os.kill(pid, 15) # SIGTERM - uprzejma prośba o zamknięcie
+
+                # Krótka pętla sprawdzająca, czy proces faktycznie się zamknął
+                for _ in range(5):
+                    if not ProcessManager.is_running(pid):
+                        break
+                    time.sleep(0.1)
+
+                # Jeśli po prośbie nadal żyje - używamy siły
                 if ProcessManager.is_running(pid):
                     os.kill(pid, 9)
-            logger.debug(f"Killed process {pid} (force={force})")
+
+            logger.debug(f"Zamknięto proces {pid} (force={force})")
             return True
+        except ProcessLookupError:
+            return True # Proces już nie istniał, więc cel osiągnięty
         except OSError as e:
-            logger.debug(f"Error killing process {pid}: {e}")
+            logger.error(f"Błąd podczas zamykania procesu {pid}: {e}")
             return False
-    
+
     @staticmethod
-    def kill_all(cameras: List[Camera]) -> int:
-        killed = 0
+    def kill_all(cameras: List) -> int:
+        """Zamyka wszystkie aktywne procesy powiązane z listą kamer."""
+        killed_count = 0
         for cam in cameras:
+            # Iterujemy po profilach kamery (np. strumień RTSP[cite: 1])
             for prof in cam.profiles:
                 if prof.pid and ProcessManager.is_running(prof.pid):
                     if ProcessManager.kill(prof.pid):
-                        prof.pid = None
-                        killed += 1
-        if killed > 0:
-            logger.info(f"Killed {killed} processes")
-        return killed
+                        prof.pid = None # Resetujemy PID, aby wiedzieć, że jest wolny
+                        killed_count += 1
+
+        if killed_count > 0:
+            logger.info(f"Pomyślnie zakończono {killed_count} procesów")
+        return killed_count
 
 # =============================================================================
 # RESOLUTION TYPE MAPPING for V4L2
@@ -4015,7 +4074,6 @@ class UI:
             res_display  = f" [{prof.res}]"
         l4     = f" 📺 {BLU}{display_name[:20]}{RST}{res_display}{preset_info}"
         # Stała pozycja prawej ramki — token dopasowany do wolnego miejsca
-        # Prawa ramka │ na sztywno przez cursor jump — bez liczenia emoji/ANSI
         _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=58 → 80)
         _tok_raw   = prof.token if prof.token else prof.name
         t_info     = f" {YLW}(t){RST} Token: {BLU}{_tok_raw[:13]}{RST} "
@@ -4091,16 +4149,23 @@ class UI:
         sys.stdout.write(f"│  {dsL} {dsC} {dsR}  │ {YLW}[Z]{RST}oom{YLW}[+][-]{RST}  {_zoom_s} {YLW}[P]{RST}an{YLW}[+][-]{RST}  {_pan_s}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
-        sys.stdout.write(f"│    {dsD}    │                      {DIM}{_xy_s}{RST}")
+
+        ### ZMIANA: wskaźnik trybu [ptz]/[pan] w tym samym rzędzie co ▼, przed współrzędnymi
+        _cur_cam  = self.current_camera
+        _cmode    = getattr(_cur_cam, "_ctrl_mode", "PTZ") if _cur_cam else "PTZ"
+        _mode_tag = f" {DIM}[{_cmode.lower()}]{RST}"
+
+        sys.stdout.write(f"│    {dsD}    │{_mode_tag}                {DIM}{_xy_s}{RST}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
         sys.stdout.write(f"\033[{_COL79}G│\n")
+        # Koniec ZMIANA
+
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
         _mute_icon = f"{RED}🔇{RST}" if _gm else f"{DIM}🔊{RST}"
-        _COL_R = FW + 2  # prawa │ absolutna (FW=78 → col 80)
+        _COL_R = FW + 2
         _scan  = getattr(self, '_scan_status', '')
 
-        # --- Linia 1: F2/F3... LUB Auto-check podczas skanowania ---
         print("├" + "─" * FW + "┤")
 
         # Sysbar
@@ -4124,12 +4189,9 @@ class UI:
         _ncol  = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else YLW)
         _scan  = getattr(self, "_scan_status", "")
 
-        # L1: F2 Discovery + tryb
-        _cur_cam  = self.current_camera
-        _cmode    = getattr(_cur_cam, "_ctrl_mode", "PTZ") if _cur_cam else "PTZ"
-        _mode_tag = f" {DIM}[{_cmode.lower()}]{RST}"
+        ### ZMIANA: usunięto _mode_tag z linii F2/F3 (było po _nav_l)
         _nav_l    = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
-        sys.stdout.write("│" + _nav_l + _mode_tag)
+        sys.stdout.write("│" + _nav_l)
         sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
         print("├" + "─" * FW + "┤")
 
@@ -4150,9 +4212,7 @@ class UI:
 
         # Dolna ramka z nazwą i ESC/Q
         _vtag    = f" ptz-master v {VERSION} "
-        # Oblicz plain długość prawej części bez ANSI
-        _right_plain = f"[{_vtag}]-(ESC/Q)-"
-        _right_plain = f"[{_vtag}]\u2500(ESC/Q)\u2500\u2518"  # z ramkami
+        _right_plain = f"[{_vtag}]\u2500(ESC/Q)\u2500\u2518"
         _ld      = max(0, FW - len(_right_plain) + 1)
         _right   = "[" + CYN + _vtag + RST + "]\u2500(" + YLW + "ESC/Q" + RST + ")\u2500\u2518"
         sys.stdout.write("\u2514" + "\u2500"*_ld + _right + "\n")
@@ -4166,12 +4226,24 @@ class UI:
     def set_progress(self, progress: float):
         self.progress = progress
 
+    def update_status_line(self, message: str, color: str = "\033[92m"):
+        """Aktualizuje tylko linię 18 (powiadomienia) bez pełnego draw()."""
+        # FW to szerokość Twojej ramki (LW + 1 + W), z Twojego kodu to ok. 78
+        FW = 19 + 1 + 58
+
+        # 1. Przejdź do linii 18, kolumny 2 (zaraz za pionową kreską │)
+        # 2. Wyczyść linię do końca ramki (\033[K)
+        # 3. Wypisz ikonę i wiadomość
+        # 4. Na końcu dodaj prawą krawędź ramki
+        sys.stdout.write(f"\033[18;1H│ {color}🔔 ▸ {message[:FW-6]}{RST}")
+        sys.stdout.write(f"\033[{FW+2}G│") # Skok do prawej krawędzi i domknięcie
+        sys.stdout.flush()
 # =============================================================================
 # MAIN CAMERA CONTROL SCREEN (PTZMasterApp) Start
 # =============================================================================
 
 class PTZMasterApp:
-    def __init__(self, config_file: str, restore_mode: bool = False, 
+    def __init__(self, config_file: str, restore_mode: bool = False,
                  start_camera: str = "", start_mac: str = ""):
         self.config_file = config_file
         self.config_mgr = ConfigManager(config_file)
@@ -4181,26 +4253,40 @@ class PTZMasterApp:
         self.restore_mode = restore_mode
         self.start_camera = start_camera
         self.start_mac = start_mac
-        
+
         atexit.register(self.cleanup)
-    
+
+    def notify(self, msg: str, type: str = "info"):
+        """Wysyła komunikat do wiersza 18 w UI."""
+        color = GRN if type == "info" else (RED if type == "error" else YLW)
+        # Wywołujemy nową metodę z UI
+        self.ui.update_status_line(msg, color)
+
+    def _on_mouse_click(self, x, y):
+        """Przykład obsługi kliknięcia - poprawione."""
+        # Załóżmy, że tutaj obliczasz kliknięcie na krzyżu PTZ
+        # Zamiast: print(f"x:{px} y:{py}")
+        # Użyj:
+        px, py = 0.40, 0.05 # przykładowe wartości
+        self.notify(f"PTZ Click: x:{px:+.2f} y:{py:+.2f}")
+
     def cleanup(self, save_session: bool = False):
         logger.info("Cleaning up before exit...")
         sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
         sys.stdout.flush()
-        
+
         if save_session:
             logger.info("Saving session state...")
             self._save_session_state()
             self.config_mgr.save(create_backup=False)
         else:
             logger.info("Exiting without saving session")
-        
+
         ProcessManager.kill_all(self.config.cameras)
-    
+
     def _save_session_state(self):
         playing = []
-        
+
         for i, cam in enumerate(self.config.cameras):
             if cam.profiles and cam.active_profile < len(cam.profiles):
                 prof = cam.profiles[cam.active_profile]
@@ -4209,25 +4295,25 @@ class PTZMasterApp:
                         "camera": i,
                         "profile": cam.active_profile
                     })
-        
+
         import datetime
         self.config.session_state = SessionState(
             active_camera_index=self.ui.current_idx,
             playing_cameras=playing,
             timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
-        
+
         logger.info(f"Session state saved: {len(playing)} playing cameras")
-    
+
     def _restore_session(self):
         if not self.config.session_state:
             notify("No saved session", "warning")
             return
-        
+
         ss = self.config.session_state
-        
+
         print(f"\n{CYN}Restoring session from {ss.timestamp}...{RST}\n")
-        
+
         restored = 0
         started_pids = []
         for play in ss.playing_cameras:
@@ -4260,11 +4346,11 @@ class PTZMasterApp:
         print(f"\n{GRN}Restored {restored} camera(s){RST}")
         notify(f"Restored {restored} cam(s)", "info")
         Terminal.restore_focus(mpv_pids=started_pids)
-    
-    def _mouse_off(self): 
+
+    def _mouse_off(self):
         mouse_off()
-    
-    def _mouse_on(self):  
+
+    def _mouse_on(self):
         mouse_on()
 
     def _wait_click_or_key(self):
@@ -4288,6 +4374,137 @@ class PTZMasterApp:
         finally:
             self._mouse_off()
             _t.tcsetattr(fd, _t.TCSADRAIN, old_settings)
+
+    def _prompt_at_status_line(self, prompt_text: str) -> str:
+        """
+        Wyświetla prompt w wierszu 18, bezpiecznie pobiera dane
+        i przywraca stan terminala.
+        """
+        import sys
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        # 1. Zapisujemy stan 'surowy', w którym aktualnie znajduje się aplikacja
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            # 2. Wyłączamy mysz (kody ANSI: stop 1000, 1002, 1006)
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+
+            # 3. Przełączamy na tryb 'cooked' (widoczne znaki i obsługa Enter)
+            new_settings = termios.tcgetattr(fd)
+            new_settings[3] |= (termios.ECHO | termios.ICANON)
+            termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
+
+            # 4. Ustawiamy kursor w wierszu 18 i czyścimy linię przed pytaniem
+            sys.stdout.write(f'\033[18;1H\033[2K{YLW}│ {prompt_text}{RST}')
+            sys.stdout.flush()
+
+            # 5. Bezpieczne pobranie danych
+            try:
+                result = input()
+                return result
+            except (KeyboardInterrupt, EOFError):
+                # Jeśli użytkownik anuluje (Ctrl+C lub Ctrl+D), zwracamy pusty ciąg
+                return ""
+
+        finally:
+            # 6. KRYTYCZNY ETAP: Przywracamy terminal do stanu surowego (Raw Mode)
+            # Przywracamy ustawienia zapisane w punkcie 1.
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+            # 7. Ponownie włączamy mysz dla głównego interfejsu
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+
+    def _edit_digital_zoom(self):
+        cam = self.ui.current_camera
+        if not cam or getattr(cam, '_ctrl_mode', 'PTZ') != 'PAN':
+            notify("Switch to PAN mode (Z key) first", "warning")
+            return
+        prof = self.ui.current_profile
+        pid = prof.pid if prof else None
+        ipc = prof.ipc_path if prof else None
+        if not pid or not ProcessManager.is_running(pid) or not ipc:
+            notify("mpv not playing – start with (p)", "warning")
+            return
+        ctrl = MpvController(ipc)
+        cur_zv = float(ctrl.get_property('video-zoom') or 0)
+        cur_mult = 2 ** cur_zv
+        prompt = f"New digital zoom (current {cur_mult:.2f}x): "
+        try:
+            ans = self._prompt_at_status_line(prompt).strip()
+            if ans:
+                import math
+                new_mult = float(ans)
+                if new_mult > 0:
+                    new_zv = math.log2(new_mult)
+                    new_zv = max(-3.0, min(3.0, new_zv))
+                else:
+                    new_zv = 0.0
+                ctrl.set_property('video-zoom', new_zv)
+                if cam:
+                    cam.zoom_level = 2 ** new_zv
+                notify(f"Digital zoom set to {2**new_zv:.2f}x", "info")
+        except (ValueError, EOFError):
+            notify("Invalid number", "error")
+        finally:
+            self.ui.draw()
+
+    def _edit_pan_x(self):
+        cam = self.ui.current_camera
+        if not cam or getattr(cam, '_ctrl_mode', 'PTZ') != 'PAN':
+            notify("Switch to PAN mode (Z key) first", "warning")
+            return
+        prof = self.ui.current_profile
+        pid = prof.pid if prof else None
+        ipc = prof.ipc_path if prof else None
+        if not pid or not ProcessManager.is_running(pid) or not ipc:
+            notify("mpv not playing – start with (p)", "warning")
+            return
+        ctrl = MpvController(ipc)
+        cur_val = float(ctrl.get_property('video-pan-x') or 0)
+        prompt = f"New pan X (current {cur_val:+.2f}, range -0.5..0.5): "
+        try:
+            ans = self._prompt_at_status_line(prompt).strip()
+            if ans:
+                new_val = max(-0.5, min(0.5, float(ans)))
+                ctrl.set_property('video-pan-x', new_val)
+                if cam:
+                    cam.pan_x = new_val
+                notify(f"Pan X set to {new_val:+.2f}", "info")
+        except (ValueError, EOFError):
+            notify("Invalid number", "error")
+        finally:
+            self.ui.draw()
+
+    def _edit_pan_y(self):
+        cam = self.ui.current_camera
+        if not cam or getattr(cam, '_ctrl_mode', 'PTZ') != 'PAN':
+            notify("Switch to PAN mode (Z key) first", "warning")
+            return
+        prof = self.ui.current_profile
+        pid = prof.pid if prof else None
+        ipc = prof.ipc_path if prof else None
+        if not pid or not ProcessManager.is_running(pid) or not ipc:
+            notify("mpv not playing – start with (p)", "warning")
+            return
+        ctrl = MpvController(ipc)
+        cur_val = float(ctrl.get_property('video-pan-y') or 0)
+        prompt = f"New pan Y (current {cur_val:+.2f}, range -0.5..0.5): "
+        try:
+            ans = self._prompt_at_status_line(prompt).strip()
+            if ans:
+                new_val = max(-0.5, min(0.5, float(ans)))
+                ctrl.set_property('video-pan-y', new_val)
+                if cam:
+                    cam.pan_y = new_val
+                notify(f"Pan Y set to {new_val:+.2f}", "info")
+        except (ValueError, EOFError):
+            notify("Invalid number", "error")
+        finally:
+            self.ui.draw()
 
     def _handle_mouse_click(self, ev: 'MouseEvent'):
         r, c = ev.row, ev.col
@@ -4402,7 +4619,7 @@ class PTZMasterApp:
         _cmode = getattr(cam, '_ctrl_mode', 'PTZ') if cam else 'PTZ'
 
         def _do_move(px, py, pz, tag):
-            """PTZ lub PAN w mpv zależnie od trybu."""
+            """PTZ or PAN depending on the active control mode."""
             if _cmode == 'PAN':
                 _prof = self.ui.current_profile
                 _pid  = _prof.pid if _prof else None
@@ -4413,54 +4630,171 @@ class PTZMasterApp:
                     _px = float(_ct.get_property('video-pan-x') or 0)
                     _py = float(_ct.get_property('video-pan-y') or 0)
                     _zv = float(_ct.get_property('video-zoom') or 0)
-                    if tag == 'U':  _py = max(-0.5, _py - _S)
-                    elif tag == 'D': _py = min(0.5,  _py + _S)
-                    elif tag == 'L': _px = max(-0.5, _px - _S)
-                    elif tag == 'R': _px = min(0.5,  _px + _S)
+                    if   tag == 'U': _py = min(0.5,  _py + _S)
+                    elif tag == 'D': _py = max(-0.5, _py - _S)
+                    elif tag == 'L': _px = min(0.5,  _px + _S)
+                    elif tag == 'R': _px = max(-0.5, _px - _S)
                     elif tag == 'Z+': _zv = min(3.0, _zv + 0.1)
                     elif tag == 'Z-': _zv = max(-1.0, _zv - 0.1)
                     elif tag == 'C':  _px = 0.0; _py = 0.0; _zv = 0.0
                     _ct.set_property('video-pan-x', _px)
                     _ct.set_property('video-pan-y', _py)
                     _ct.set_property('video-zoom',  _zv)
-                    if cam: cam.pan_x = _px; cam.pan_y = _py
+                    if cam:
+                        cam.pan_x = _px
+                        cam.pan_y = _py
+                        cam.zoom_level = 2 ** _zv   # convert exponent to multiplier
                 else:
-                    notify('mpv nie gra — uruchom (p)', 'warning')
+                    notify('mpv not playing – start with (p)', 'warning')
             else:
                 self._move_timed(px, py, pz, tag)
 
         if r == 12:
             if c == 6:
                 _do_move(0.0, 1.0, 0.0, 'U'); self.ui.draw(); return
-            if 37 <= c <= 38 and cam:
+            if 52 <= c <= 53 and cam:
                 cam.duration = round(cam.duration + 0.1, 1); self.ui.draw(); return
-            if 40 <= c <= 41 and cam:
+            if 55 <= c <= 56 and cam:
                 cam.duration = max(0.1, round(cam.duration - 0.1, 1)); self.ui.draw(); return
 
         if r == 13:
-            if c == 4:    _do_move(-1.0, 0.0, 0.0, 'L'); self.ui.draw(); return
-            if c == 6:    _do_move( 0.0, 0.0, 0.0, 'C'); self.ui.draw(); return
-            if c == 8:    _do_move( 1.0, 0.0, 0.0, 'R'); self.ui.draw(); return
-            if 20 <= c <= 22: _do_move(0.0, 0.0,  1.0, 'Z+'); self.ui.draw(); return
-            if 24 <= c <= 26: _do_move(0.0, 0.0, -1.0, 'Z-'); self.ui.draw(); return
-            if 37 <= c <= 38 and cam:
-                cam.speed = max(0.1, round(cam.speed - 0.1, 1)); self.ui.draw(); return
-            if 40 <= c <= 41 and cam:
-                cam.speed = min(1.0, round(cam.speed + 0.1, 1)); self.ui.draw(); return
+            # --- Directional arrows (work in both modes) ---
+            if c == 4:    # ◄  – left
+                _do_move(-1.0, 0.0, 0.0, 'L')
+                self.ui.draw()
+                return
+            if c == 6:    # ■  – stop / reset
+                _do_move(0.0, 0.0, 0.0, 'C')
+                self.ui.draw()
+                return
+            if c == 8:    # ►  – right
+                _do_move(1.0, 0.0, 0.0, 'R')
+                self.ui.draw()
+                return
+
+            # --- Switch control mode (PTZ / PAN) ---
+            if 13 <= c <= 15:  # "[Z]oom" area → PTZ mode
+                if self.ui.current_camera:
+                    self.ui.current_camera._ctrl_mode = "PTZ"
+                    notify("PTZ control mode", "info")
+                    self.ui.draw()
+                return
+
+            if 32 <= c <= 34:  # "[P]an" area → PAN mode
+                if self.ui.current_camera:
+                    self.ui.current_camera._ctrl_mode = "PAN"
+                    notify("PAN control mode", "info")
+                    self.ui.draw()
+                return
+
+            # --- Optical PTZ zoom (Zoom + - buttons) ---
+            if 19 <= c <= 21:  # Zoom +
+                _do_move(0.0, 0.0, 1.0, 'Z+')
+                self.ui.draw()
+                return
+            if 22 <= c <= 24:  # Zoom -
+                _do_move(0.0, 0.0, -1.0, 'Z-')
+                self.ui.draw()
+                return
+
+            # --- Digital PAN zoom (Pan + - buttons) ---
+            if 37 <= c <= 39:  # Pan [+]
+                if cam and getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN':
+                    _prof = self.ui.current_profile
+                    _pid = _prof.pid if _prof else None
+                    _ipc = _prof.ipc_path if _prof else None
+                    if _pid and ProcessManager.is_running(_pid) and _ipc:
+                        ctrl = MpvController(_ipc)
+                        zv = float(ctrl.get_property('video-zoom') or 0)
+                        new_zv = min(3.0, zv + 0.1)
+                        ctrl.set_property('video-zoom', new_zv)
+                        if cam:
+                            cam.zoom_level = 2 ** new_zv
+                        notify(f'Video-zoom {2**new_zv:.1f}x', 'info')
+                    else:
+                        notify('mpv not playing – start with (p)', 'warning')
+                else:
+                    notify('Switch to PAN mode (press Z)', 'warning')
+                self.ui.draw()
+                return
+
+            if 40 <= c <= 42:  # Pan [-]
+                if cam and getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN':
+                    _prof = self.ui.current_profile
+                    _pid = _prof.pid if _prof else None
+                    _ipc = _prof.ipc_path if _prof else None
+                    if _pid and ProcessManager.is_running(_pid) and _ipc:
+                        ctrl = MpvController(_ipc)
+                        zv = float(ctrl.get_property('video-zoom') or 0)
+                        new_zv = max(-3.0, zv - 0.1)
+                        ctrl.set_property('video-zoom', new_zv)
+                        if cam:
+                            cam.zoom_level = 2 ** new_zv
+                        notify(f'Video-zoom {2**new_zv:.1f}x', 'info')
+                    else:
+                        notify('mpv not playing – start with (p)', 'warning')
+                else:
+                    notify('Switch to PAN mode (press Z)', 'warning')
+                self.ui.draw()
+                return
+
+            # --- Click on Pan zoom value (≈ 44–48) to edit directly ---
+            if 44 <= c <= 48:
+                self._mouse_off()
+                self._edit_digital_zoom()
+                self._mouse_on()
+                self.ui.draw()
+                return
+
+            # --- PTZ speed (s / f keys) ---
+            if 52 <= c <= 53 and cam:
+                cam.speed = max(0.1, round(cam.speed - 0.1, 1))
+                notify(f'Speed {cam.speed:.1f}', 'info')
+                self.ui.draw()
+                return
+
+            if 55 <= c <= 56 and cam:
+                cam.speed = min(1.0, round(cam.speed + 0.1, 1))
+                notify(f'Speed {cam.speed:.1f}', 'info')
+                self.ui.draw()
+                return
 
         if r == 14:
-            if c == 6:
-                _do_move(0.0, -1.0, 0.0, 'D'); self.ui.draw(); return
-            if 35 <= c <= 43 and cam:
-                cam.speed = 0.5; cam.duration = 0.4
-                notify('Reset to defaults', 'info'); self.ui.draw(); return
-            if 47 <= c <= 48:
+            if c == 6:  # ▼ – down
+                _do_move(0.0, -1.0, 0.0, 'D')
+                self.ui.draw()
+                return
+
+            # --- Pan coordinates editing (click on "x:+… y:+…") ---
+            # These appear on the right panel area, starting around column 51.
+            # We'll detect clicks on "x:" and "y:" substrings.
+            if 51 <= c <= 58:   # approximate area of "x:+0.00"
+                self._mouse_off()
+                self._edit_pan_x()
+                self._mouse_on()
+                self.ui.draw()
+                return
+            if 59 <= c <= 66:   # approximate area of "y:+0.00"
+                self._mouse_off()
+                self._edit_pan_y()
+                self._mouse_on()
+                self.ui.draw()
+                return
+
+            # --- Reset / Preset buttons (original) ---
+            if 52 <= c <= 54 and cam:
+                cam.speed = 0.5
+                cam.duration = 0.4
+                notify('Reset to defaults', 'info')
+                self.ui.draw()
+                return
+            if 62 <= c <= 63:
                 self._mouse_off(); self._recall_preset(); self._mouse_on(); self.ui.draw(); return
-            if 57 <= c <= 58:
+            if 72 <= c <= 73:
                 self._mouse_off(); self._save_preset(); self._mouse_on(); self.ui.draw(); return
 
         if r == 16:
-            # === Nawigacja po kamerach (oryginalne, działające zakresy) ===
+            # === Camera navigation (original working ranges) ===
             if c == 25 or c == 27:
                 cameras = self.ui.config.cameras
                 if cameras:
@@ -4476,7 +4810,7 @@ class PTZMasterApp:
                     self.ui.draw()
                 return
 
-            # === Przyciski funkcyjne (stałe zakresy) ===
+            # === Function buttons (fixed ranges) ===
             if 3 <= c <= 4:                     # F2 Discovery
                 self._mouse_off()
                 self._discover_cameras()
@@ -4506,7 +4840,8 @@ class PTZMasterApp:
                 self.ui.draw()
                 return
 
-            if 70 <= c <= 73:                   # (ESC) Quit
+        if r == 20:
+            if 72 <= c <= 78:                   # (ESC) Quit
                 self._mouse_off()
                 self._confirm_exit()
                 self._mouse_on()
@@ -4985,10 +5320,10 @@ class PTZMasterApp:
                             _px = float(_ctrl.get_property('video-pan-x') or 0)
                             _py = float(_ctrl.get_property('video-pan-y') or 0)
                             _zv = float(_ctrl.get_property('video-zoom') or 0)
-                            if   key == Key.UP:    _py = max(-0.5, _py - _PAN_STEP)
-                            elif key == Key.DOWN:  _py = min(0.5,  _py + _PAN_STEP)
-                            elif key == Key.LEFT:  _px = max(-0.5, _px - _PAN_STEP)
-                            elif key == Key.RIGHT: _px = min(0.5,  _px + _PAN_STEP)
+                            if   key == Key.UP:    _py = min(0.5,  _py + _PAN_STEP)
+                            elif key == Key.DOWN:  _py = max(-0.5, _py - _PAN_STEP)
+                            elif key == Key.LEFT:  _px = min(0.5,  _px + _PAN_STEP)
+                            elif key == Key.RIGHT: _px = max(-0.5, _px - _PAN_STEP)
                             elif key in ('+', '='): _zv = min(3.0, _zv + _ZOOM_STEP)
                             elif key == '-':        _zv = max(-1.0, _zv - _ZOOM_STEP)
                             elif key == Key.SPACE:  _px = 0.0; _py = 0.0; _zv = 0.0
@@ -4998,6 +5333,7 @@ class PTZMasterApp:
                             if _cam:
                                 _cam.pan_x = _px; _cam.pan_y = _py
                             notify(f'PAN x:{_px:+.2f} y:{_py:+.2f}', 'info')
+                            self.ui.draw()   # <--- DODAJ TĘ LINIĘ
                         else:
                             notify('mpv nie gra — uruchom (p)', 'warning')
                     else:
