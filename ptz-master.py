@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.68"
+VERSION = "9.0.69"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
 #                   Designed for Linux systems 🎯 🛡️ 🎥 ✨ ▶️
 # ⚙️  Version:      {VERSION}
-# 👨‍💻  Author:       Leszek Ostachowski (with Claude, DeepSeek, Gemini AI assistance)
+# 👨‍💻  Author:       Leszek Ostachowski (with Claude, DeepSeek, Gemini, Meta AI assistance)
 # 🎯  Purpose:      Interactive TUI for IP camera control via mpv
 #                   Supports RTSP, V4L2, USB camera, play video files and SANE scanners
 #
@@ -113,6 +113,157 @@ CYN = Colors.CYAN
 WHT = Colors.WHITE
 RST  = Colors.RESET
 DIM  = Colors.DIM
+
+# =============================================================================
+# WSPÓLNE TUI - ujednolicone funkcje dla wszystkich ekranów
+# =============================================================================
+TUI_WIDTH = 78  # wszystkie ekrany mają teraz tę samą szerokość
+
+def get_ram_percent() -> int:
+    """Zwraca użycie RAM w procentach (0-100)"""
+    try:
+        with open('/proc/meminfo') as f:
+            mem = {}
+            for line in f:
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    mem[k.strip()] = int(v.strip().split()[0])
+            total = mem.get('MemTotal', 1)
+            avail = mem.get('MemAvailable', 0)
+            return int(100 * (1 - avail / max(total, 1)))
+    except Exception:
+        return 0
+
+def tui_header(title_left: str, width: int = TUI_WIDTH) -> str:
+    """Nagłówek z (F1 Help) po prawej - wspólny dla wszystkich ekranów"""
+    max_title = width - 12
+    title = title_left[:max_title]
+    return f"{title:<{max_title}} (F1 Help)"
+
+def tui_footer_line() -> str:
+    """Stopka z wersją i ESC/Q - wspólna"""
+    return f"[ ptz-master v {VERSION} ]═(ESC/Q)"
+
+def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
+    """Linia z komunikatem 🔔 - wspólna"""
+    clean_msg = msg[:width-4]
+    return f"🔔 {clean_msg}"
+
+
+# =============================================================================
+# ARMORED TUI v1.3 - slot drawing
+# =============================================================================
+import termios, tty
+
+_EMOJI_CACHE = {}
+
+def _measure_emoji(ch: str) -> int:
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setraw(fd)
+        sys.stdout.write("\033[?25l\033[999;1H\033[8m")
+        sys.stdout.write(ch)
+        sys.stdout.write("\033[6n")
+        sys.stdout.flush()
+        resp = ""
+        while not resp.endswith("R"):
+            resp += sys.stdin.read(1)
+        col = int(resp.split(";")[1][:-1])
+        return max(1, col - 1)
+    except Exception:
+        return 2 if ord(ch) > 127 else 1
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            sys.stdout.write("\033[0m\033[?25h")
+        except:
+            pass
+
+def calibrate_emojis(emoji_list):
+    for e in set(emoji_list):
+        if e not in _EMOJI_CACHE:
+            _EMOJI_CACHE[e] = _measure_emoji(e)
+
+def cut_by_width(s: str, width: int) -> str:
+    import re
+    ansi = re.compile(r'\x1b\[[0-9;]*m')
+    out = ""
+    w = 0
+    i = 0
+    while i < len(s):
+        m = ansi.match(s, i)
+        if m:
+            out += m.group(0)
+            i = m.end()
+            continue
+        ch = s[i]
+        cw = _EMOJI_CACHE.get(ch, 2 if ord(ch) > 127 else 1)
+        if w + cw > width:
+            break
+        out += ch
+        w += cw
+        i += 1
+    return out
+
+
+def draw_slot(buf: list, row: int, col: int, width: int, text: str, color: str = "", right_edge: str = ""):
+    safe = cut_by_width(str(text), width)
+    buf.append(f"\033[{row};{col}H")
+    buf.append(" " * width)
+    buf.append(f"\033[{row};{col}H")
+    buf.append(f"{color}{safe}\033[0m")
+    if right_edge:
+        buf.append(f"\033[{row};{col+width-1}H{color}{right_edge}\033[0m\033[K")
+
+def tui_sys_stats():
+    """Pasek CPU/RAM/DISK z kolorami progowymi - działa wszędzie"""
+    # --- CPU ---
+    try:
+        cpu_str = get_cpu_usage()
+        cpu_n = int(float(cpu_str.replace('%', '').strip()))
+    except:
+        cpu_n = 0
+
+    # --- RAM ---
+    try:
+        with open('/proc/meminfo') as f:
+            mem = {}
+            for line in f:
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    mem[k.strip()] = int(v.strip().split()[0])
+            total = mem.get('MemTotal', 1)
+            avail = mem.get('MemAvailable', 0)
+            ram_pct = int(100 * (1 - avail / max(total, 1)))
+    except:
+        ram_pct = 0
+
+    # --- DISK ---
+    try:
+        free_pct = get_free_space_percent()
+        disk_use = 100 - free_pct
+    except:
+        disk_use = 0
+
+    def bar(p, w=10):
+        p = max(0, min(100, p))
+        f = int(p / 100 * w)
+        return '█' * f + '░' * (w - f)
+
+    # twarde kody ANSI - niezależne od globalnych RED/YLW/GRN
+    GRN = "\033[92m"
+    YLW = "\033[93m"
+    RED = "\033[91m"
+    RST = "\033[0m"
+
+    cpu_col = RED if cpu_n > 80 else (YLW if cpu_n > 50 else GRN)
+    ram_col = RED if ram_pct > 80 else (YLW if ram_pct > 60 else GRN)
+    dsk_col = RED if disk_use > 90 else (YLW if disk_use > 75 else GRN)
+
+    return (f"CPU: ⚙ {cpu_col}{cpu_n:3d}% {bar(cpu_n)}{RST} "
+            f"RAM: 🧠 {ram_col}{ram_pct:2d}% {bar(ram_pct)}{RST} "
+            f"DISK: 💽 {dsk_col}{disk_use:2d}% {bar(disk_use)}{RST}")
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -808,6 +959,12 @@ def rlinput(prompt: str, default: str = '') -> str:
     finally:
         if old_settings is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # Ukryj kursor natychmiast po wyjściu z trybu input - TUI
+        try:
+            sys.stdout.write("\033[?25l")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 # =============================================================================
 # HELPERS
@@ -975,25 +1132,15 @@ class Terminal:
             logger.debug(f"Error positioning terminal: {e}")
 
 def get_cpu_usage() -> str:
-    """Zwraca procent użycia CPU z /proc/stat."""
+    """Zwraca obciążenie CPU jako loadavg 1m przeliczony na % - stabilny, bez delty."""
     try:
-        with open('/proc/stat', 'r') as f:
-            line = f.readline()
-        parts = line.split()
-        user, nice, system, idle = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
-        total = user + nice + system + idle
-        if not hasattr(get_cpu_usage, '_prev'):
-            get_cpu_usage._prev = (total, idle)
-            return "0%"
-        prev_total, prev_idle = get_cpu_usage._prev
-        get_cpu_usage._prev = (total, idle)
-        d_total = total - prev_total
-        d_idle  = idle  - prev_idle
-        usage = 100 * (d_total - d_idle) / d_total if d_total > 0 else 0
-        return f"{usage:.0f}%"
+        with open('/proc/loadavg', 'r') as f:
+            load1 = float(f.read().split()[0])
+        cores = os.cpu_count() or 1
+        pct = int(min(100, max(0, load1 / cores * 100)))
+        return f"{pct}%"
     except Exception:
-        return "??%"
-
+        return "0%"
 
 def get_free_space_percent(path: str = "/") -> int:
     """Zwraca procent wolnego miejsca na dysku."""
@@ -1353,53 +1500,75 @@ class KeyReader:
     @classmethod
     def get_key(cls, timeout: float = -1) -> str:
         with cls._raw_mode():
-            ch = cls._read_byte(timeout if timeout >= 0 else None)
-            if ch is None:
+            fd = sys.stdin.fileno()
+            if timeout >= 0:
+                r, _, _ = select.select([fd], [], [], timeout)
+                if not r:
+                    return Key.TIMEOUT
+            try:
+                raw = os.read(fd, 4096)
+                if not raw:
+                    return Key.TIMEOUT
+                ch = raw.decode('utf-8', errors='replace')
+            except Exception:
                 return Key.TIMEOUT
-            
-            if ch == '\x1b':
-                seq = ''
-                for _ in range(32):
-                    c = cls._read_byte(0.15)
-                    if c is None:
-                        break
-                    if c == '\x1b':
-                        return Key.ESC_ESC
-                    seq += c
-                    if seq in cls._ESC_SEQUENCES:
-                        return cls._ESC_SEQUENCES[seq]
-                    if seq.endswith('~'):
-                        break
-                    if seq.startswith('[<') and seq[-1:] in ('M', 'm'):
-                        try:
-                            parts = seq[2:-1].split(';')
-                            btn, col, row = int(parts[0]), int(parts[1]), int(parts[2])
-                            release = seq[-1] == 'm'
-                            if btn == 64: return Key.MOUSE_SCROLL_UP
-                            if btn == 65: return Key.MOUSE_SCROLL_DOWN
-                            return MouseEvent(btn, col, row, release)
-                        except Exception:
-                            pass
-                    if seq == '[M':
-                        b = cls._read_byte(0.1)
-                        x = cls._read_byte(0.1)
-                        y = cls._read_byte(0.1)
-                        if b and x and y:
-                            btn = ord(b) - 32
-                            col = ord(x) - 32
-                            row = ord(y) - 32
-                            if btn == 96: return Key.MOUSE_SCROLL_UP
-                            if btn == 97: return Key.MOUSE_SCROLL_DOWN
-                            return MouseEvent(btn & 3, col, row)
-                        break
 
-                return cls._ESC_SEQUENCES.get(seq, Key.ESC)
-            
-            if ch in ('\x0a', '\x0d'): return Key.ENTER
-            if ch == '\x7f': return Key.BACKSPACE
-            if ch == '\x09': return Key.TAB
-            if ch == '\x20': return Key.SPACE
-            
+            if ch.startswith('\x1b'):
+                if len(ch) == 1:
+                    # czekaj na resztę sekwencji
+                    seq = ''
+                    for _ in range(32):
+                        r, _, _ = select.select([fd], [], [], 0.05)
+                        if not r:
+                            break
+                        try:
+                            seq += os.read(fd, 1).decode('utf-8', errors='replace')
+                        except:
+                            break
+                        if seq.startswith('[<') and seq.endswith(('M', 'm')):
+                            try:
+                                p = seq[2:-1].split(';')
+                                btn = int(p[0]); col = int(p[1]); row = int(p[2])
+                                release = seq.endswith('m')
+                                if btn & 64:
+                                    return Key.MOUSE_SCROLL_UP if (btn & 1) else Key.MOUSE_SCROLL_DOWN
+                                return MouseEvent(btn, col, row, release)
+                            except:
+                                pass
+                        if seq in cls._ESC_SEQUENCES:
+                            return cls._ESC_SEQUENCES[seq]
+                    return Key.ESC
+
+                # pełna sekwencja w jednym odczycie - jak w CachCach
+                if '[<' in ch and (ch.endswith('M') or ch.endswith('m')):
+                    m_match = re.search(r'\[<(\d+);(\d+);(\d+)([Mm])', ch)
+                    if m_match:
+                        btn = int(m_match.group(1))
+                        col = int(m_match.group(2))
+                        row = int(m_match.group(3))
+                        release = m_match.group(4) == 'm'
+                        if btn & 64:
+                            return Key.MOUSE_SCROLL_UP if (btn & 1) else Key.MOUSE_SCROLL_DOWN
+                        return MouseEvent(btn, col, row, release)
+
+                s_code = ch[1:]
+                if s_code in cls._ESC_SEQUENCES:
+                    return cls._ESC_SEQUENCES[s_code]
+                return Key.ESC
+
+            if ch in ('\x0a', '\x0d'):
+                return Key.ENTER
+            if ch == '\x7f':
+                return Key.BACKSPACE
+            if ch == '\x09':
+                return Key.TAB
+            if ch == '\x20':
+                return Key.SPACE
+
+            # filtr okruchów myszy jak w CachCach
+            if ch.lstrip().startswith('[<'):
+                return Key.TIMEOUT
+
             return ch
 
 get_key = KeyReader.get_key
@@ -4272,7 +4441,7 @@ class PTZMasterApp:
 
     def cleanup(self, save_session: bool = False):
         logger.info("Cleaning up before exit...")
-        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m')
         sys.stdout.flush()
 
         if save_session:
@@ -5156,6 +5325,7 @@ class PTZMasterApp:
             return new_val
     
     def run(self):
+        sys.stdout.write("\033[?25l")
         Terminal.capture_window_id()
         Terminal.setup_layout(self.config)
         
@@ -6402,11 +6572,22 @@ class PTZMasterApp:
     # Scanner configuration TUI (x) - Wersja finalna z obsługą komunikatów
     # --------------------------------------------------------------------------
     def _scanner_control_screen(self):
-        """Scanner configuration TUI – aligned columns, ESC to quit."""
+        """Scanner configuration TUI – aligned columns, dynamic hitboxes, ESC to quit."""
         cam = self.ui.current_camera
         if not cam or cam.type != CameraType.SCANNER:
             notify("No scanner selected", "warning")
             return
+
+        # Definicja kolorów na początku funkcji (dostępne wszędzie)
+        C_KEY = "\033[93m"       # żółty klawisze
+        C_VAL = "\033[96m"       # cyan wartości
+        C_LAB = "\033[97m"       # biały etykiety
+        C_RST = "\033[0m"        # reset
+        C_CYN = "\033[96m"       # cyjan
+        C_YLW = "\033[93m"       # żółty
+        C_GRN = "\033[92m"       # zielony
+        C_DIM_CYN = "\033[2;96m" # przyciemniony cyjan
+        C_BOLD_YLW = "\033[1;93m"# pogrubiony żółty
 
         # Sprawdź prawa zapisu do katalogu docelowego
         dest_dir = cam.scan_dest or SCAN_DIR
@@ -6446,35 +6627,7 @@ class PTZMasterApp:
         scan_pct = 0
         scan_info_msg = ""
         scan_ok = [False]
-
-        RIGHT_EDGE = 78
-        L_TOP      = 1
-        L_HEADER   = 2
-        L_SEP1     = 3
-        L_ROW1     = 4
-        L_ROW2     = 5
-        L_ROW3     = 6
-        L_ROW4     = 7
-        L_SEP2     = 8
-        L_PROGRESS = 9
-        L_SEP3     = 10
-        L_STATUS   = 11
-        L_BOTTOM   = 12
-
-        col1 = 2
-        col2 = 26
-        col3 = 48
-
-        def _shorten_path(path, max_len):
-            if len(path) <= max_len:
-                return path
-            return path[:max_len-3] + "..."
-
-        def _cycled(lst, val):
-            try:
-                return lst[(lst.index(val) + 1) % len(lst)]
-            except ValueError:
-                return lst[0]
+        _bp = {}
 
         def _get_next_number():
             if override_num is not None:
@@ -6495,125 +6648,151 @@ class PTZMasterApp:
             return max(nums, default=0) + 1
 
         def _format_number(num):
-            if num_padding == -1:  return ""           # NO — brak numeru
-            elif num_padding == 1: return str(num)      # 1d: 1,2,3
-            elif num_padding == 2: return f"{num:02d}"  # 2d: 01,02
-            else:                  return f"{num:03d}"  # 3d: 001,002
+            if num_padding == -1:  return ""
+            elif num_padding == 1: return str(num)
+            elif num_padding == 2: return f"{num:02d}"
+            else:                  return f"{num:03d}"
+
+        def _cycled(lst, val):
+            try:
+                return lst[(lst.index(val) + 1) % len(lst)]
+            except ValueError:
+                return lst[0]
 
         def _draw():
-            out = sys.stdout.write
+            if not _EMOJI_CACHE:
+                calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░"])
+            buf = []
+            if full_redraw[0]:
+                buf.append('\033[2J\033[H')
+                full_redraw[0] = False
+            try:
+                term_w, term_h = shutil.get_terminal_size()
+            except:
+                term_w, term_h = 80, 24
+            W = max(60, min(120, term_w - 2))
+            H = max(20, min(30, term_h - 2))
+
             today = datetime.date.today()
             date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
             next_num = _get_next_number()
             num_str = _format_number(next_num)
             pad_indicator = {-1:"NO", 1:"1d", 2:"2d", 3:"3d"}.get(num_padding, "3d")
 
-            header_left = f"{CYN} 🖨  Scanner: {YLW}{cam.name}{RST}{CYN}  dev: {DIM}{cam.scan_device or '(default)'}{RST}"
-            header_right = f"{YLW}F1 Help{RST}"
-            header = f"{header_left}   {header_right}"
+            # Nagłówek okna
+            f1_visible = "(F1 Help)"
+            f1 = f"{C_BOLD_YLW}(F1{C_RST} {C_CYN}Help){C_RST}"
+            top = f"╔{'═'*(W-len(f1_visible)-1)}{f1}═╗"
+            buf.append(f"\033[1;1H{top}")
 
-            part1_m = f" {YLW}(m){RST} Mode  : {GRN}{cam.scan_mode}{RST}"
-            part1_d = f"{YLW}(d){RST} DPI   : {GRN}{cam.scan_dpi}{RST}"
-            part1_a = f"{YLW}(a){RST} Area  : {GRN}{cam.scan_area}{RST}"
+            header_txt = f"{C_DIM_CYN}🖨  Scanner:{C_RST} {C_YLW}{cam.name}{C_RST}  {C_DIM_CYN}dev:{C_RST} {C_YLW}{cam.scan_device or '(default)'}{C_RST}"
+            draw_slot(buf, 2, 1, W+2, f"║ {header_txt}", "", "║")
+            buf.append(f"\033[3;1H╠{'═'*W}╣")
 
-            part2_f = f" {YLW}(f){RST} Format: {GRN}{cam.scan_format}{RST}"
-            part2_r = f"{YLW}(r){RST} Resize: {GRN}{cam.scan_resize}{RST}"
-            part2_c = f"{YLW}(c){RST} Compr : {GRN}{cam.scan_quality}{RST}"
+            desc_str = cam.scan_desc or "(none)"
+            num_full = f"{num_str} [{pad_indicator}]"
 
-            part3_h = f" {YLW}(h){RST} Date  : {GRN}{date_str}{RST}"
-            desc_display = cam.scan_desc if cam.scan_desc else "(none)"
-            part3_n = f"{YLW}(n){RST} Desc  : {GRN}{desc_display}{RST}"
-            part3_x = f"{YLW}(x){RST} Number: {GRN}{num_str} [{pad_indicator}](y){RST}"
+            col1_1 = f"{C_KEY}(m){C_RST} {C_LAB}Mode  :{C_RST} {C_VAL}{cam.scan_mode:<11}{C_RST}"
+            col2_1 = f"{C_KEY}(d){C_RST} {C_LAB}DPI   :{C_RST} {C_VAL}{str(cam.scan_dpi):<10}{C_RST}"
+            col3_1 = f"{C_KEY}(a){C_RST} {C_LAB}Area  :{C_RST} {C_VAL}{cam.scan_area}{C_RST}"
 
+            col1_2 = f"{C_KEY}(f){C_RST} {C_LAB}Format:{C_RST} {C_VAL}{cam.scan_format:<11}{C_RST}"
+            col2_2 = f"{C_KEY}(r){C_RST} {C_LAB}Resize:{C_RST} {C_VAL}{cam.scan_resize:<10}{C_RST}"
+            col3_2 = f"{C_KEY}(c){C_RST} {C_LAB}Compr :{C_RST} {C_VAL}{str(cam.scan_quality)}{C_RST}"
+
+            col1_3 = f"{C_KEY}(h){C_RST} {C_LAB}Date  :{C_RST} {C_VAL}{date_str:<11}{C_RST}"
+            col2_3 = f"{C_KEY}(n){C_RST} {C_LAB}Desc  :{C_RST} {C_VAL}{desc_str:<10}{C_RST}"
+            col3_3 = f"{C_KEY}(x){C_RST} {C_LAB}Number:{C_RST} {C_VAL}{num_full:<10}{C_RST}{C_KEY}(y){C_RST}"
+
+            col1_4 = f"{C_KEY}(v){C_RST} {C_LAB}Viewer:{C_RST} {C_VAL}{cam.scan_viewer:<11}{C_RST}"
             dest_str = str(cam.scan_dest)
-            part4_v = f" {YLW}(v){RST} Viewer: {GRN}{cam.scan_viewer:<10}{RST}"
-            part4_t = f"{YLW}(t){RST} Dest  : {GRN}{_shorten_path(dest_str, 45)}{RST}"
+            col2_4 = f"{C_KEY}(t){C_RST} {C_LAB}Dest  :{C_RST} {C_VAL}{dest_str}{C_RST}"
+
+            draw_slot(buf, 4, 1, W+2, f"║ {col1_1}{col2_1}{col3_1}", "", "║")
+            draw_slot(buf, 5, 1, W+2, f"║ {col1_2}{col2_2}{col3_2}", "", "║")
+            draw_slot(buf, 6, 1, W+2, f"║ {col1_3}{col2_3}{col3_3}", "", "║")
+            draw_slot(buf, 7, 1, W+2, f"║ {col1_4}{col2_4}", "", "║")
+            buf.append(f"\033[8;1H╠{'═'*W}╣")
 
             file_base = f"{date_str}_{cam.scan_desc or 'none'}_{num_str}.{cam.scan_format}"
             full_path = os.path.join(cam.scan_dest, file_base)
             if scan_phase == 0:
-                prog_line = f" {YLW}(p){RST} Scan  {DIM}{_shorten_path(full_path, 55)}{RST}"
+                prog = f"{C_KEY}(p){C_RST} {C_LAB}Scan{C_RST}  {full_path}"
             elif scan_phase == 1:
-                prog_line = f" 🖨  {YLW}Preparing scan...{RST} {DIM}{_shorten_path(full_path, 50)}{RST}"
+                prog = f"🖨  Preparing scan... {full_path}"
             elif scan_phase == 2:
-                bar_len = 15
-                filled = int((scan_pct / 100) * bar_len)
-                bar = f"{GRN}{'█' * filled}{DIM}{'░' * (bar_len - filled)}{RST}"
-                prog_line = f" 🖨  Scanning... {scan_pct:3d}% [{bar}] {DIM}{_shorten_path(file_base, 35)}{RST}"
+                bar = "█" * int(scan_pct/100*15) + "░" * (15 - int(scan_pct/100*15))
+                prog = f"🖨  Scanning... {scan_pct:3d}% [{bar}] {file_base}"
             else:
-                res_col = GRN if scan_ok[0] else RED
-                info = scan_info_msg if scan_info_msg else ("OK" if scan_ok[0] else "ERR")
-                prog_line = f" {YLW}(p){RST} Scan  {DIM}{_shorten_path(full_path, 55)}{RST} {res_col}{info}{RST}"
+                prog = f"{C_KEY}(p){C_RST} {C_LAB}Scan{C_RST}  {full_path} {'OK' if scan_ok[0] else 'ERR'}"
+            draw_slot(buf, 9, 1, W+2, f"║ {prog}", "", "║")
+            buf.append(f"\033[10;1H╠{'═'*W}╣")
 
-            cpu_str = get_cpu_usage()
-            free_pct = get_free_space_percent()
-            hdd_use = 100 - free_pct
-            try:
-                with open('/proc/meminfo') as _mf:
-                    _ml = {l.split(':')[0]: int(l.split()[1]) for l in _mf if ':' in l}
-                ram_pct = int(100 * (1 - _ml.get('MemAvailable', 0) / max(_ml.get('MemTotal', 1), 1)))
-            except:
-                ram_pct = 0
-
-            def _b(pct, width=7):
-                f = int(pct / 100 * width)
-                return f"{'█'*f}{DIM}{'░'*(width-f)}{RST}"
-
-            cpu_n = int(cpu_str.replace('%','').strip() or 0)
-            cpu_col = RED if cpu_n > 80 else (YLW if cpu_n > 50 else GRN)
-            ram_col = RED if ram_pct > 80 else (YLW if ram_pct > 60 else GRN)
-            hdd_col = RED if hdd_use > 90 else (YLW if hdd_use > 75 else GRN)
-
-            sys_stats = f" ⚙{cpu_col}{cpu_n:3d}%{RST} 🧠[{_b(ram_pct)}]{ram_col}{ram_pct:2d}%{RST} 💽[{_b(hdd_use)}]{hdd_col}{hdd_use:2d}%{RST}"
+            for r in range(11, H-3):
+                draw_slot(buf, r, 1, W+2, "║", "", "║")
 
             now_ts = time.time()
             raw_notifs = [(msg, col) for msg, col, ts in NotificationManager()._queue if now_ts - ts < NotificationManager()._lifetime]
-            if raw_notifs:
-                status_msg, msg_col = raw_notifs[-1]
-                if len(status_msg) > 25:
-                    status_msg = status_msg[:22] + "..."
-            else:
-                status_msg = "OK"
-                msg_col = GRN
+            status_msg = raw_notifs[-1][0] if raw_notifs else "OK"
+            draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {status_msg}", "", "║")
 
-            status_disp = f"🔔 {msg_col}{status_msg}{RST}"
-            left_part = f"{sys_stats}  {status_disp}"
-            ver_esc = f"{DIM}v{VERSION}{RST} {YLW}(ESC/Q){RST}"
+            sys_stats = tui_sys_stats()
+            buf.append(f"\033[{H-2};1H║ {sys_stats}")
+            buf.append(f"\033[{H-2};{W+2}H║")
 
-            out(f"\033[{L_TOP};1H\033[2K╔{'═'*76}╗")
-            out(f"\033[{L_HEADER};1H\033[2K║ {header}\033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_SEP1};1H\033[2K╠{'═'*76}╣")
-
-            out(f"\033[{L_ROW1};1H\033[2K║\033[{col1}G{part1_m}\033[{col2}G{part1_d}\033[{col3}G{part1_a}\033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_ROW2};1H\033[2K║\033[{col1}G{part2_f}\033[{col2}G{part2_r}\033[{col3}G{part2_c}\033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_ROW3};1H\033[2K║\033[{col1}G{part3_h}\033[{col2}G{part3_n}\033[{col3}G{part3_x}\033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_ROW4};1H\033[2K║\033[{col1}G{part4_v}\033[{col2}G{part4_t}\033[{RIGHT_EDGE}G║")
-
-            out(f"\033[{L_SEP2};1H\033[2K╠{'═'*76}╣")
-            out(f"\033[{L_PROGRESS};1H\033[2K║{prog_line}\033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_SEP3};1H\033[2K╠{'═'*76}╣")
-
-            out(f"\033[{L_STATUS};1H\033[2K║{left_part}\033[{RIGHT_EDGE - ansilen(ver_esc) - 1}G{ver_esc} \033[{RIGHT_EDGE}G║")
-            out(f"\033[{L_BOTTOM};1H\033[2K╚{'═'*76}╝")
+            foot_vis = f"[ ptz-master v {VERSION} ]═(ESC/Q)"
+            foot = f"[{C_CYN} ptz-master v {VERSION} {C_RST}]═{C_KEY}(ESC/Q){C_RST}"
+            bottom = f"╚{'═'*(W-len(foot_vis)-1)}{foot}═╝"
+            buf.append(f"\033[{H-1};1H{bottom}")
+            sys.stdout.write("".join(buf) + "\033[?25l")
             sys.stdout.flush()
 
-        sys.stdout.write('\033[2J\033[H\033[?1000h\033[?1002h\033[?1006h')
-        sys.stdout.flush()
+            _bp.clear()
+            _bp['F1'] = (1, W - 15, W)
+            _bp['m']  = (4, 3, 25);  _bp['d'] = (4, 26, 47); _bp['a'] = (4, 48, W)
+            _bp['f']  = (5, 3, 25);  _bp['r'] = (5, 26, 47); _bp['c'] = (5, 48, W)
+            _bp['h']  = (6, 3, 25);  _bp['n'] = (6, 26, 47); _bp['x'] = (6, 48, 68); _bp['y'] = (6, 69, W)
+            _bp['v']  = (7, 3, 25);  _bp['t'] = (7, 26, W)
+            _bp['p']  = (9, 3, W)
+            _bp['ESC']= (H - 1, W - 15, W)
+
+        full_redraw = [True]
+        import signal
+        signal.signal(signal.SIGWINCH, lambda s,f: full_redraw.__setitem__(0, True))
+
+        import tty
+        fd = sys.stdin.fileno()
+        old_term = termios.tcgetattr(fd)
+
         running = True
         try:
+            tty.setcbreak(fd)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+
             while running:
                 _draw()
-                key = get_key()
+                key = get_key(0.15)
                 _mk = key
+
+                if isinstance(key, MouseEvent) and not key.release:
+                    r, c = key.row, key.col
+                    mouse_hit = False
+                    for k, (box_r, box_c_start, box_c_end) in _bp.items():
+                        if r == box_r and box_c_start <= c <= box_c_end:
+                            if k == 'ESC': running = False
+                            elif k == 'F1': _mk = Key.F1
+                            else: _mk = k
+                            mouse_hit = True; break
+                    if not mouse_hit and r == 11 and c >= 60: running = False
+                    if not mouse_hit and running: continue
 
                 if _mk == 'm':
                     cam.scan_mode = _cycled(MODES, cam.scan_mode)
                     self.config_mgr.save()
                 elif _mk == 'd':
-                    try:
-                        idx = DPIS.index(cam.scan_dpi)
-                    except ValueError:
-                        idx = 4
+                    try: idx = DPIS.index(cam.scan_dpi)
+                    except ValueError: idx = 4
                     cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
                     self.config_mgr.save()
                 elif _mk == 'f':
@@ -6626,10 +6805,8 @@ class PTZMasterApp:
                         key_ = items[ai]
                         if key_ == "Custom":
                             new_area = self._edit_param("Area (x:y:w:h mm)", cam.scan_area)
-                            if new_area:
-                                cam.scan_area = new_area
-                        else:
-                            cam.scan_area = AREAS[key_]
+                            if new_area: cam.scan_area = new_area
+                        else: cam.scan_area = AREAS[key_]
                         self.config_mgr.save()
                 elif _mk == 'r':
                     items = list(RESIZES.keys())
@@ -6638,208 +6815,135 @@ class PTZMasterApp:
                         key_ = items[ri]
                         if key_ == "Custom":
                             new_resize = self._edit_param("Resize (WxH)", cam.scan_resize)
-                            if new_resize:
-                                cam.scan_resize = new_resize
-                        else:
-                            cam.scan_resize = RESIZES[key_]
+                            if new_resize: cam.scan_resize = new_resize
+                        else: cam.scan_resize = RESIZES[key_]
                         self.config_mgr.save()
                 elif _mk == 'c':
                     val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
                     try:
                         cam.scan_quality = max(0, min(100, int(val)))
                         self.config_mgr.save()
-                    except ValueError:
-                        pass
+                    except ValueError: pass
                 elif _mk == 'v':
                     cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
                     self.config_mgr.save()
                 elif _mk == 't':
                     new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
-                    if new_dest:
-                        cam.scan_dest = new_dest
-                        self.config_mgr.save()
+                    if new_dest: cam.scan_dest = new_dest; self.config_mgr.save()
                 elif _mk == 'n':
                     new_desc = self._edit_param("Desc (Enter=keep, empty=none)", cam.scan_desc)
-                    if new_desc is not None:
-                        cam.scan_desc = new_desc.strip()  # "" → (none)
-                        self.config_mgr.save()
-                elif _mk == 'h':
-                    date_format = 1 - date_format
+                    if new_desc is not None: cam.scan_desc = new_desc.strip(); self.config_mgr.save()
+                elif _mk == 'h': date_format = 1 - date_format
                 elif _mk == 'x':
-                    if num_padding == -1:
-                        num_padding = 1
-                    elif num_padding == 1:
-                        num_padding = 2
-                    elif num_padding == 2:
-                        num_padding = 3
-                    else:
-                        num_padding = -1
+                    if num_padding == -1: num_padding = 1
+                    elif num_padding == 1: num_padding = 2
+                    elif num_padding == 2: num_padding = 3
+                    else: num_padding = -1
                     self.config_mgr.save()
                 elif _mk == 'y':
                     val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
                     try:
                         num = int(val)
-                        if 1 <= num <= 999:
-                            override_num = num
-                        else:
-                            notify("Number must be 1-999", "warning")
-                    except ValueError:
-                        pass
+                        if 1 <= num <= 999: override_num = num
+                        else: notify("Number must be 1-999", "warning")
+                    except ValueError: pass
 
                 elif _mk == 'p':
                     self.config_mgr.save()
-                    scan_phase = 1
-                    scan_pct = 0
-                    scan_ok[0] = False
+                    scan_phase = 1; scan_pct = 0; scan_ok[0] = False
 
-                    fd = sys.stdin.fileno()
-                    old_termios = termios.tcgetattr(fd)
+                    # Wyłączamy mysz na czas skanowania, by nie śmieciła w buforze
                     sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
                     sys.stdout.flush()
 
                     scan_done = threading.Event()
                     scan_result = [False, ""]
-                    # Zapamiętaj oryginalne ustawienia terminala
-                    mouse_was_on = True
 
                     def update_progress(pct):
                         nonlocal scan_phase, scan_pct
-                        if scan_phase != 2:
-                            scan_phase = 2
+                        if scan_phase != 2: scan_phase = 2
                         scan_pct = pct
 
                     def scan_task():
                         try:
+                            # POPRAWKA: Jawne przekazanie argumentów naprawia zwiechę procesu
                             ok, msg = Player._play_scanner(
                                 cam,
                                 progress_callback=update_progress,
                                 file_number=_get_next_number(),
                                 date_fmt=date_format,
-                                num_pad=num_padding,
+                                num_pad=num_padding
                             )
                             scan_result[0] = ok
                             scan_result[1] = msg
+                        except Exception as e:
+                            scan_result[0] = False
+                            scan_result[1] = str(e)
                         finally:
                             scan_done.set()
 
                     threading.Thread(target=scan_task, daemon=True).start()
 
+                    # Pętla oczekiwania na zakończenie wątku skanowania
                     while not scan_done.is_set():
                         _draw()
                         time.sleep(0.2)
 
-                    # Przywróć ustawienia terminala nawet w przypadku błędu
+                    # Przywracamy mysz
                     sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
                     sys.stdout.flush()
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
 
-                    # Sprawdź, czy skanowanie zostało anulowane przez ESC
-                    if not scan_done.is_set():
-                        scan_phase = 0
-                        scan_ok[0] = False
-                    else:
-                        scan_phase = 3
+                    scan_phase = 3
                     scan_ok[0] = scan_result[0]
+
                     if scan_ok[0]:
-                        try:
-                            today = datetime.date.today()
-                            date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
-                            desc_part = f"_{cam.scan_desc}" if cam.scan_desc else ""
-                            pattern = f"{date_str}{desc_part}_*.{cam.scan_format}"
-                            import glob as _gl
-                            files = sorted(_gl.glob(os.path.join(cam.scan_dest, pattern)))
-                            if files:
-                                size = os.path.getsize(files[-1])
-                                if size < 1024:
-                                    scan_info_msg = f"({size}B)"
-                                elif size < 1024*1024:
-                                    scan_info_msg = f"({size/1024:.1f}K)"
-                                else:
-                                    scan_info_msg = f"({size/(1024*1024):.1f}M)"
-                            else:
-                                scan_info_msg = "(OK)"
-                        except:
-                            scan_info_msg = "(OK)"
                         notify("Scan saved successfully", "info")
-                        # Pytaj co dalej
-                        _final_file = scan_result[1] if scan_result[0] else None
+                        _final_file = scan_result[1]
                         _ask_next = True
                     else:
-                        err_msg = scan_result[1] or "ERR"
-                        if len(err_msg) > 20:
-                            err_msg = err_msg[:17] + "..."
-                        scan_info_msg = f"({err_msg})"
-                        notify(f"Scan failed: {err_msg}", "error")
+                        notify(f"Scan failed: {scan_result[1]}", "error")
                         _final_file = None
                         _ask_next = False
 
                     _draw()
 
-                    # Dialog po skanie: Pokaż / Następny / Koniec
                     if _ask_next and _final_file:
-                        _W = 76
+                        try: term_w, term_h = shutil.get_terminal_size()
+                        except: term_w, term_h = 80, 24
+                        _W = max(60, min(120, term_w - 2))
+                        L_STATUS = 11
                         sys.stdout.write(f"\033[{L_STATUS};1H\033[2K")
                         _sz = os.path.getsize(_final_file) if os.path.isfile(_final_file) else 0
                         _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
                         _fname = os.path.basename(_final_file)
+
                         sys.stdout.write(
                             f"\033[{L_STATUS};1H"
-                            f"║ {GRN}✓ {_fname} ({_sz_s}){RST}"
-                            f"  {YLW}(p){RST} Pokaż"
-                            f"  {YLW}(n){RST} Następny"
-                            f"  {YLW}(ESC){RST} Koniec"
+                            f"║ {C_GRN}✓ {_fname} ({_sz_s}){C_RST}"
+                            f"  {C_KEY}(p){C_RST} Pokaż"
+                            f"  {C_KEY}(n){C_RST} Następny"
+                            f"  {C_KEY}(ESC){C_RST} Koniec"
                             f"\033[{_W+2}G║"
                         )
                         sys.stdout.flush()
-                        _ans = get_key(timeout=30)  # 30s autotimeout
+
+                        _ans = get_key(timeout=30)
                         if _ans == 'p' or _ans == 'P':
                             viewer = cam.scan_viewer or "mpv"
-                            _viewer_cmd = [viewer, _final_file]
-                            # mpv: --image-display-duration dla dłuższego wyświetlania
-                            if viewer == 'mpv':
-                                _viewer_cmd = ['mpv', '--image-display-duration=30',
-                                               '--no-terminal', _final_file]
-                            if shutil.which(viewer):
-                                subprocess.Popen(_viewer_cmd,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            elif shutil.which('xdg-open'):
-                                subprocess.Popen(['xdg-open', _final_file],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        elif _ans == 'n' or _ans == 'N':
-                            pass  # wróć do TUI — kolejny skan przez (p)
-                        # ESC/inne = powrót do TUI bez akcji
+                            _cmd = [viewer, _final_file]
+                            if viewer == 'mpv': _cmd = ['mpv', '--image-display-duration=30', '--no-terminal', _final_file]
+                            subprocess.Popen(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        elif _ans in (Key.ESC, 'q', 'Q'): running = False
 
                 elif _mk == Key.F1:
-                    self._show_scanner_help()
+                    self._show_scanner_help(); full_redraw[0] = True
                 elif _mk in ('q', 'Q', Key.ESC):
                     running = False
 
-                elif isinstance(key, MouseEvent) and not key.release:
-                    r, c = key.row, key.col
-                    if r == L_ROW1:
-                        if c <= 26: _mk = 'm'
-                        elif c <= 52: _mk = 'd'
-                        else: _mk = 'a'
-                    elif r == L_ROW2:
-                        if c <= 26: _mk = 'f'
-                        elif c <= 52: _mk = 'r'
-                        else: _mk = 'c'
-                    elif r == L_ROW3:
-                        if c <= 26: _mk = 'h'
-                        elif c <= 52: _mk = 'n'
-                        else: _mk = 'x'
-                    elif r == L_ROW4:
-                        _mk = 'v' if c <= 40 else 't'
-                    elif r == L_PROGRESS:
-                        if c <= 10: _mk = 'p'
-                        else: running = False
-                    elif r == L_STATUS:
-                        if c >= 60: running = False
-
         finally:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.write('\033[2J\033[H')
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[2J\033[H')
             sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
     # --------------------------------------------------------------------------
     # Scanner configuration TUI (x) end
     # --------------------------------------------------------------------------
@@ -7065,6 +7169,8 @@ class PTZMasterApp:
             old_winch = signal.signal(signal.SIGWINCH, handle_winch)
 
             tty.setraw(fd)
+            # użyj alternatywnego bufora żeby nie zaśmiecać scrollback
+            sys.stdout.write('\033[?1049h')
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
 
@@ -7168,6 +7274,8 @@ class PTZMasterApp:
             if old_winch is not None:
                 signal.signal(signal.SIGWINCH, old_winch)
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+            sys.stdout.write('\033[?1049l')  # wróć do głównego bufora
+            sys.stdout.write('\033[2J\033[H')  # wyczyść po helpie
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
             mouse_on()
@@ -10281,7 +10389,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         row(f"{left}{' ' * max(0, padding)}{right}")
         _w(f"\r{BLU}╚{'═'*W}╝{RST}\033[K\r\n")
         sys.stdout.write("".join(_buf))
-        sys.stdout.write("\033[J\033[?25h")
+        sys.stdout.write("\033[J\033[?25l")
         sys.stdout.flush()
 
     # --------------------------------------------------------------------------
@@ -11146,7 +11254,7 @@ def _show_playlist(files, current_idx):
         nav = f" {YLW}[↑↓PgUp/Dn]{RST} {YLW}[ENTER]{RST} wybierz  {YLW}[D]{RST} katalog  {YLW}[Q/ESC]{RST} anuluj  {DIM}{pg}{RST}"
         out(f"\r{BLU}║{RST}{pad(nav, W)}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╚{'═'*W}╝{RST}\r\n")
-        out("\033[?25h")
+        out("\033[?25l")
 
     def _draw_dir(entries, sel, cwd_path):
         nonlocal col_w
@@ -11210,7 +11318,7 @@ def _show_playlist(files, current_idx):
         hint = f" {YLW}[ENTER]{RST} otwórz  {YLW}[F2]{RST} kolumny  {YLW}[F3]{RST} V/H  {YLW}[F4]{RST} ukryte  {YLW}[F]{RST} filtr  {YLW}[ESC]{RST} lista"
         out(f"\r{BLU}║{RST}{pad(hint, W)}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╚{'═'*W}╝{RST}\r\n")
-        out("\033[?25h")
+        out("\033[?25l")
 
     # ── Główna pętla ──────────────────────────────────────────────
     old_settings = termios.tcgetattr(fd)
@@ -11271,6 +11379,7 @@ def _show_playlist(files, current_idx):
                         # odśwież hint
                         out(f"\033[18;3H{YLW}Filtr:{RST} {filter_str}{DIM}█{RST}   ")
                     tty.setraw(fd)
+                    out("\033[?25l")
                     # Filtruj files
                     flt_lower = filter_str.lower()
                     visible_files = [f for f in files if flt_lower in os.path.basename(f).lower()] if filter_str else files
@@ -11306,6 +11415,7 @@ def _show_playlist(files, current_idx):
                                 else: filter_str += _fc
                                 out(f"\033[3;18H{filter_str}{DIM}█{RST}   ")
                             tty.setraw(fd)
+                            out("\033[?25l")
                         elif 'ESC' in _btn and _btn['ESC'][0] <= c <= _btn['ESC'][1]:
                             return -1
                     # r3+: lista plików
@@ -11400,6 +11510,7 @@ def _show_playlist(files, current_idx):
                         else: filter_str += c
                         out(f"\033[18;16H{filter_str}{DIM}█{RST}   ")
                     tty.setraw(fd)
+                    out("\033[?25l")
                     dir_entries = _scan_dir(cwd, show_hidden, filter_str)
                     dir_sel = 0
                 elif key in ("\x1b", Key.ESC):
