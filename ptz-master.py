@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.69"
+VERSION = "9.0.70"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -3839,16 +3839,17 @@ class Player:
                 final_file = raw_file
 
             # Otwórz przeglądarkę
-            viewer = cam.scan_viewer or "mpv"
-            if viewer == "mpv" and shutil.which("mpv"):
-                subprocess.Popen([
-                    "mpv", final_file,
-                    "--image-display-duration=inf",
-                    "--keep-open=yes",
-                    f"--title=Skan: {os.path.basename(final_file)}"
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif shutil.which(viewer):
-                subprocess.Popen([viewer, final_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # WYŁĄCZONE: automatyczny podgląd po skanie - teraz tylko na żądanie (s)
+            # viewer = cam.scan_viewer or "mpv"
+            # if viewer == "mpv" and shutil.which("mpv"):
+            #     subprocess.Popen([
+            #         "mpv", final_file,
+            #         "--image-display-duration=inf",
+            #         "--keep-open=yes",
+            #         f"--title=Skan: {os.path.basename(final_file)}"
+            #     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # elif shutil.which(viewer):
+            #     subprocess.Popen([viewer, final_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             return True, final_file
 
@@ -4366,8 +4367,24 @@ class UI:
 
         # L2: notif albo auto-check
         if _scan:
-            _sl = str(_scan)[:FW-2]
-            sys.stdout.write("│ " + _sl)
+            _sl = str(_scan)
+            # Truncate by visible length, preserving ANSI codes
+            import re
+            _ansi_re = re.compile(r'(\x1b\[[0-9;]*m)')
+            parts = _ansi_re.split(_sl)
+            _vis_len = 0
+            _out = ''
+            for part in parts:
+                if part.startswith('\x1b['):
+                    _out += part
+                else:
+                    if _vis_len + len(part) > FW-2:
+                        _out += part[:max(0, FW-2-_vis_len)]
+                        break
+                    _out += part
+                    _vis_len += len(part)
+            _sl = _out
+            sys.stdout.write("│ " + _sl + RST)
         else:
             sys.stdout.write("│ " + _ncol + "🔔 " + _notif[:FW-5] + RST)
         sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
@@ -4422,6 +4439,17 @@ class PTZMasterApp:
         self.restore_mode = restore_mode
         self.start_camera = start_camera
         self.start_mac = start_mac
+        self.last_scanned_file = None
+        # Load persisted last scan
+        try:
+            _last_scan_file = os.path.join(BASE_DIR, ".last_scan")
+            if os.path.exists(_last_scan_file):
+                with open(_last_scan_file, 'r', encoding='utf-8') as f:
+                    _path = f.read().strip()
+                    if _path and os.path.exists(_path):
+                        self.last_scanned_file = _path
+        except Exception:
+            pass
 
         atexit.register(self.cleanup)
 
@@ -4751,7 +4779,14 @@ class PTZMasterApp:
                 self._mouse_off()
                 cam = self.ui.current_camera
                 if cam and cam.type == CameraType.SCANNER:
-                    self._scanner_control_screen()
+                    scanned_file = self._scanner_control_screen()
+                    if scanned_file:
+                        self.last_scanned_file = scanned_file
+                        try:
+                            with open(os.path.join(BASE_DIR, ".last_scan"), 'w', encoding='utf-8') as f:
+                                f.write(scanned_file)
+                        except Exception:
+                            pass
                 else:
                     self._mpv_control_screen_cam()
                 self._mouse_on(); self.ui.draw(); return
@@ -5388,10 +5423,15 @@ class PTZMasterApp:
                 cam = self.ui.current_camera
                 if cam and cam.type == CameraType.SCANNER:
                     # Keys PTZ, sync, URI, player edit, credentials, speed/duration, zoom, preset, profile
+                    # NOTE: 's' is allowed for preview, 'f' blocked for speed
+                    if isinstance(key, str) and key.lower() in ('g', 'r', 'o', 'u', 'h', 'f', 'm', 'l',
+                                                               'z', 'i', '?'):
+                        notify("SCANNER: operation not available", "warning")
+                        self.ui.draw()
+                        continue
                     if key in (Key.UP, Key.DOWN, Key.LEFT, Key.RIGHT,
                                '+', '=', '-', Key.SPACE,
-                               'g', 'r', 'o', 'u', 'h', 's', 'f', 'm', 'l',
-                               'z', 'i', 'I', '?', '\\'):
+                               '\\'):
                         notify("SCANNER: operation not available", "warning")
                         self.ui.draw()
                         continue
@@ -5563,7 +5603,14 @@ class PTZMasterApp:
                     cam = self.ui.current_camera
                     if cam and cam.type == CameraType.SCANNER:
                         self._mouse_off()
-                        self._scanner_control_screen()
+                        scanned_file = self._scanner_control_screen()
+                        if scanned_file:
+                            self.last_scanned_file = scanned_file
+                            try:
+                                with open(os.path.join(BASE_DIR, ".last_scan"), 'w', encoding='utf-8') as f:
+                                    f.write(scanned_file)
+                            except Exception:
+                                pass
                         self._mouse_on()
                     else:
                         prof = self.ui.current_profile
@@ -5571,7 +5618,7 @@ class PTZMasterApp:
                         if not player_running:
                             logger.info(f"Auto-starting stream for {cam.name} before control screen")
                             self._play_stream()
-                            time.sleep(0.5)  # short pause for IPC socket creation
+                            time.sleep(0.5)
                         self._mouse_off()
                         self._mpv_control_screen_cam()
                         self._mouse_on()
@@ -5658,10 +5705,30 @@ class PTZMasterApp:
                     self.ui.draw()
                 elif key.lower() == 's':
                     cam = self.ui.current_camera
-                    if cam:
-                        old = cam.speed
-                        cam.speed = max(0.1, round(cam.speed - 0.1, 1))
-                        logger.debug(f"Speed changed: {old} -> {cam.speed}")
+                    if cam and cam.type == CameraType.SCANNER:
+                        # (s) Show last scan in main TUI - tylko dla skanera
+                        if self.last_scanned_file and os.path.exists(self.last_scanned_file):
+                            viewer = cam.scan_viewer or "xdg-open"
+                            _cmd = ['mpv', '--image-display-duration=inf', '--no-terminal', self.last_scanned_file] if viewer == 'mpv' else [viewer, self.last_scanned_file]
+                            try:
+                                subprocess.Popen(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                notify(f"Showing {os.path.basename(self.last_scanned_file)}", "info")
+                            except FileNotFoundError:
+                                try:
+                                    subprocess.Popen(['xdg-open', self.last_scanned_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    notify(f"Viewer '{viewer}' not found, using xdg-open", "warning")
+                                except Exception as e2:
+                                    notify(f"Viewer error: {e2}", "error")
+                            except Exception as e:
+                                notify(f"Viewer error: {e}", "error")
+                        else:
+                            notify("No recent scan to show", "warning")
+                    else:
+                        # (s) Speed down - dla kamer PTZ/V4L2/FILE
+                        if cam:
+                            old = cam.speed
+                            cam.speed = max(0.1, round(cam.speed - 0.1, 1))
+                            logger.debug(f"Speed changed: {old} -> {cam.speed}")
                     self.ui.draw()
                 elif key.lower() == 'm':
                     cam = self.ui.current_camera
@@ -6045,9 +6112,34 @@ class PTZMasterApp:
             if ProcessManager.is_running(prof.pid):
                 notify("Already scanning?", "warning")
                 return
-            layout = cam.layout or self.config.layout["mpv_default"]
-            Player.play(cam, prof, self.config.player_cmd, layout,
-                        global_mute=self.config.global_mute)
+            # --- main TUI scanning with progress ---
+            self.ui.set_scan_status("Preparing scan...")
+            self.ui.draw()
+            def update_progress(pct):
+                bar = "█" * int(pct/100*15) + "░" * (15 - int(pct/100*15))
+                self.ui.set_scan_status(f"Scanning... {pct:3d}% [{bar}]")
+                self.ui.update_status_line(f"Scanning... {pct}%", YLW)
+            ok, msg = Player._play_scanner(cam, progress_callback=update_progress)
+            if ok:
+                self.last_scanned_file = msg
+                try:
+                    with open(os.path.join(BASE_DIR, ".last_scan"), 'w', encoding='utf-8') as f:
+                        f.write(msg)
+                except Exception:
+                    pass
+                try:
+                    _sz = os.path.getsize(msg)
+                    _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
+                except:
+                    _sz_s = "?"
+                basename = os.path.basename(msg)
+                status = f"{GRN}Scan saved successfully ✓{RST} {CYN}{basename}{RST} {BLU}({_sz_s}){RST}  {YLW}(p){RST} Next {YLW}(s){RST} Show"
+                self.ui.set_scan_status(status)
+                notify(f"Scan OK: {basename}", "success")
+            else:
+                self.ui.set_scan_status(f"Scan failed: {msg}")
+                notify(f"Scan failed", "error")
+            self.ui.draw()
             return
         
         if ProcessManager.is_running(prof.pid):
@@ -6571,6 +6663,7 @@ class PTZMasterApp:
     # --------------------------------------------------------------------------
     # Scanner configuration TUI (x) - Wersja finalna z obsługą komunikatów
     # --------------------------------------------------------------------------
+
     def _scanner_control_screen(self):
         """Scanner configuration TUI – aligned columns, dynamic hitboxes, ESC to quit."""
         cam = self.ui.current_camera
@@ -6578,18 +6671,18 @@ class PTZMasterApp:
             notify("No scanner selected", "warning")
             return
 
-        # Definicja kolorów na początku funkcji (dostępne wszędzie)
-        C_KEY = "\033[93m"       # żółty klawisze
-        C_VAL = "\033[96m"       # cyan wartości
-        C_LAB = "\033[97m"       # biały etykiety
-        C_RST = "\033[0m"        # reset
-        C_CYN = "\033[96m"       # cyjan
-        C_YLW = "\033[93m"       # żółty
-        C_GRN = "\033[92m"       # zielony
-        C_DIM_CYN = "\033[2;96m" # przyciemniony cyjan
-        C_BOLD_YLW = "\033[1;93m"# pogrubiony żółty
+        # Define colors at the beginning of the function (available everywhere)
+        C_KEY = "\033[93m"       # yellow for keys
+        C_VAL = "\033[96m"       # cyan for values
+        C_LAB = "\033[97m"       # white for labels
+        C_RST = "\033[0m"        # reset formatting
+        C_CYN = "\033[96m"       # cyan
+        C_YLW = "\033[93m"       # yellow
+        C_GRN = "\033[92m"       # green
+        C_DIM_CYN = "\033[2;96m" # dim cyan
+        C_BOLD_YLW = "\033[1;93m"# bold yellow
 
-        # Sprawdź prawa zapisu do katalogu docelowego
+        # Check write permissions for the destination directory
         dest_dir = cam.scan_dest or SCAN_DIR
         try:
             os.makedirs(dest_dir, exist_ok=True)
@@ -6625,8 +6718,8 @@ class PTZMasterApp:
 
         scan_phase = 0          # 0: idle, 1: preparing, 2: scanning, 3: done
         scan_pct = 0
-        scan_info_msg = ""
         scan_ok = [False]
+        last_scanned_file = getattr(self, 'last_scanned_file', None)  # Load previous scan for 's' preview
         _bp = {}
 
         def _get_next_number():
@@ -6679,7 +6772,7 @@ class PTZMasterApp:
             num_str = _format_number(next_num)
             pad_indicator = {-1:"NO", 1:"1d", 2:"2d", 3:"3d"}.get(num_padding, "3d")
 
-            # Nagłówek okna
+            # Window Header
             f1_visible = "(F1 Help)"
             f1 = f"{C_BOLD_YLW}(F1{C_RST} {C_CYN}Help){C_RST}"
             top = f"╔{'═'*(W-len(f1_visible)-1)}{f1}═╗"
@@ -6733,8 +6826,25 @@ class PTZMasterApp:
 
             now_ts = time.time()
             raw_notifs = [(msg, col) for msg, col, ts in NotificationManager()._queue if now_ts - ts < NotificationManager()._lifetime]
-            status_msg = raw_notifs[-1][0] if raw_notifs else "OK"
-            draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {status_msg}", "", "║")
+
+            if raw_notifs:
+                status_msg = raw_notifs[-1][0]
+                status_col = raw_notifs[-1][1]
+            elif last_scanned_file and scan_phase == 3 and scan_ok[0]:
+                try:
+                    _sz = os.path.getsize(last_scanned_file)
+                    _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
+                    _fname = os.path.basename(last_scanned_file)
+                    status_msg = f"{C_GRN}Scan saved successfully ✓{C_RST} {C_CYN}{_fname}{C_RST} \033[94m({_sz_s}){C_RST}  {C_KEY}(s){C_RST} Show"
+                    status_col = C_GRN
+                except:
+                    status_msg = f"{C_GRN}Scan saved successfully{C_RST}  {C_KEY}(s){C_RST} Show"
+                    status_col = C_GRN
+            else:
+                status_msg = "OK"
+                status_col = C_RST
+
+            draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {status_col}{status_msg}{C_RST}", "", "║")
 
             sys_stats = tui_sys_stats()
             buf.append(f"\033[{H-2};1H║ {sys_stats}")
@@ -6747,6 +6857,7 @@ class PTZMasterApp:
             sys.stdout.write("".join(buf) + "\033[?25l")
             sys.stdout.flush()
 
+            # Update dynamic hitboxes based on current terminal dimensions
             _bp.clear()
             _bp['F1'] = (1, W - 15, W)
             _bp['m']  = (4, 3, 25);  _bp['d'] = (4, 26, 47); _bp['a'] = (4, 48, W)
@@ -6754,11 +6865,13 @@ class PTZMasterApp:
             _bp['h']  = (6, 3, 25);  _bp['n'] = (6, 26, 47); _bp['x'] = (6, 48, 68); _bp['y'] = (6, 69, W)
             _bp['v']  = (7, 3, 25);  _bp['t'] = (7, 26, W)
             _bp['p']  = (9, 3, W)
+            _bp['s']  = (H - 3, 2, W) # Clicking anywhere on the status bar triggers preview
             _bp['ESC']= (H - 1, W - 15, W)
 
         full_redraw = [True]
         import signal
         signal.signal(signal.SIGWINCH, lambda s,f: full_redraw.__setitem__(0, True))
+        sys.stdout.flush()
 
         import tty
         fd = sys.stdin.fileno()
@@ -6778,13 +6891,14 @@ class PTZMasterApp:
                 if isinstance(key, MouseEvent) and not key.release:
                     r, c = key.row, key.col
                     mouse_hit = False
+
                     for k, (box_r, box_c_start, box_c_end) in _bp.items():
                         if r == box_r and box_c_start <= c <= box_c_end:
                             if k == 'ESC': running = False
                             elif k == 'F1': _mk = Key.F1
                             else: _mk = k
                             mouse_hit = True; break
-                    if not mouse_hit and r == 11 and c >= 60: running = False
+
                     if not mouse_hit and running: continue
 
                 if _mk == 'm':
@@ -6847,12 +6961,39 @@ class PTZMasterApp:
                         if 1 <= num <= 999: override_num = num
                         else: notify("Number must be 1-999", "warning")
                     except ValueError: pass
+                elif isinstance(_mk, str) and _mk.lower() == 's':
+                    # Manual preview trigger
+                    if last_scanned_file and os.path.exists(last_scanned_file):
+                        viewer = cam.scan_viewer or "xdg-open"
+
+                        # Command preparation with special handling for mpv
+                        if viewer == 'mpv':
+                            _cmd = ['mpv', '--image-display-duration=inf', '--no-terminal', last_scanned_file]
+                        else:
+                            _cmd = [viewer, last_scanned_file]
+
+                        try:
+                            # Start external viewer process without blocking
+                            subprocess.Popen(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except FileNotFoundError:
+                            # Fallback to xdg-open if chosen viewer missing
+                            try:
+                                subprocess.Popen(['xdg-open', last_scanned_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                notify(f"Viewer '{viewer}' not found, using xdg-open", "warning")
+                            except Exception as e2:
+                                notify(f"Error: '{viewer}' not found", "error")
+                        except Exception as e:
+                            notify(f"Viewer error: {e}", "error")
+                    else:
+                        notify("No recent scan to show", "warning")
 
                 elif _mk == 'p':
+                    # Start of the scanning process
                     self.config_mgr.save()
                     scan_phase = 1; scan_pct = 0; scan_ok[0] = False
+                    last_scanned_file = None # Reset previous path
 
-                    # Wyłączamy mysz na czas skanowania, by nie śmieciła w buforze
+                    # Temporary disable mouse to prevent input buffer issues
                     sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
                     sys.stdout.flush()
 
@@ -6866,7 +7007,7 @@ class PTZMasterApp:
 
                     def scan_task():
                         try:
-                            # POPRAWKA: Jawne przekazanie argumentów naprawia zwiechę procesu
+                            # IMPORTANT: Player._play_scanner returns (success_bool, file_path)
                             ok, msg = Player._play_scanner(
                                 cam,
                                 progress_callback=update_progress,
@@ -6882,14 +7023,15 @@ class PTZMasterApp:
                         finally:
                             scan_done.set()
 
+                    # Execute scan in a separate thread
                     threading.Thread(target=scan_task, daemon=True).start()
 
-                    # Pętla oczekiwania na zakończenie wątku skanowania
+                    # UI Refresh loop
                     while not scan_done.is_set():
                         _draw()
                         time.sleep(0.2)
 
-                    # Przywracamy mysz
+                    # Restore mouse support
                     sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
                     sys.stdout.flush()
 
@@ -6897,43 +7039,21 @@ class PTZMasterApp:
                     scan_ok[0] = scan_result[0]
 
                     if scan_ok[0]:
-                        notify("Scan saved successfully", "info")
-                        _final_file = scan_result[1]
-                        _ask_next = True
+                        # --- CRITICAL: We only store the path here ---
+                        # DO NOT CALL subprocess.Popen HERE!
+                        last_scanned_file = scan_result[1]
+                        self.last_scanned_file = last_scanned_file  # Persist for main UI and next sessions
+                        # Save to disk for persistence across restarts
+                        try:
+                            with open(os.path.join(BASE_DIR, ".last_scan"), 'w', encoding='utf-8') as f:
+                                f.write(last_scanned_file)
+                        except Exception:
+                            pass
+                        notify(f"Scan ready: {os.path.basename(last_scanned_file)}", "success")
                     else:
                         notify(f"Scan failed: {scan_result[1]}", "error")
-                        _final_file = None
-                        _ask_next = False
 
                     _draw()
-
-                    if _ask_next and _final_file:
-                        try: term_w, term_h = shutil.get_terminal_size()
-                        except: term_w, term_h = 80, 24
-                        _W = max(60, min(120, term_w - 2))
-                        L_STATUS = 11
-                        sys.stdout.write(f"\033[{L_STATUS};1H\033[2K")
-                        _sz = os.path.getsize(_final_file) if os.path.isfile(_final_file) else 0
-                        _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
-                        _fname = os.path.basename(_final_file)
-
-                        sys.stdout.write(
-                            f"\033[{L_STATUS};1H"
-                            f"║ {C_GRN}✓ {_fname} ({_sz_s}){C_RST}"
-                            f"  {C_KEY}(p){C_RST} Pokaż"
-                            f"  {C_KEY}(n){C_RST} Następny"
-                            f"  {C_KEY}(ESC){C_RST} Koniec"
-                            f"\033[{_W+2}G║"
-                        )
-                        sys.stdout.flush()
-
-                        _ans = get_key(timeout=30)
-                        if _ans == 'p' or _ans == 'P':
-                            viewer = cam.scan_viewer or "mpv"
-                            _cmd = [viewer, _final_file]
-                            if viewer == 'mpv': _cmd = ['mpv', '--image-display-duration=30', '--no-terminal', _final_file]
-                            subprocess.Popen(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        elif _ans in (Key.ESC, 'q', 'Q'): running = False
 
                 elif _mk == Key.F1:
                     self._show_scanner_help(); full_redraw[0] = True
@@ -6944,6 +7064,9 @@ class PTZMasterApp:
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[2J\033[H')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+
+        return last_scanned_file
+
     # --------------------------------------------------------------------------
     # Scanner configuration TUI (x) end
     # --------------------------------------------------------------------------
