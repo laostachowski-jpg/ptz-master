@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.72"
+VERSION = "9.0.77"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4191,9 +4191,12 @@ class UI:
 
         rlines = []
 
-        l1 = f" {YLW}F1{RST} Help {YLW}(c){RST} Config: {GRN}{CONFIG_FILE[:16]}{RST}"
+        l1 = f" {YLW}(c){RST} Config: {GRN}{CONFIG_FILE[:16]}{RST}"
         r1 = f"{YLW}(e){RST} Edit {YLW}(w){RST} {RED}Save{RST} "
-        rlines.append(("top",    f"┬" + "─" * W + "┐"))
+        # top border with (F1 Help) on the right – as requested
+        f1_raw = "(F1 Help)"
+        f1_text = f"{YLW}(F1 Help){RST}"
+        rlines.append(("top",    f"┬{'─' * (W - len(f1_raw))}{f1_text}┐"))
         rlines.append(("normal", f"│{pad(l1, W - ansilen(r1))}{r1}│"))
         rlines.append(("sep",    f"├" + "─" * W + "┤"))
 
@@ -4734,10 +4737,13 @@ class PTZMasterApp:
                 self.ui.draw()
             return
 
+        if r == 1:
+            # (F1 Help) moved to top-right corner of upper frame
+            if c >= 70:
+                self._mouse_off(); self._show_help(); self._mouse_on(); self.ui.draw(); return
+
         if r == 2:
             if S+2 <= c <= S+3:
-                self._mouse_off(); self._show_help(); self._mouse_on(); self.ui.draw(); return
-            if S+10 <= c <= S+12:
                 self._mouse_off()
                 new_file = self._edit_param("CONFIG FILE", self.config_file)
                 self._mouse_on()
@@ -7280,130 +7286,248 @@ class PTZMasterApp:
         logger.info(f"Added scanner: {name} vidpid={vidpid_str} device={device_str}")
 
     def _show_scanner_help(self):
-        """Display scanner help with right edge fixed at column 78."""
+        """Display scanner help - ARMORED TUI v1.3 style (matching PLAYER CONTROLS)."""
+        import signal
+        import shutil
+        import platform
+        import glob
+        import os
         mouse_off()
         fd = sys.stdin.fileno()
         old_term = termios.tcgetattr(fd)
 
-        import signal
-        resized = [False]
+        resized = [True]
         def handle_winch(sig, frame):
             resized[0] = True
 
-        old_winch = None # Inicjalizujemy pustą zmienną
+        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
+        def _get_hw_info():
+            host = "Unknown Host"
+            for p in ['/sys/devices/virtual/dmi/id/product_name',
+                      '/sys/devices/virtual/dmi/id/product_version',
+                      '/sys/devices/virtual/dmi/id/board_name',
+                      '/sys/devices/virtual/dmi/id/chassis_version',
+                      '/sys/devices/virtual/dmi/id/sys_vendor']:
+                try:
+                    with open(p, 'r') as f:
+                        h = f.read().strip()
+                        if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
+                            host = h
+                            if p.endswith('product_name') and ' ' in h:
+                                break
+                            if 'product' in p:
+                                break
+                except: pass
+            if not host.startswith('HP') and not host.startswith('Dell') and not host.startswith('Lenovo'):
+                try:
+                    with open('/sys/devices/virtual/dmi/id/sys_vendor', 'r') as f:
+                        vendor = f.read().strip()
+                        if vendor and vendor.lower() not in ('hp', 'hewlett-packard') and len(host) < 20:
+                            if vendor not in host:
+                                host = f"{vendor} {host}"
+                except: pass
+
+            os_name = "Linux"
+            try:
+                with open('/etc/os-release') as f:
+                    for line in f:
+                        if line.startswith('PRETTY_NAME='):
+                            os_name = line.split('=')[1].strip().strip('"')
+                            break
+            except: pass
+
+            cpu = "Unknown CPU"
+            try:
+                with open('/proc/cpuinfo') as f:
+                    for line in f:
+                        if line.startswith('model name'):
+                            cpu = line.split(':')[1].strip()
+                            break
+            except: pass
+
+            temp_str = "N/A"
+            try:
+                for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
+                    with open(os.path.join(tz, 'type'), 'r') as f:
+                        ttype = f.read().strip()
+                        if 'x86_pkg_temp' in ttype or 'acpitz' in ttype or 'coretemp' in ttype:
+                            with open(os.path.join(tz, 'temp'), 'r') as tf:
+                                t = int(tf.read().strip()) / 1000.0
+                                if t > 0:
+                                    temp_str = f"+{t:.1f}°C"
+                                    break
+            except: pass
+
+            ram_str = "N/A"
+            try:
+                with open('/proc/meminfo') as f:
+                    mem = {}
+                    for line in f:
+                        if ':' in line:
+                            k, v = line.split(':', 1)
+                            mem[k.strip()] = int(v.strip().split()[0])
+                    total = mem.get('MemTotal', 1)
+                    avail = mem.get('MemAvailable', 0)
+                    used = total - avail
+                    ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}"
+            except: pass
+
+            py_ver = platform.python_version()
+
+            line1 = f"🖨  {host} 🐍 Python {py_ver}  [🐧 {os_name}]"
+            line2 = f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}"
+            return line1, line2
+
+        scroll_offset = 0
 
         try:
-            # Przypisujemy sygnał dopiero wewnątrz bloku try
-            old_winch = signal.signal(signal.SIGWINCH, handle_winch)
-
             tty.setraw(fd)
-            # użyj alternatywnego bufora żeby nie zaśmiecać scrollback
             sys.stdout.write('\033[?1049h')
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
 
-            RIGHT_EDGE = 78
-            footer_label = f"v{VERSION}  (ESC) Quit "
-            footer_len = len(footer_label)
+            def _draw_help_screen():
+                nonlocal scroll_offset
+                try:
+                    term_w, term_h = shutil.get_terminal_size((80, 24))
+                except Exception:
+                    term_w, term_h = 80, 24
 
-            while True:
-                resized[0] = False
-                total_lines = 0
-                # Czyścimy ekran i ustawiamy kursor na 1,1
-                sys.stdout.write('\033[2J\033[H')
+                box_w = min(78, term_w)
+                buf = []
+                buf.append('\033[2J\033[H')
 
-                def line(content=""):
-                    nonlocal total_lines
-                    # Dodajemy \r\n na końcu dla trybu RAW
-                    sys.stdout.write(f"{YLW}║{RST} {content}\033[{RIGHT_EDGE}G{YLW}║{RST}\r\n")
-                    total_lines += 1
+                buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
 
-                def sep():
-                    nonlocal total_lines
-                    sys.stdout.write(f"{YLW}╠{'═'*(RIGHT_EDGE-2)}╣{RST}\r\n")
-                    total_lines += 1
+                title = "📐 SCANNER GEOMETRY & 🖼 IMAGE WORKFLOW REFERENCE"
+                draw_slot(buf, 2, 1, box_w, f"{GRN}║ {BLU}{title.center(box_w-4)}{RST}", "", f"{GRN}║{RST}")
 
-                # 1. Górna ramka
-                sys.stdout.write(f"{YLW}╔{'═'*(RIGHT_EDGE-2)}╗{RST}\r\n")
-                total_lines += 1
+                buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
 
-                # 2. Nagłówek
-                title = "📐 SCANNER GEOMETRY & 🖼️ IMAGE WORKFLOW REFERENCE"
-                line(f"{BLU}{title.center(75)}{RST}")
-                sep()
+                hw1, hw2 = _get_hw_info()
 
-                # 3. Treść sekcji
-                line(f"{WHT}STANDARD PAPER SIZES (Width x Height in mm):{RST}")
-                line("   • A4            : 210.0 x 297.0 (International)")
-                line("   • Letter (US)   : 215.9 x 279.4 (8.5 x 11 in)")
-                line("   • Legal (US)    : 215.9 x 355.6 (8.5 x 14 in)")
-                line("   • Ledger (US)   : 279.4 x 431.8 (11 x 17 in)")
-                line(f"   {DIM}(Scanner width is typically max 215-216 mm){RST}")
-                line()
+                all_lines = [
+                    f"{hw1}",
+                    f"{hw2}",
+                    f"{WHT}STANDARD PAPER SIZES (Width x Height in mm):{RST}",
+                    f"   • A4            : 210.0 x 297.0 (International)",
+                    f"   • Letter (US)   : 215.9 x 279.4 (8.5 x 11 in)",
+                    f"   • Legal (US)    : 215.9 x 355.6 (8.5 x 14 in)",
+                    f"   • Ledger (US)   : 279.4 x 431.8 (11 x 17 in)",
+                    f"   {DIM}(Scanner width is typically max 215-216 mm){RST}",
+                    f"",
+                    f"{WHT}DPI TO PIXELS (For A4 @ 210x297 mm):{RST}",
+                    f"   • 600 DPI : 4960 x 7016 (Master/Archive)",
+                    f"   • 300 DPI : 2480 x 3508 (OCR/Translation)",
+                    f"   • 150 DPI : 1240 x 1754 (Web/Screen)",
+                    f"   • 100 DPI :  827 x 1169 (Fast preview)",
+                    f"   •  75 DPI :  620 x  877 (Thumbnail)",
+                    f"",
+                    f"{WHT}⚙  RECOMMENDED WORKFLOW (High Quality):{RST}",
+                    f"   1. Scan → TIFF @ 600 DPI (Raw data)",
+                    f"   2. Save to /tmp/ (Use RAM disk for speed)",
+                    f"   3. Process with ImageMagick (convert):",
+                    f"      {DIM}-sharpen 0x1.0 -resize 2480x3508 -quality 85%{RST}",
+                    f"   4. Send to Google Translate / Tesseract OCR",
+                    f"",
+                    f"{WHT}🌐 ISO 639-1 LANGUAGE CODES (for OCR/Translation):{RST}",
+                    f"   {GRN}pl{RST} Polish    {GRN}en{RST} English   {GRN}de{RST} German    {GRN}fr{RST} French",
+                    f"   {GRN}es{RST} Spanish   {GRN}it{RST} Italian   {GRN}uk{RST} Ukrainian {GRN}ru{RST} Russian",
+                ]
 
-                line(f"{WHT}DPI TO PIXELS (For A4 @ 210x297 mm):{RST}")
-                line("   • 600 DPI : 4960 x 7016 (Master/Archive)")
-                line("   • 300 DPI : 2480 x 3508 (OCR/Translation)")
-                line("   • 150 DPI : 1240 x 1754 (Web/Screen)")
-                line("   • 100 DPI :  827 x 1169 (Fast preview)")
-                line("   •  75 DPI :  620 x  877 (Thumbnail)")
-                line()
+                max_vis = max(1, term_h - 6)
+                max_off = max(0, len(all_lines) - max_vis)
+                scroll_offset = max(0, min(scroll_offset, max_off))
 
-                line(f"{WHT}⚙️  RECOMMENDED WORKFLOW (High Quality):{RST}")
-                line("   1. Scan → TIFF @ 600 DPI (Raw data)")
-                line("   2. Save to /tmp/ (Use RAM disk for speed)")
-                line("   3. Process with ImageMagick (convert):")
-                line(f"      {DIM}-sharpen 0x1.0 -resize 2480x3508 -quality 85%{RST}")
-                line("   4. Send to Google Translate / Tesseract OCR")
-                line()
+                vis_lines = all_lines[scroll_offset : scroll_offset + max_vis]
 
-                line(f"{WHT}🌐 ISO 639-1 LANGUAGE CODES (for OCR/Translation):{RST}")
-                line(f"   {GRN}pl{RST} Polish    {GRN}en{RST} English   {GRN}de{RST} German    {GRN}fr{RST} French")
-                line(f"   {GRN}es{RST} Spanish   {GRN}it{RST} Italian   {GRN}uk{RST} Ukrainian {GRN}ru{RST} Russian")
-                line()
+                row = 4
+                for content in vis_lines:
+                    draw_slot(buf, row, 1, box_w, f"{GRN}║ {content}", "", f"{GRN}║{RST}")
+                    row += 1
 
-                sep()
+                while row < term_h - 2:
+                    draw_slot(buf, row, 1, box_w, f"{GRN}║ ", "", f"{GRN}║{RST}")
+                    row += 1
 
-                # 4. Stopka (interaktywna)
-                footer_content = f"{CYN}v{VERSION}{RST}  {YLW}(ESC){RST} Quit "
-                sys.stdout.write(f"{YLW}║{RST}")
-                # Pozycjonujemy tekst stopki do prawej krawędzi
-                sys.stdout.write(f"\033[{RIGHT_EDGE - footer_len - 1}G")
-                sys.stdout.write(f"{footer_content}\033[{RIGHT_EDGE}G{YLW}║{RST}\r\n")
-                total_lines += 1
+                buf.append(f"\033[{term_h-2};1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
 
-                # 5. Dolna ramka
-                sys.stdout.write(f"{YLW}╚{'═'*(RIGHT_EDGE-2)}╝{RST}\r\n")
-                total_lines += 1
+                footer_row = term_h - 1
+                left_lbl = "[↑][↓]PgUp/Dn"
+                padding_len = max(0, box_w - 4 - len(left_lbl) - len(f"ptz-master v{VERSION}  (ESC/Q)"))
+                footer_content = f" {YLW}{left_lbl}{RST}{' ' * padding_len}{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST} "
 
+                draw_slot(buf, footer_row, 1, box_w, f"{GRN}║{footer_content}", "", f"{GRN}║{RST}")
+
+                buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
+
+                sys.stdout.write("".join(buf))
                 sys.stdout.flush()
 
-                # Indeks rzędu stopki dla obsługi myszy
-                footer_row = total_lines - 1 # W setraw() rzędy w MouseEvent mogą być od 1 lub 0
+                up_start, up_end = 2, 5
+                down_start, down_end = 6, 9
+                return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
 
-                # Pętla oczekiwania na klawisz lub zmianę rozmiaru
-                while not resized[0]:
-                    key = get_key(timeout=0.2)
-                    if key == Key.TIMEOUT:
-                        continue
-                    if key in (Key.ESC, 'q', 'Q'):
-                        return
+            footer_r = 0
+            btn_start = 0
+            btn_end = 0
+            max_off = 0
+            up_start = up_end = down_start = down_end = 0
 
-                    # Obsługa myszy
-                    if isinstance(key, MouseEvent) and not key.release:
-                        # Sprawdzamy czy kliknięto w rzędzie stopki
-                        if key.row == footer_row:
-                            btn_start = RIGHT_EDGE - footer_len
-                            if btn_start <= key.col <= RIGHT_EDGE:
-                                return
+            while True:
+                if resized[0]:
+                    footer_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
+                    resized[0] = False
+
+                key = get_key(timeout=0.2)
+                if key == Key.TIMEOUT:
+                    continue
+                if key in (Key.ESC, 'q', 'Q'):
+                    return
+
+                if key == Key.UP:
+                    if scroll_offset > 0:
+                        scroll_offset -= 1
+                        resized[0] = True
+                elif key == Key.DOWN:
+                    if scroll_offset < max_off:
+                        scroll_offset += 1
+                        resized[0] = True
+                elif key == Key.PAGE_UP:
+                    if scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 10)
+                        resized[0] = True
+                elif key == Key.PAGE_DOWN:
+                    if scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 10)
+                        resized[0] = True
+                elif key == Key.MOUSE_SCROLL_DOWN:
+                    if scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 3)
+                        resized[0] = True
+                elif key == Key.MOUSE_SCROLL_UP:
+                    if scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 3)
+                        resized[0] = True
+                elif isinstance(key, MouseEvent) and not key.release:
+                    if key.row == footer_r:
+                        if btn_start <= key.col <= btn_end:
+                            return
+                        if up_start <= key.col <= up_end:
+                            if scroll_offset > 0:
+                                scroll_offset -= 1
+                                resized[0] = True
+                        elif down_start <= key.col <= down_end:
+                            if scroll_offset < max_off:
+                                scroll_offset += 1
+                                resized[0] = True
 
         finally:
-            # Przywracanie ustawień terminala i sygnałów – teraz w 100% bezpieczne
-            if old_winch is not None:
-                signal.signal(signal.SIGWINCH, old_winch)
+            signal.signal(signal.SIGWINCH, old_winch)
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.write('\033[?1049l')  # wróć do głównego bufora
-            sys.stdout.write('\033[2J\033[H')  # wyczyść po helpie
+            sys.stdout.write('\033[?1049l')
+            sys.stdout.write('\033[2J\033[H')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
             mouse_on()
@@ -8094,9 +8218,13 @@ class PTZMasterApp:
         self._wait_click_or_key()
 
     def _batch_menu(self):
-        sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
-        W = 57
-        
+        """Batch operations - ARMORED TUI v1.3 with advanced select & mouse behavior."""
+        import signal
+        import shutil
+        import platform
+        import glob
+        import time
+
         items = [
             "🔄 Sync all cameras (network)",
             "💀 Kill all players",
@@ -8109,10 +8237,240 @@ class PTZMasterApp:
             "♻️  Restore saved session",
             "✖  Cancel",
         ]
-        idx = select_menu(items, selected=0, title="⚙️  Batch Operations")
 
-        if idx == -1:
-            return
+        mouse_off()
+        fd = sys.stdin.fileno()
+        old_term = termios.tcgetattr(fd)
+        resized = [True]
+        old_winch = signal.signal(signal.SIGWINCH, lambda s,f: resized.__setitem__(0, True))
+
+        def _get_hw_info():
+            host = "Unknown Host"
+            for p in ['/sys/devices/virtual/dmi/id/product_name','/sys/devices/virtual/dmi/id/product_version','/sys/devices/virtual/dmi/id/board_name','/sys/devices/virtual/dmi/id/sys_vendor']:
+                try:
+                    with open(p) as f:
+                        h=f.read().strip()
+                        if h and h.lower() not in ('to be filled by o.e.m.','default string','unknown') and len(h)>3:
+                            host=h; break
+                except: pass
+            os_name="Linux"
+            try:
+                with open('/etc/os-release') as f:
+                    for l in f:
+                        if l.startswith('PRETTY_NAME='): os_name=l.split('=')[1].strip('"'); break
+            except: pass
+            cpu="Unknown CPU"
+            try:
+                with open('/proc/cpuinfo') as f:
+                    for l in f:
+                        if l.startswith('model name'): cpu=l.split(':')[1].strip(); break
+            except: pass
+            temp="N/A"
+            try:
+                import glob as g
+                for tz in g.glob('/sys/class/thermal/thermal_zone*'):
+                    with open(f"{tz}/type") as f:
+                        if 'x86_pkg' in f.read() or 'coretemp' in f.read():
+                            with open(f"{tz}/temp") as tf: temp=f"+{int(tf.read())/1000:.1f}°C"; break
+            except: pass
+            ram="N/A"
+            try:
+                with open('/proc/meminfo') as f:
+                    m={};
+                    for l in f:
+                        if ':' in l: k,v=l.split(':',1); m[k.strip()]=int(v.strip().split()[0])
+                    total=m.get('MemTotal',1); avail=m.get('MemAvailable',0); used=total-avail
+                    ram=f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
+            except: pass
+            import platform as pl
+            return f"🖥  {host} 🐍 Python {pl.python_version()}  [🐧 {os_name}]", f"🔲 {cpu} 🔥{temp} 📏RAM {ram}"
+
+        sel = 0
+        scroll_offset = 0
+        num_buf = ""
+        last_digit = 0
+        status = f"Log: {LOG_FILE}"
+        idx = -1
+        DIGIT_TIMEOUT = 0.6
+
+        try:
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
+
+            def _draw():
+                nonlocal scroll_offset
+                try: tw, th = shutil.get_terminal_size((80, 24))
+                except: tw, th = 80, 24
+                bw = min(78, tw)
+                buf = []
+                buf.append('\033[2J\033[H')
+
+                buf.append(f"\033[1;1H{GRN}╔{'═'*(bw-2)}╗{RST}")
+                title = " ⚙️  Batch Operations "
+                draw_slot(buf, 2, 1, bw, f"{GRN}║{YLW}{title.center(bw-2)}{RST}", "", f"{GRN}║{RST}")
+                buf.append(f"\033[3;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
+
+                hw1, hw2 = _get_hw_info()
+                draw_slot(buf, 4, 1, bw, f"{GRN}║ {CYN}{hw1[:bw-4]}{RST}", "", f"{GRN}║{RST}")
+                draw_slot(buf, 5, 1, bw, f"{GRN}║ {CYN}{hw2[:bw-4]}{RST}", "", f"{GRN}║{RST}")
+                buf.append(f"\033[6;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
+
+                max_vis = max(1, th - 10)
+                max_off = max(0, len(items) - max_vis)
+                if sel < scroll_offset: scroll_offset = sel
+                elif sel >= scroll_offset + max_vis: scroll_offset = sel - max_vis + 1
+                scroll_offset = max(0, min(scroll_offset, max_off))
+
+                row = 7
+                iw = bw - 2
+                for i in range(scroll_offset, min(scroll_offset + max_vis, len(items))):
+                    active = (i == sel)
+                    marker = f"{GRN}▶{RST}" if active else " "
+                    txt = items[i]
+                    if active:
+                        content = f" {marker} {GRN}{txt}{RST}"
+                        padded = pad(content, iw - 1)
+                        draw_slot(buf, row, 1, bw, f"{GRN}║\033[48;5;234m{padded}\033[0m", "", f"{GRN}║{RST}")
+                    else:
+                        draw_slot(buf, row, 1, bw, f"{GRN}║{pad(f' {marker} {txt}', iw)}", "", f"{GRN}║{RST}")
+                    row += 1
+
+                while row < th - 3:
+                    draw_slot(buf, row, 1, bw, f"{GRN}║", "", f"{GRN}║{RST}")
+                    row += 1
+
+                buf.append(f"\033[{th-3};1H{GRN}╠{'═'*(bw-2)}╣{RST}")
+
+                # Zastosowanie odpowiedniego formatowania paska notyfikacji
+                log_line = f" 🔔 {status}"
+                draw_slot(buf, th - 2, 1, bw, f"{GRN}║{pad(log_line, iw)}{RST}", "", f"{GRN}║{RST}")
+
+                left = "[↑][↓] Navigate  ENTER execute"
+                right = f"{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST}"
+                mid = max(0, iw - ansilen(left) - 1 - ansilen(f"ptz-master v{VERSION} (ESC/Q)") - 2)
+                footer = f" {YLW}{left}{RST}{' '*mid}{right} "
+                draw_slot(buf, th - 1, 1, bw, f"{GRN}║{footer}", "", f"{GRN}║{RST}")
+
+                buf.append(f"\033[{th};1H{GRN}╚{'═'*(bw-2)}╝{RST}")
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+
+            while True:
+                # Pobieramy wymiary na początku każdej iteracji, aby bw było dostępne globalnie w pętli
+                try: tw, th = shutil.get_terminal_size((80, 24))
+                except: tw, th = 80, 24
+                bw = min(78, tw) # <--- Definicja bw tutaj naprawia NameError
+
+                if resized[0]:
+                    _draw()
+                    resized[0] = False
+
+                # Oczekiwanie na ukończenie wpisywania numeru
+                if num_buf and time.time() - last_digit >= DIGIT_TIMEOUT:
+                    try:
+                        n = int(num_buf) - 1
+                        if 0 <= n < len(items):
+                            sel = n
+                            status = f"Selected: {items[sel]}"
+                            resized[0] = True
+                    except:
+                        pass
+                    num_buf = ""
+
+                key = get_key(timeout=0.1)
+                if key == Key.TIMEOUT:
+                    continue
+
+                if key in (Key.ESC, 'q', 'Q'):
+                    idx = -1
+                    break
+
+                if isinstance(key, MouseEvent) and not key.release:
+                    max_vis = max(1, th - 10)
+
+                    # --- STOPKA: klik w [↑][↓] ENTER i ESC/Q ---
+                    if key.row == th - 1:
+                        # pozycje liczone od 1 (bo draw_slot zaczyna w kolumnie 1)
+                        # "║ [↑][↓] Navigate ENTER execute"
+                        if 2 <= key.col <= 4: # [↑]
+                            sel = (sel - 1) % len(items)
+                            status = f"Selected: {items[sel]}"
+                            resized[0] = True
+                        elif 5 <= key.col <= 7: # [↓]
+                            sel = (sel + 1) % len(items)
+                            status = f"Selected: {items[sel]}"
+                            resized[0] = True
+                        elif 20 <= key.col <= 25: # ENTER
+                            idx = sel
+                            break
+                        elif key.col >= bw - 15: # ESC/Q po prawej
+                            idx = -1
+                            break
+                        continue
+
+                    # --- LISTA: klik w pozycję ---
+                    if 7 <= key.row < 7 + max_vis:
+                        clicked = scroll_offset + (key.row - 7)
+                        if 0 <= clicked < len(items):
+                            if clicked == sel and key.btn == 0:
+                                idx = sel # drugie kliknięcie = wykonaj
+                                break
+                            sel = clicked # pierwsze kliknięcie = zaznacz
+                            status = f"Selected: {items[sel]}"
+                            resized[0] = True
+                        continue
+
+                # Obsługa rolki myszki
+                if key == Key.MOUSE_SCROLL_UP:
+                    sel = (sel - 1) % len(items)
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+                elif key == Key.MOUSE_SCROLL_DOWN:
+                    sel = (sel + 1) % len(items)
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+
+                # Obsługa strzałek i klawiszy funkcyjnych
+                elif key == Key.UP:
+                    sel = (sel - 1) % len(items)
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+                elif key == Key.DOWN:
+                    sel = (sel + 1) % len(items)
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+                elif key == Key.HOME:
+                    sel = 0
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+                elif key == Key.END:
+                    sel = len(items) - 1
+                    status = f"Selected: {items[sel]}"
+                    resized[0] = True
+
+                # Potwierdzenie wyboru (Enter)
+                elif key in (Key.ENTER, '\r', '\n', ' '):
+                    idx = sel
+                    break
+
+                # Wybieranie numerami z klawiatury (wpisuje się obok Enter: #:)
+                elif isinstance(key, str) and key.isdigit():
+                    num_buf += key
+                    last_digit = time.time()
+                    status = f"Enter: #:{num_buf}"
+                    resized[0] = True
+        finally:
+            try: sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l'); sys.stdout.flush()
+            except: pass
+            try: termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+            except: pass
+            try: signal.signal(signal.SIGWINCH, old_winch)
+            except: pass
+
+        if idx == -1 or idx == len(items) - 1: return
+
+        # Sekcja wykonawcza wybranych opcji - reszta kodu pozostaje bez zmian
         if idx == 0:
             sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
             print(f"{CYN}Syncing all cameras...{RST}\n")
@@ -8121,29 +8479,29 @@ class PTZMasterApp:
                 self._sync_network(cam)
             print(f"\n{GRN}Sync completed!{RST}")
             time.sleep(1.5)
-        
+
         elif idx == 1:
             killed = ProcessManager.kill_all(self.config.cameras)
             notify(f"Killed {killed} player(s)", "info")
-        
+
         elif idx == 2:
             sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
             print(f"{CYN}Testing connections...{RST}\n")
             print(f"  {WHT}CAMERA{pad('', 20)} | STATUS{RST}")
             print(f"  " + "-" * 40)
-            
+
             for cam in self.config.cameras:
                 if cam.type == CameraType.V4L2:
                     status = f"{GRN}LOCAL{RST}"
                 else:
                     ok = NetworkUtils.ping_host(cam.ip)
                     status = f"{GRN}OK{RST}" if ok else f"{RED}FAIL{RST}"
-                
+
                 print(f"  {pad(cam.name[:25], 25)} | {status}")
-            
+
             print(f"\n{YLW}Press any key...{RST}")
             self._wait_click_or_key()
-        
+
         elif idx == 3:
             exp = f"{self.config_file}.export.json"
             try:
@@ -8153,7 +8511,7 @@ class PTZMasterApp:
             except Exception as e:
                 notify(f"Export failed: {e}", "error")
             time.sleep(1.5)
-        
+
         elif idx == 4:
             default_import = f"{self.config_file}.export.json"
             imp = rlinput(f"Import file: ", default_import).strip()
@@ -8172,16 +8530,16 @@ class PTZMasterApp:
             else:
                 notify("File not found!", "error")
             time.sleep(1.5)
-        
+
         elif idx == 5:
             self._find_moved_cameras()
-        
+
         elif idx == 6:
             self._detect_all_types()
-        
+
         elif idx == 7:
             self._save_window_layout()
-        
+
         elif idx == 8:
             self._restore_session()
 
@@ -9087,8 +9445,79 @@ class PTZMasterApp:
             self._wait_click_or_key()
 
     def _show_help(self):
-        sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
-        W = 57
+        """Display main help - ARMORED TUI v1.3 style (matching SCANNER)."""
+        import signal
+        import shutil
+        import platform
+        import glob
+        mouse_off()
+        fd = sys.stdin.fileno()
+        old_term = termios.tcgetattr(fd)
+
+        resized = [True]
+        def handle_winch(sig, frame):
+            resized[0] = True
+
+        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
+        # --- hardware / system info (jak w scanner help) ---
+        def _get_hw_info():
+            host = "Unknown Host"
+            for p in ['/sys/devices/virtual/dmi/id/product_name',
+                      '/sys/devices/virtual/dmi/id/product_version',
+                      '/sys/devices/virtual/dmi/id/board_name',
+                      '/sys/devices/virtual/dmi/id/sys_vendor']:
+                try:
+                    with open(p, 'r') as f:
+                        h = f.read().strip()
+                        if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
+                            host = h
+                            break
+                except: pass
+            os_name = "Linux"
+            try:
+                with open('/etc/os-release') as f:
+                    for line in f:
+                        if line.startswith('PRETTY_NAME='):
+                            os_name = line.split('=')[1].strip().strip('"')
+                            break
+            except: pass
+            cpu = "Unknown CPU"
+            try:
+                with open('/proc/cpuinfo') as f:
+                    for line in f:
+                        if line.startswith('model name'):
+                            cpu = line.split(':')[1].strip()
+                            break
+            except: pass
+            temp_str = "N/A"
+            try:
+                for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
+                    with open(os.path.join(tz, 'type'), 'r') as f:
+                        if 'x86_pkg_temp' in f.read() or 'coretemp' in f.read():
+                            with open(os.path.join(tz, 'temp'), 'r') as tf:
+                                t = int(tf.read().strip()) / 1000.0
+                                if t > 0:
+                                    temp_str = f"+{t:.1f}°C"
+                                    break
+            except: pass
+            ram_str = "N/A"
+            try:
+                with open('/proc/meminfo') as f:
+                    mem = {}
+                    for line in f:
+                        if ':' in line:
+                            k, v = line.split(':', 1)
+                            mem[k.strip()] = int(v.strip().split()[0])
+                    total = mem.get('MemTotal', 1)
+                    avail = mem.get('MemAvailable', 0)
+                    used = total - avail
+                    ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
+            except: pass
+            py_ver = platform.python_version()
+            line1 = f"🖥  {host} 🐍 Python {py_ver}  [🐧 {os_name}]"
+            line2 = f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}"
+            return line1, line2
 
         help_text = [
             ("NAVIGATION", ""),
@@ -9137,26 +9566,127 @@ class PTZMasterApp:
             ("q", "Quit application (double q for quick exit)"),
         ]
 
-        print(f"{YLW}┌" + "─" * W + f"┐{RST}")
-        print(f"{YLW}│{pad(' PTZ MASTER v' + VERSION + ' - KEYBOARD SHORTCUTS ', W)}│{RST}")
-        print(f"{YLW}├" + "─" * W + f"┤{RST}")
+        scroll_offset = 0
 
-        for action, keys in help_text:
-            if action == "":
-                print(f"{YLW}│{pad('', W)}│{RST}")
-            elif action.isupper() and not keys:
-                line = f" {action}"
-                print(f"{YLW}│ {MAG}{line}{YLW}{' ' * (W - len(line) - 1)}│{RST}")
-            else:
-                left = f"  {GRN}{action}{RST}"
-                right = f"{keys} "
-                print(f"{YLW}│{pad(left, W - ansilen(right))}{right}{YLW}│{RST}")
+        try:
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1049h')
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.flush()
 
-        print(f"{YLW}├" + "─" * W + f"┤{RST}")
-        print(f"{YLW}│{pad(f' Log file: {LOG_FILE}', W)}│{RST}")
-        print(f"{YLW}└" + "─" * W + f"┘{RST}")
-        print(f"\n{GRN}Press any key to continue...{RST}")
-        self._wait_click_or_key()
+            def _draw_help_screen():
+                nonlocal scroll_offset
+                try:
+                    term_w, term_h = shutil.get_terminal_size((80, 24))
+                except Exception:
+                    term_w, term_h = 80, 24
+
+                box_w = min(78, term_w)
+                buf = []
+                buf.append('\033[2J\033[H')
+
+                buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
+
+                title = f" PTZ MASTER v{VERSION} - KEYBOARD SHORTCUTS "
+                draw_slot(buf, 2, 1, box_w, f"{GRN}║{YLW}{title.center(box_w-2)}{RST}", "", f"{GRN}║{RST}")
+
+                buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+
+                hw1, hw2 = _get_hw_info()
+                draw_slot(buf, 4, 1, box_w, f"{GRN}║ {CYN}{hw1[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
+                draw_slot(buf, 5, 1, box_w, f"{GRN}║ {CYN}{hw2[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
+
+                buf.append(f"\033[6;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+
+                # Content area
+                max_vis = max(1, term_h - 10)
+                max_off = max(0, len(help_text) - max_vis)
+                scroll_offset = max(0, min(scroll_offset, max_off))
+                vis_items = help_text[scroll_offset:scroll_offset + max_vis]
+
+                row = 7
+                inside_w = box_w - 2
+                for action, keys in vis_items:
+                    if action == "":
+                        content = ""
+                    elif action.isupper() and not keys:
+                        content = f" {MAG}{action}{RST}"
+                    else:
+                        left = f"  {GRN}{action}{RST}"
+                        right = f"{keys} "
+                        content = pad(left, inside_w - ansilen(right) - 1) + right
+                    draw_slot(buf, row, 1, box_w, f"{GRN}║{content}", "", f"{GRN}║{RST}")
+                    row += 1
+
+                while row < term_h - 3:
+                    draw_slot(buf, row, 1, box_w, f"{GRN}║", "", f"{GRN}║{RST}")
+                    row += 1
+
+                buf.append(f"\033[{term_h-3};1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+
+                # Log line
+                log_text = f" Log: {LOG_FILE}"
+                draw_slot(buf, term_h-2, 1, box_w, f"{GRN}║{pad(log_text, inside_w)}{RST}", "", f"{GRN}║{RST}")
+
+                # Footer like scanner
+                footer_row = term_h - 1
+                left_lbl = "[↑][↓] Help"
+                # Build footer similar to txt
+                footer_content = f" {YLW}{left_lbl}{RST}"
+                right_text = f"{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST}"
+                # pad middle
+                total_inside = box_w - 2
+                middle_spaces = max(0, total_inside - ansilen(left_lbl) - 1 - ansilen(f"ptz-master v{VERSION} (ESC/Q)") - 2)
+                footer_full = f"{footer_content}{' ' * middle_spaces}{right_text} "
+                draw_slot(buf, footer_row, 1, box_w, f"{GRN}║{footer_full}", "", f"{GRN}║{RST}")
+
+                buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
+
+                sys.stdout.write("".join(buf))
+                sys.stdout.flush()
+                return max_off
+
+            max_off = 0
+            while True:
+                if resized[0]:
+                    max_off = _draw_help_screen()
+                    resized[0] = False
+
+                key = get_key(timeout=0.2)
+                if key == Key.TIMEOUT:
+                    continue
+                if key in (Key.ESC, 'q', 'Q'):
+                    return
+
+                if key == Key.UP:
+                    if scroll_offset > 0:
+                        scroll_offset -= 1
+                        resized[0] = True
+                elif key == Key.DOWN:
+                    if scroll_offset < max_off:
+                        scroll_offset += 1
+                        resized[0] = True
+                elif key == Key.PAGE_UP:
+                    if scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 10)
+                        resized[0] = True
+                elif key == Key.PAGE_DOWN:
+                    if scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 10)
+                        resized[0] = True
+        finally:
+            try:
+                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                sys.stdout.write('\033[?1049l')
+                sys.stdout.flush()
+            except: pass
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+            except: pass
+            try:
+                signal.signal(signal.SIGWINCH, old_winch)
+            except: pass
+            mouse_on()
 
 # =============================================================================
 # MAIN CAMERA CONTROL SCREEN (PTZMasterApp) End
