@@ -9450,6 +9450,9 @@ class PTZMasterApp:
         import shutil
         import platform
         import glob
+        import os
+        import subprocess
+
         mouse_off()
         fd = sys.stdin.fileno()
         old_term = termios.tcgetattr(fd)
@@ -9568,6 +9571,24 @@ class PTZMasterApp:
 
         scroll_offset = 0
 
+        # Funkcja do wyświetlania logu w programie 'less'
+        def _view_log():
+            if os.path.exists(LOG_FILE):
+                # Wyjście z trybu raw i alternatywnego bufora
+                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                sys.stdout.write('\033[?1049l\033[?25h')
+                sys.stdout.flush()
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+
+                # Uruchomienie systemowej przeglądarki logów na końcu pliku (+G)
+                subprocess.run(['less', '+G', LOG_FILE])
+
+                # Powrót do TUI
+                tty.setraw(fd)
+                sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+                sys.stdout.flush()
+                resized[0] = True
+
         try:
             tty.setraw(fd)
             sys.stdout.write('\033[?1049h')
@@ -9600,7 +9621,7 @@ class PTZMasterApp:
                 buf.append(f"\033[6;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
 
                 # Content area
-                max_vis = max(1, term_h - 10)
+                max_vis = max(1, term_h - 9) # Dostosowane do nowej stopki
                 max_off = max(0, len(help_text) - max_vis)
                 scroll_offset = max(0, min(scroll_offset, max_off))
                 vis_items = help_text[scroll_offset:scroll_offset + max_vis]
@@ -9619,46 +9640,55 @@ class PTZMasterApp:
                     draw_slot(buf, row, 1, box_w, f"{GRN}║{content}", "", f"{GRN}║{RST}")
                     row += 1
 
-                while row < term_h - 3:
+                while row < term_h - 2:
                     draw_slot(buf, row, 1, box_w, f"{GRN}║", "", f"{GRN}║{RST}")
                     row += 1
 
-                buf.append(f"\033[{term_h-3};1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+                # ---------------- NOWA STOPKA ----------------
 
-                # Log line
+                # Wiersz: term_h - 2 (Separator z [↑][↓] Pg (Up)/(Dn))
+                sep_row = term_h - 2
+                scroll_txt = "[ [↑][↓] Pg (Up)/(Dn) ]"
+                pad_len = max(0, box_w - 2 - 2 - len(scroll_txt))
+                buf.append(f"\033[{sep_row};1H{GRN}╠══{YLW}{scroll_txt}{GRN}{'═'*pad_len}╣{RST}")
+
+                # Wiersz: term_h - 1 (Klikalny Log)
+                log_row = term_h - 1
                 log_text = f" Log: {LOG_FILE}"
-                draw_slot(buf, term_h-2, 1, box_w, f"{GRN}║{pad(log_text, inside_w)}{RST}", "", f"{GRN}║{RST}")
+                draw_slot(buf, log_row, 1, box_w, f"{GRN}║{CYN}{pad(log_text, box_w-2)}{RST}", "", f"{GRN}║{RST}")
 
-                # Footer
-                footer_row = term_h - 1
-                left_lbl = "[↑][↓] PgUp/Dn"
-                footer_content = f" {YLW}{left_lbl}{RST}"
-                right_text = f"{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST}"
-                total_inside = box_w - 2
-                middle_spaces = max(0, total_inside - ansilen(left_lbl) - 1 - ansilen(f"ptz-master v{VERSION} (ESC/Q)") - 2)
-                footer_full = f"{footer_content}{' ' * middle_spaces}{right_text} "
-                draw_slot(buf, footer_row, 1, box_w, f"{GRN}║{footer_full}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
+                # Wiersz: term_h (Dolna ramka z wersją i ESC)
+                bottom_row = term_h
+                ver_text = f"[ ptz-master v{VERSION} ]"
+                esc_text = "(ESC/Q)"
+                right_part = f"{CYN}{ver_text}{GRN}═{YLW}{esc_text}{GRN}═╝{RST}"
+                # 2 zdejmujemy za ╚ i ═, reszta to odpowiednie wypełnienie
+                right_len = len(f"[ ptz-master v{VERSION} ]=(ESC/Q)=")
+                left_dashes = max(0, box_w - 2 - right_len)
+                buf.append(f"\033[{bottom_row};1H{GRN}╚{'═'*left_dashes}{right_part}{RST}")
 
                 # Append \033[?25l so cursor stays hidden after redraw
                 sys.stdout.write("".join(buf) + "\033[?25l")
                 sys.stdout.flush()
 
                 # Zwracamy parametry hitboksa dla myszy
-                up_start, up_end = 2, 5
-                down_start, down_end = 6, 9
-                return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
+                # separator: ╠══[ [↑][↓]
+                # kolumny liczone od 1: ╠(1) ═(2) ═(3) [(4)  (5) [(6) ↑(7) ](8) [(9) ↓(10) ](11)
+                up_start, up_end = 6, 8
+                down_start, down_end = 9, 11
+                # ESC_Q box is at the very right of the bottom row
+                btn_start = box_w - len("(ESC/Q)=")
+                btn_end = box_w - 1
 
-            footer_r = 0
-            btn_start = 0
-            btn_end = 0
-            max_off = 0
+                return log_row, sep_row, bottom_row, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end
+
+            log_r = sep_r = bot_r = 0
+            btn_start = btn_end = max_off = 0
             up_start = up_end = down_start = down_end = 0
 
             while True:
                 if resized[0]:
-                    footer_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
+                    log_r, sep_r, bot_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
                     resized[0] = False
 
                 key = get_key(timeout=0.2)
@@ -9685,7 +9715,7 @@ class PTZMasterApp:
                         scroll_offset = min(max_off, scroll_offset + 10)
                         resized[0] = True
 
-                # --- Mouse handling (wheel + click on ESC/Q and arrows) ---
+                # --- Mouse handling (wheel + clicks) ---
                 elif key == Key.MOUSE_SCROLL_DOWN:
                     if scroll_offset > 0:
                         scroll_offset = max(0, scroll_offset - 3)
@@ -9696,11 +9726,17 @@ class PTZMasterApp:
                         resized[0] = True
                 elif isinstance(key, MouseEvent):
                     if not key.release:
-                        if key.row == footer_r:
-                            # klik na (ESC/Q)
+                        # 1. Klik w LOG
+                        if key.row == log_r:
+                            _view_log()
+
+                        # 2. Klik na (ESC/Q) w dolnej ramce
+                        elif key.row == bot_r:
                             if btn_start <= key.col <= btn_end:
                                 return
-                            # klik na [↑] i [↓] w stopce
+
+                        # 3. Klik na strzałki [↑][↓] w separatorze
+                        elif key.row == sep_r:
                             if up_start <= key.col <= up_end:
                                 if scroll_offset > 0:
                                     scroll_offset = max(0, scroll_offset - 1)
