@@ -63,7 +63,7 @@ try:
     RETRY_AVAILABLE = True
 except ImportError:
     RETRY_AVAILABLE = False
-# --- Inicjalizacja ścieżek i logowania ---
+# --- Path and logging initialization ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR  = os.path.join(BASE_DIR, "logs")
 if not os.path.exists(LOG_DIR):
@@ -115,12 +115,12 @@ RST  = Colors.RESET
 DIM  = Colors.DIM
 
 # =============================================================================
-# WSPÓLNE TUI - ujednolicone funkcje dla wszystkich ekranów
+# SHARED TUI - unified functions for all screens
 # =============================================================================
-TUI_WIDTH = 78  # wszystkie ekrany mają teraz tę samą szerokość
+TUI_WIDTH = 78  # all screens now share the same width
 
 def get_ram_percent() -> int:
-    """Zwraca użycie RAM w procentach (0-100)"""
+    """Return RAM usage as a percentage (0-100)"""
     try:
         with open('/proc/meminfo') as f:
             mem = {}
@@ -135,17 +135,17 @@ def get_ram_percent() -> int:
         return 0
 
 def tui_header(title_left: str, width: int = TUI_WIDTH) -> str:
-    """Nagłówek z (F1 Help) po prawej - wspólny dla wszystkich ekranów"""
+    """Header with (F1 Help) on the right - shared across all screens"""
     max_title = width - 12
     title = title_left[:max_title]
     return f"{title:<{max_title}} (F1 Help)"
 
 def tui_footer_line() -> str:
-    """Stopka z wersją i ESC/Q - wspólna"""
+    """Footer with version and ESC/Q - shared"""
     return f"[ ptz-master v {VERSION} ]═(ESC/Q)"
 
 def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
-    """Linia z komunikatem 🔔 - wspólna"""
+    """Status line with 🔔 notification - shared"""
     clean_msg = msg[:width-4]
     return f"🔔 {clean_msg}"
 
@@ -217,7 +217,7 @@ def draw_slot(buf: list, row: int, col: int, width: int, text: str, color: str =
         buf.append(f"\033[{row};{col+width-1}H{color}{right_edge}\033[0m\033[K")
 
 def tui_sys_stats():
-    """Pasek CPU/RAM/DISK z kolorami progowymi - działa wszędzie"""
+    """CPU/RAM/DISK bar with threshold colours - works everywhere"""
     # --- CPU ---
     try:
         cpu_str = get_cpu_usage()
@@ -251,7 +251,7 @@ def tui_sys_stats():
         f = int(p / 100 * w)
         return '█' * f + '░' * (w - f)
 
-    # twarde kody ANSI - niezależne od globalnych RED/YLW/GRN
+    # hard-coded ANSI codes - independent of global RED/YLW/GRN
     GRN = "\033[92m"
     YLW = "\033[93m"
     RED = "\033[91m"
@@ -353,8 +353,8 @@ def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
         elif arg in ('-p', '--player'):
             player_mode = True
         elif arg in ('-pl', '--player-loop'):
-            # Loop mode: 1 plik → zapętla plik (--loop-file=inf)
-            #            lista  → zapętla listę (każdy plik raz, lista od nowa)
+            # Loop mode: 1 file → loops the file (--loop-file=inf)
+            #            list   → loops the list (each file once, list restarts)
             player_mode   = True
             playlist_mode = True
         elif arg in ('-c', '--camera') and i + 1 < len(args):
@@ -449,7 +449,7 @@ class CameraProfile:
             token=data.get("token", "unknown"),
             uri=data.get("uri", ""),
             res=data.get("res", "N/A"),
-            pid=None,  # nie ładuj PID z pliku — przy starcie zawsze "not running"
+            pid=None,  # do not load PID from file — always "not running" at startup
             channel=data.get("channel", 0),
             fps=data.get("fps", 0),
             codec=data.get("codec", "")
@@ -521,9 +521,9 @@ class Camera:
     }
 
     def get_mpv_filters(params: dict) -> List[str]:
-        """Konwertuje parametry obrazu na flagi filtrów mpv."""
+        """Convert image parameters to mpv video-filter flags."""
         filters = []
-        # mpv używa filtrów video 'eq' dla jasności, kontrastu itp.
+        # mpv uses the 'eq' video filter for brightness, contrast, etc.
         eq = []
         if params.get("brightness", 0) != 0: eq.append(f"brightness={params['brightness']/100}")
         if params.get("contrast", 0) != 0: eq.append(f"contrast={1 + params['contrast']/100}")
@@ -566,8 +566,8 @@ class Camera:
         if image_params:
             self.image_params.update(image_params)
         # Scanner params (CameraType.SCANNER)
-        self.scan_device  = ""            # SANE device string (dynamiczny, zmienia się po restarcie)
-        self.scan_vidpid  = ""            # USB VID:PID np. "04a9:220e" — stały identyfikator
+        self.scan_device  = ""            # SANE device string (dynamic - may change after reconnect)
+        self.scan_vidpid  = ""            # USB VID:PID e.g. "04a9:220e" — permanent identifier
         self.scan_mode    = "gray"        # color | gray | lineart
         self.scan_dpi     = 300
         self.scan_area    = "0:0:215:297" # x:y:w:h mm
@@ -576,7 +576,7 @@ class Camera:
         self.scan_resize  = "1240x1754"   # WxH po konwersji
         self.scan_desc    = ""            # opis do nazwy pliku
         self.scan_dest    = SCAN_DIR      # katalog docelowy
-        self.scan_viewer  = "mpv"         # przeglądarka: mpv|gwenview|xdg-open|eog|feh
+        self.scan_viewer  = "mpv"         # viewer app: mpv|gwenview|xdg-open|eog|feh
 
     def to_dict(self) -> dict:
         result = {
@@ -699,14 +699,14 @@ class Logger:
     def _setup(self):
         self.logger = logging.getLogger("PTZMaster")
         self.logger.setLevel(logging.DEBUG if DEBUG_MODE else logging.INFO)
-        # Nie dodawaj handlera jeśli już istnieje (zapobiega duplikatom)
+        # Do not add handler if it already exists (prevents duplicates)
         if not self.logger.handlers:
             file_handler = logging.FileHandler(LOG_FILE)
             file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
             if DEBUG_MODE:
                 file_handler.setLevel(logging.DEBUG)
             self.logger.addHandler(file_handler)
-        # Wyłącz propagację do root loggera (który już loguje do tego samego pliku)
+        # Disable propagation to root logger (which already writes to the same file)
         self.logger.propagate = False
     
     def debug(self, msg, **kwargs):
@@ -738,7 +738,7 @@ REQUIRED_OPTIONAL = ['ping', 'ip', 'xdotool', 'wmctrl', 'v4l2-ctl', 'socat',
                      'ffmpeg', 'kdotool', 'fuser', 'scanimage', 'convert']
 
 def _win_tool_available() -> bool:
-    """Zwraca True jeśli dostępne narzędzie do zapisu/odczytu geometrii okien."""
+    """Return True if a tool for saving/reading window geometry is available."""
     return any(shutil.which(t) for t in ('xdotool', 'kdotool'))
 
 def _detect_distro() -> tuple:
@@ -752,7 +752,7 @@ def _detect_distro() -> tuple:
                 if '=' in line:
                     k, v = line.split('=', 1)
                     info[k] = v.strip('"')
-        # ID_LIKE daje rodzinę (np. "opensuse" dla Tumbleweed)
+        # ID_LIKE gives the family (e.g. "opensuse" for Tumbleweed)
         os_id   = info.get('ID_LIKE', info.get('ID', 'unknown')).lower()
         pretty  = info.get('PRETTY_NAME', os_id)
     except Exception:
@@ -760,17 +760,17 @@ def _detect_distro() -> tuple:
     return os_id, pretty
 
 def check_dependencies() -> None:
-    """Sprawdź zależności i wypisz instrukcje instalacji dla wykrytego distro."""
+    """Check dependencies and print install instructions for the detected distro."""
     os_id, pretty_name = _detect_distro()
 
-    # Wykryj rodzinę dystrybucji
+    # Detect distribution family
     is_debian = any(k in os_id for k in ('debian','ubuntu','mint','pop','kali','raspbian'))
     is_arch   = any(k in os_id for k in ('arch','manjaro','cachyos','endeavour','garuda','biglinux'))
     is_suse   = any(k in os_id for k in ('suse','opensuse'))
     is_fedora = any(k in os_id for k in ('fedora','rhel','centos','rocky','alma'))
 
-    # Kolory dla distro — podświetl wykryte, przyciemnij pozostałe
-    C_ACT = f"{YLW}\033[1m"   # aktywne — żółty bold
+    # Distro colours — highlight detected, dim the rest
+    C_ACT = f"{YLW}\033[1m"   # active — yellow bold
     C_DIM = f"{DIM}"           # nieaktywne — przyciemnione
 
     C_DEB = C_ACT if is_debian else C_DIM
@@ -778,7 +778,7 @@ def check_dependencies() -> None:
     C_SUS = C_ACT if is_suse   else C_DIM
     C_FED = C_ACT if is_fedora else C_DIM
 
-    # Komendy instalacji dla każdego narzędzia
+    # Install commands per tool
     INSTALL = {
         'mpv': {
             'desc': 'Media player (WYMAGANY)',
@@ -788,21 +788,21 @@ def check_dependencies() -> None:
             'fed': 'sudo dnf install mpv',
         },
         'ffprobe': {
-            'desc': 'Analiza strumieni wideo (WYMAGANY — część ffmpeg)',
+            'desc': 'Video stream analysis (REQUIRED — part of ffmpeg)',
             'deb': 'sudo apt install ffmpeg',
             'arc': 'sudo pacman -S ffmpeg',
             'sus': 'sudo zypper install ffmpeg',
             'fed': 'sudo dnf install ffmpeg',
         },
         'ffmpeg': {
-            'desc': 'Ekstrakcja klipów [R]EC',
+            'desc': 'Clip extraction [R]EC',
             'deb': 'sudo apt install ffmpeg',
             'arc': 'sudo pacman -S ffmpeg',
             'sus': 'sudo zypper install ffmpeg',
             'fed': 'sudo dnf install ffmpeg',
         },
         'ping': {
-            'desc': 'Test dostępności kamer w sieci',
+            'desc': 'Network camera availability probe',
             'deb': 'sudo apt install iputils-ping',
             'arc': 'sudo pacman -S iputils',
             'sus': 'sudo zypper install iputils',
@@ -823,7 +823,7 @@ def check_dependencies() -> None:
             'fed': 'sudo dnf install xdotool',
         },
         'wmctrl': {
-            'desc': 'Zarządzanie oknami (X11, alternatywa)',
+            'desc': 'Window management (X11, alternative)',
             'deb': 'sudo apt install wmctrl',
             'arc': 'sudo pacman -S wmctrl',
             'sus': 'sudo zypper install wmctrl',
@@ -837,14 +837,14 @@ def check_dependencies() -> None:
             'fed': 'pip install kdotool',
         },
         'v4l2-ctl': {
-            'desc': 'Obsługa kamer V4L2/USB',
+            'desc': 'V4L2/USB camera support',
             'deb': 'sudo apt install v4l-utils',
             'arc': 'sudo pacman -S v4l-utils',
             'sus': 'sudo zypper install v4l2-utils',
             'fed': 'sudo dnf install v4l-utils',
         },
         'socat': {
-            'desc': 'Diagnostyka połączeń sieciowych',
+            'desc': 'Network connection diagnostics',
             'deb': 'sudo apt install socat',
             'arc': 'sudo pacman -S socat',
             'sus': 'sudo zypper install socat',
@@ -854,9 +854,9 @@ def check_dependencies() -> None:
 
     missing_critical = [c for c in REQUIRED_CRITICAL if not shutil.which(c)]
 
-    # Narzędzia do zarządzania oknami mpv:
+    # mpv window management tools:
     # — xdotool lub kdotool potrzebne do ZAPISU pozycji (getwindowgeometry)
-    # — wmctrl tylko do sterowania (nie umie czytać geometrii przez PID)
+    # — wmctrl for control only (cannot read geometry by PID)
     _geom_tools   = ['xdotool', 'kdotool']   # do zapisu layoutu
     _geom_missing = all(not shutil.which(t) for t in _geom_tools)
     _win_report   = ['xdotool'] if _geom_missing else []   # reprezentant grupy
@@ -876,16 +876,16 @@ def check_dependencies() -> None:
     def _bar(ch='═'): print(f"{BLU}{'═'*W}{RST}")
 
     _bar()
-    print(f"{BLU}  PTZ Master — sprawdzanie zależności{RST}"
+    print(f"{BLU}  PTZ Master — checking dependencies{RST}"
           f"  {DIM}{pretty_name}{RST}")
     _bar()
 
     def _install_row(cmd):
         info  = INSTALL.get(cmd, {})
         desc  = info.get('desc', '')
-        # Specjalny przypadek: xdotool jako reprezentant grupy narzędzi okienkowych
+        # Special case: xdotool as representative of the window-tool group
         if cmd == 'xdotool' and _geom_missing:
-            print(f"\n  {YLW}▸ Narzędzia do pozycjonowania okien mpv{RST}"
+            print(f"\n  {YLW}▸ mpv window positioning tools{RST}"
                   f"  {DIM}(brak xdotool / wmctrl / kdotool){RST}")
             print(f"    {C_DEB}Debian/Ubuntu : sudo apt install xdotool{RST}")
             print(f"    {C_ARC}Arch/CachyOS  : sudo pacman -S xdotool  {DIM}lub{RST}{C_ARC}  yay -S kdotool{RST}")
@@ -901,19 +901,19 @@ def check_dependencies() -> None:
             print(f"    {C_FED}Fedora/RHEL   : {info['fed']}{RST}")
 
     if missing_critical:
-        print(f"\n  {RED}✗ BRAKUJĄCE WYMAGANE — program nie uruchomi się:{RST}")
+        print(f"\n  {RED}✗ MISSING REQUIRED — program will not start:{RST}")
         for cmd in missing_critical:
             _install_row(cmd)
         _bar()
-        print(f"\n{RED}Zainstaluj brakujące programy i uruchom ponownie.{RST}\n")
+        print(f"\n{RED}Install missing programs and restart.{RST}\n")
         sys.exit(1)
 
     if missing_optional:
-        print(f"\n  {YLW}○ Opcjonalne — niektóre funkcje będą niedostępne:{RST}")
+        print(f"\n  {YLW}○ Optional — some features will be unavailable:{RST}")
         for cmd in missing_optional:
             _install_row(cmd)
         _bar()
-        print(f"  {DIM}Naciśnij ENTER aby kontynuować...{RST}", end='', flush=True)
+        print(f"  {DIM}Press ENTER to continue...{RST}", end='', flush=True)
         try:
             input()
         except (EOFError, KeyboardInterrupt):
@@ -959,7 +959,7 @@ def rlinput(prompt: str, default: str = '') -> str:
     finally:
         if old_settings is not None:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        # Ukryj kursor natychmiast po wyjściu z trybu input - TUI
+        # Hide cursor immediately after leaving input mode - TUI
         try:
             sys.stdout.write("\033[?25l")
             sys.stdout.flush()
@@ -971,7 +971,7 @@ def rlinput(prompt: str, default: str = '') -> str:
 # =============================================================================
 
 def _is_wayland() -> bool:
-    """Zwraca True jeśli sesja działa na Wayland."""
+    """Return True if the session is running on Wayland."""
     return (os.environ.get('WAYLAND_DISPLAY') is not None or
             os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland')
 
@@ -990,7 +990,7 @@ class Terminal:
 
     @classmethod
     def _get_win_tool(cls) -> Optional[str]:
-        """Zwraca dostępne narzędzie do zarządzania oknami."""
+        """Return the available window management tool."""
         if cls._win_tool:
             return cls._win_tool
         for t in ('xdotool', 'kdotool'):
@@ -1004,7 +1004,7 @@ class Terminal:
         tool = cls._get_win_tool()
         if not tool or platform.system() != "Linux":
             return
-        # xdotool wymaga DISPLAY, kdotool działa też na Wayland
+        # xdotool requires DISPLAY; kdotool also works on Wayland
         if tool == 'xdotool' and not os.environ.get('DISPLAY'):
             return
         try:
@@ -1020,9 +1020,9 @@ class Terminal:
     @classmethod
     def reposition_mpv_window(cls, title: str, layout: 'WindowLayout',
                                max_wait: float = 5.0) -> bool:
-        """Po starcie mpv wymuś pozycję/rozmiar przez xdotool lub kdotool.
-        Czeka aż okno się pojawi (max max_wait sekund).
-        Zwraca True jeśli udało się ustawić pozycję.
+        """After mpv starts, force position/size via xdotool or kdotool.
+        Waits until the window appears (up to max_wait seconds).
+        Returns True if position was set successfully.
         """
         tool = cls._get_win_tool()
         if not tool:
@@ -1092,7 +1092,7 @@ class Terminal:
         tool = cls._get_win_tool()
         if not tool:
             return
-        # xdotool wymaga DISPLAY; kdotool działa bez
+        # xdotool requires DISPLAY; kdotool works without it
         if tool == 'xdotool' and (platform.system() != "Linux" or not os.environ.get('DISPLAY')):
             return
 
@@ -1132,7 +1132,7 @@ class Terminal:
             logger.debug(f"Error positioning terminal: {e}")
 
 def get_cpu_usage() -> str:
-    """Zwraca obciążenie CPU jako loadavg 1m przeliczony na % - stabilny, bez delty."""
+    """Return CPU load as 1-min loadavg converted to % - stable, no delta."""
     try:
         with open('/proc/loadavg', 'r') as f:
             load1 = float(f.read().split()[0])
@@ -1143,7 +1143,7 @@ def get_cpu_usage() -> str:
         return "0%"
 
 def get_free_space_percent(path: str = "/") -> int:
-    """Zwraca procent wolnego miejsca na dysku."""
+    """Return free disk space as a percentage."""
     try:
         import shutil as _shutil
         stat = _shutil.disk_usage(path)
@@ -1153,7 +1153,7 @@ def get_free_space_percent(path: str = "/") -> int:
 
 
 def _is_keyframe_aligned(filepath: str, time_sec: float) -> bool:
-    """Sprawdza czy czas jest wyrównany do klatki kluczowej."""
+    """Check whether the timestamp is aligned to a keyframe."""
     try:
         result = subprocess.run(
             ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
@@ -1172,7 +1172,7 @@ def _extract_clip(filepath: str, start: float, end: float,
                   saturation: int = 0, gamma: int = 0, hue: int = 0,
                   output_name: str = None, vcodec_override: str = None,
                   crf: int = 23, extra_vf: str = None) -> bool:
-    """Wyciąga fragment wideo z obecnymi filtrami obrazu (ffmpeg w tle)."""
+    """Extract a video clip with current image filters applied (ffmpeg in background)."""
     if not filepath or not os.path.isfile(filepath):
         logger.error(f"_extract_clip: plik nie istnieje: {filepath!r}")
         return False
@@ -1218,7 +1218,7 @@ def _extract_clip(filepath: str, start: float, end: float,
         with open(ffmpeg_log, "w") as _flog:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=_flog)
         logger.info(f"_extract_clip PID={proc.pid}  ffmpeg_log={ffmpeg_log}")
-        # Usuń log w tle po zakończeniu ffmpeg
+        # Remove background ffmpeg log after it finishes
         def _rm_log():
             try:
                 proc.wait(timeout=600)
@@ -1235,22 +1235,22 @@ def _extract_clip(filepath: str, start: float, end: float,
 
 
 def ansilen(s: str) -> int:
-    """Dokładne liczenie długości dla pozycjonowania myszy"""
-    # Używamy standardowego ciągu znaków (bez 'r'), aby \x1b zostało zinterpretowane jako znak Escape.
+    """Precise display-width counting for mouse positioning."""
+    # Use a regular string (not r-string) so \x1b is interpreted as the Escape character.
     clean = re.sub('\x1b\\[[0-9;]*[a-zA-Z]', '', s)
     total = 0
     for c in clean:
         cp = ord(c)
-        # Emoji i symbole (większość zajmuje 2 pozycje)
+        # Emoji and symbols (most occupy 2 columns)
         if cp >= 0x1F000:
             total += 2
-        # Znaki CJK (chiński, japoński, koreański)
+        # CJK characters (Chinese, Japanese, Korean)
         elif unicodedata.east_asian_width(c) in ('W', 'F'):
             total += 2
         # Specjalne znaki ramek (║, ═, █, ░)
         elif c in '║═╔╗╚╝╠╣╤╧╪╫╬▀▄█▌▐░▒▓■□▪▫▬▲►▼◄◀►':
             total += 1
-        # Zwykłe znaki
+        # Regular characters
         else:
             total += 1
     return total
@@ -1259,9 +1259,9 @@ def pad(text: str, length: int) -> str:
     return text + (" " * max(0, length - ansilen(text)))
 
 def btn_pos(text: str, offset: int = 0) -> dict:
-    """Oblicz pozycje przycisków [X] w tekście (bez kolorów ANSI).
+    """Calculate button [X] positions in text (excluding ANSI colour codes).
     Zwraca {label: (col_start, col_end)} 1-indexed, z opcjonalnym offset.
-    Złożone etykiety jak [Q/ESC] są mapowane pod każdym kluczem osobno.
+    Compound labels like [Q/ESC] are mapped under each key separately.
     """
     clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
     positions = {}
@@ -1274,11 +1274,11 @@ def btn_pos(text: str, offset: int = 0) -> dict:
 
 @contextmanager
 def _cooked_input(fd: int):
-    """Context manager: przełącz terminal na cooked+echo, wyłącz mysz.
-    Użycie:
+    """Context manager: switch terminal to cooked+echo, disable mouse tracking.
+    Usage:
         with _cooked_input(fd) as _:
             result = input()
-    Przywraca raw mode i mysz po wyjściu niezależnie od wyjątków.
+    Restores raw mode and mouse tracking on exit regardless of exceptions.
     """
     import tty as _tty_cm
     old = termios.tcgetattr(fd)
@@ -1317,7 +1317,7 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '',
     sys.stdout.flush()
 
 def format_progress_line(percent: float, width: int = 20, label: str = "", subnet: str = "") -> str:
-    """Pasek postępu bez kodów ANSI — kolory dodaje draw()."""
+    """Progress bar without ANSI codes — colours are added by draw()."""
     filled = int(percent / 100 * width)
     bar    = '█' * filled + '░' * (width - filled)
     subnet_part = f"  {subnet}" if subnet else ""
@@ -1515,7 +1515,7 @@ class KeyReader:
 
             if ch.startswith('\x1b'):
                 if len(ch) == 1:
-                    # czekaj na resztę sekwencji
+                    # wait for the rest of the sequence
                     seq = ''
                     for _ in range(32):
                         r, _, _ = select.select([fd], [], [], 0.05)
@@ -1539,7 +1539,7 @@ class KeyReader:
                             return cls._ESC_SEQUENCES[seq]
                     return Key.ESC
 
-                # pełna sekwencja w jednym odczycie - jak w CachCach
+                # full sequence in a single read - as in hide-and-seek
                 if '[<' in ch and (ch.endswith('M') or ch.endswith('m')):
                     m_match = re.search(r'\[<(\d+);(\d+);(\d+)([Mm])', ch)
                     if m_match:
@@ -1565,7 +1565,7 @@ class KeyReader:
             if ch == '\x20':
                 return Key.SPACE
 
-            # filtr okruchów myszy jak w CachCach
+            # mouse noise filter
             if ch.lstrip().startswith('[<'):
                 return Key.TIMEOUT
 
@@ -1787,7 +1787,7 @@ class Config:
         self.auto_check_interval = auto_check_interval
         self.session_state = session_state
         self.global_mute = global_mute
-        # Domyślne parametry obrazu dla nowych plików
+        # Default image parameters for new files
         if default_image_params:
             self.default_image_params = default_image_params
             Camera.DEFAULT_IMAGE_PARAMS = default_image_params.copy()
@@ -1804,7 +1804,7 @@ class Config:
             "GLOBAL_MUTE": self.global_mute,
             "CAMERAS": [c.to_dict() for c in self.cameras]
         }
-        # Zapisz domyślne parametry jeśli różnią się od fabrycznych
+        # Save default parameters if they differ from factory defaults
         dip = getattr(self, 'default_image_params', None)
         if dip and dip != {"brightness": 0, "contrast": 0, "saturation": 0,
                            "gamma": 0, "hue": 0, "volume": 100, "mute": False, "speed": 1.0}:
@@ -1904,7 +1904,7 @@ class ConfigManager:
             notify(f"Save error: {e}", "error")
             return False
         finally:
-            # Ten blok zawsze się wykona. Jeśli plik .tmp nadal istnieje, bezpiecznie go usuwamy.
+            # This block always executes. If the .tmp file still exists, remove it safely.
             if os.path.exists(tmp):
                 try:
                     os.unlink(tmp)
@@ -2311,23 +2311,23 @@ class ONVIFClient:
 
     def _send_onvif_request(self, url: str, body: str, timeout: tuple = (1.5, 3.5)) -> Optional[str]:
         """
-        Bezpieczne wysyłanie żądania SOAP do kamery ONVIF z rozdzielonym timeoutem.
+        Safely send a SOAP request to an ONVIF camera with split timeout.
 
         Args:
-            url: Pełny adres URL endpointu ONVIF
-            body: Treść żądania SOAP (XML)
+            url: Full URL of the ONVIF endpoint
+            body: SOAP request body (XML)
             timeout: Krotka (connect_timeout, read_timeout) w sekundach
 
         Returns:
-            Odpowiedź serwera jako string lub None w przypadku błędu
+            Server response as a string, or None on error
         """
         try:
             session = self._get_session()
-            # Używamy krotki (connect, read) – szybko wykrywamy niedostępne kamery
+            # Use tuple (connect, read) – quickly detect unreachable cameras
             response = session.post(url, data=body, timeout=timeout)
 
-            # Akceptujemy również kody 400, 401, 500 – często oznaczają one, że kamera
-            # odpowiedziała, ale wymaga autoryzacji lub ma błąd w zapytaniu
+            # Also accept 400, 401, 500 – these often mean the camera
+            # responded but requires auth or the request has an error
             if response.status_code in (200, 400, 401, 403, 405, 500):
                 logger.debug(f"ONVIF response HTTP {response.status_code} from {url}")
                 return response.text
@@ -2365,10 +2365,10 @@ class ONVIFClient:
 
         logger.info(f"Getting ONVIF profiles from {url}")
 
-        # Używamy nowej, bezpiecznej metody z rozdzielonym timeoutem
+        # Use the new, safe method with split timeout
         xml = self._send_onvif_request(url, body, timeout=(1.5, 3.5))
         if xml is None:
-            # Błąd został już zalogowany wewnątrz _send_onvif_request
+            # Error already logged inside _send_onvif_request
             return ([], "")
 
         logger.debug(f"XML response (first 200 chars): {xml[:200]}")
@@ -2574,7 +2574,7 @@ class ONVIFClient:
         return xml is not None
 
     def goto_preset(self, token: str, preset_token: str) -> bool:
-        """Przesuwa kamerę do zapisanego punktu (presetu)."""
+        """Move the camera to a saved preset position."""
         token = html.escape(token)
         url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/PTZ"
         body = f'''<tptz:GotoPreset xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
@@ -3384,7 +3384,7 @@ class PlayerWatchdog:
                 self._last_pts = pts
                 self._last_adv = now
             elif self._last_pts is not None and pts < self._last_pts - 0.5:
-                # pts cofnął się — seek lub ab-loop, reset freeze timer
+                # pts went backwards — seek or ab-loop, reset freeze timer
                 logger.debug(f"Watchdog: {self.cam.name} seek back {self._last_pts:.1f}→{pts:.1f}s — freeze reset")
                 self._last_pts = pts
                 self._last_adv = now
@@ -3439,50 +3439,50 @@ class PlayerWatchdog:
 
 from typing import List, Optional
 
-# Założenie: Logger i PlayerWatchdog są zdefiniowane wcześniej w projekcie
+# Assumption: Logger and PlayerWatchdog are defined earlier in the project
 logger = logging.getLogger(__name__)
 
 class ProcessManager:
     """
-    Klasa odpowiedzialna za zarządzanie procesami zewnętrznymi (np. odtwarzaczem mpv).
-    Pozwala na sprawdzanie statusu, bezpieczne zamykanie i masowe czyszczenie procesów.
+    Class responsible for managing external processes (e.g. the mpv player).
+    Supports status checking, safe shutdown, and bulk process cleanup.
     """
 
     @staticmethod
     def is_running(pid: Optional[int]) -> bool:
-        """Sprawdza, czy proces o danym ID nadal działa."""
+        """Check whether the process with the given ID is still running."""
         if pid is None or pid <= 0:
             return False
         try:
-            # Sygnał 0 nie zabija procesu, ale sprawdza czy można do niego wysłać sygnał
+            # Signal 0 does not kill the process; it only checks whether it can be signalled
             os.kill(pid, 0)
             return True
         except (OSError, ProcessLookupError):
-            # Jeśli proces nie istnieje lub nie mamy uprawnień
+            # Process does not exist or we lack permission
             return False
 
     @staticmethod
     def wait_for_start(pid: int, timeout: float = 2.0) -> bool:
-        """Czeka określoną ilość czasu, aż proces pojawi się w systemie."""
+        """Wait up to the given timeout for the process to appear in the system."""
         start = time.time()
         while time.time() - start < timeout:
             if ProcessManager.is_running(pid):
-                # Dodatkowa chwila na pełną inicjalizację zasobów procesu
+                # Extra moment for full process resource initialisation
                 time.sleep(0.2)
                 logger.debug(f"Proces {pid} potwierdzony po {time.time()-start:.2f}s")
                 return True
             time.sleep(0.05)
 
-        logger.warning(f"Nie wykryto procesu {pid} w ciągu {timeout}s")
+        logger.warning(f"Process {pid} not detected within {timeout}s")
         return False
 
     @staticmethod
     def kill(pid: int, force: bool = False) -> bool:
         """
-        Zamyka proces. Najpierw próbuje prośbą (SIGTERM),
-        a jeśli to nie zadziała lub force=True – wymusza zamknięcie (SIGKILL).
+        Terminate a process. First attempts a polite request (SIGTERM),
+        and if that fails or force=True – forces termination (SIGKILL).
         """
-        # Powiadomienie strażnika (watchdoga), żeby nie próbował restartować tego procesu
+        # Notify the watchdog so it does not try to restart this process
         if 'PlayerWatchdog' in globals():
             PlayerWatchdog.stop_for_pid(pid)
 
@@ -3490,40 +3490,40 @@ class ProcessManager:
             if force:
                 os.kill(pid, 9)  # SIGKILL - natychmiastowe ubicie
             else:
-                os.kill(pid, 15) # SIGTERM - uprzejma prośba o zamknięcie
+                os.kill(pid, 15) # SIGTERM - polite shutdown request
 
-                # Krótka pętla sprawdzająca, czy proces faktycznie się zamknął
+                # Short polling loop to check whether the process actually exited
                 for _ in range(5):
                     if not ProcessManager.is_running(pid):
                         break
                     time.sleep(0.1)
 
-                # Jeśli po prośbie nadal żyje - używamy siły
+                # Still alive after polite request - use force
                 if ProcessManager.is_running(pid):
                     os.kill(pid, 9)
 
-            logger.debug(f"Zamknięto proces {pid} (force={force})")
+            logger.debug(f"Process {pid} terminated (force={force})")
             return True
         except ProcessLookupError:
-            return True # Proces już nie istniał, więc cel osiągnięty
+            return True # Process was already gone - goal achieved
         except OSError as e:
-            logger.error(f"Błąd podczas zamykania procesu {pid}: {e}")
+            logger.error(f"Error terminating process {pid}: {e}")
             return False
 
     @staticmethod
     def kill_all(cameras: List) -> int:
-        """Zamyka wszystkie aktywne procesy powiązane z listą kamer."""
+        """Terminate all active processes associated with the camera list."""
         killed_count = 0
         for cam in cameras:
-            # Iterujemy po profilach kamery (np. strumień RTSP[cite: 1])
+            # Iterate over camera profiles (e.g. RTSP stream)
             for prof in cam.profiles:
                 if prof.pid and ProcessManager.is_running(prof.pid):
                     if ProcessManager.kill(prof.pid):
-                        prof.pid = None # Resetujemy PID, aby wiedzieć, że jest wolny
+                        prof.pid = None # Reset PID to indicate it is free
                         killed_count += 1
 
         if killed_count > 0:
-            logger.info(f"Pomyślnie zakończono {killed_count} procesów")
+            logger.info(f"Successfully terminated {killed_count} process(es)")
         return killed_count
 
 # =============================================================================
@@ -3695,7 +3695,7 @@ class Player:
                 return Player._play_file(cam, layout, skip_focus=skip_focus,
                                          global_mute=global_mute)
             elif cam.type == CameraType.SCANNER:
-                # TUTAJ: Prawidłowe rozpakowanie krotki (Fix 1)
+                # HERE: Correct tuple unpacking (Fix 1)
                 _res = Player._play_scanner(cam, skip_focus=skip_focus)
                 return _res[0] if isinstance(_res, tuple) else _res
             else:
@@ -3712,7 +3712,7 @@ class Player:
                       file_number: int = None,
                       date_fmt: int = 0,
                       num_pad: int = 3) -> tuple:
-        """v9.0.52: Stabilna obsługa skanowania z poprawkami bezpieczeństwa."""
+        """v9.0.52: Stable scan handling with safety fixes."""
         if not shutil.which('scanimage'):
             return False, "scanimage not found"
 
@@ -3788,7 +3788,7 @@ class Player:
                 universal_newlines=True, bufsize=1
             )
 
-            # Pętla progresu
+            # Progress loop
             while proc.poll() is None:
                 rlist, _, _ = select.select([proc.stderr], [], [], 0.2)
                 if proc.stderr in rlist:
@@ -3797,7 +3797,7 @@ class Player:
                     if m and progress_callback:
                         progress_callback(int(float(m.group(1))))
 
-            # Bezpieczne zakończenie – tylko ten proces, nie globalny killall
+            # Safe termination - only this process, not a global killall
             if proc.poll() is None:
                 proc.terminate()
                 try:
@@ -3815,7 +3815,7 @@ class Player:
             if proc.returncode != 0:
                 return False, f"Scanimage error {proc.returncode}"
 
-            # Konwersja jeśli potrzeba
+            # Convert if necessary
             if fmt.lower() != 'tiff' and shutil.which('convert'):
                 try:
                     subprocess.run(
@@ -3838,8 +3838,8 @@ class Player:
             else:
                 final_file = raw_file
 
-            # Otwórz przeglądarkę
-            # WYŁĄCZONE: automatyczny podgląd po skanie - teraz tylko na żądanie (s)
+            # Open the viewer
+            # DISABLED: automatic preview after scan - now on-demand only (s)
             # viewer = cam.scan_viewer or "mpv"
             # if viewer == "mpv" and shutil.which("mpv"):
             #     subprocess.Popen([
@@ -3876,7 +3876,7 @@ class Player:
         except FileNotFoundError:
             pass
 
-        # Wykryj plik audio (brak video) — dodaj wizualizację oscilloscope
+        # Detect audio-only file (no video) — add oscilloscope visualisation
         _AUDIO_EXTS = {'.mp3', '.flac', '.ogg', '.opus', '.m4a',
                        '.aac', '.wav', '.wma', '.ape', '.mka'}
         _ext = os.path.splitext(cam.file_path)[1].lower()
@@ -3898,7 +3898,7 @@ class Player:
                 f'--lavfi-complex=[aid1]asplit=2[ao][a1];[a1]avectorscope=s={_vis_size}:zoom=1.5:rc=0:gc=200:bc=0:rf=1:gf=8:bf=7[vo]',
                 '--no-audio-display',
             ]
-        # Zastosuj image_params bezpośrednio w komendzie mpv — bez czekania na IPC
+        # Apply image_params directly in the mpv command — no IPC wait needed
         ip = cam.image_params
         if ip.get("brightness", 0) != 0: args.append(f'--brightness={int(ip["brightness"])}')
         if ip.get("contrast",   0) != 0: args.append(f'--contrast={int(ip["contrast"])}')
@@ -3944,7 +3944,7 @@ class Player:
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
 
-        # Wymuś pozycję przez kdotool/xdotool w tle
+        # Force window position via kdotool/xdotool in the background
         if _win_tool_available() and cam.layout:
             _title = f"FILE:{cam.name.replace(' ', '_')}"
             threading.Thread(
@@ -4035,7 +4035,7 @@ class Player:
         if not skip_focus:
             Terminal.restore_focus(mpv_pid=proc.pid)
 
-        # Wymuś pozycję przez kdotool/xdotool w tle
+        # Force window position via kdotool/xdotool in the background
         if _win_tool_available() and cam.layout:
             _title = f"LIVE:{cam.name.replace(' ', '_')}"
             threading.Thread(
@@ -4149,7 +4149,7 @@ class UI:
             "U": "▲", "D": "▼", "L": "◄", "R": "►",
             "C": "■", "Z+": "+", "Z-": "-"
         }
-        # Surowe symbole (bez koloru) — kolor nakładany później w PTZ panelu
+        # Raw symbols (no colour) — colour applied later in the PTZ panel
         dir_sym_raw = {
             k: ("█" if self.active_dir == k else v)
             for k, v in sym.items()
@@ -4195,7 +4195,7 @@ class UI:
         r1 = f"{YLW}(e){RST} Edit {YLW}(w){RST} {RED}Save{RST} "
         # top border with (F1 Help) on the right – as requested
         f1_raw = "(F1 Help)"
-        f1_text = f"{YLW}(F1 Help){RST}"
+        f1_text =  f"{YLW}(F1 {CYN}Help{YLW}){RST}"
         rlines.append(("top",    f"┬{'─' * (W - len(f1_raw))}{f1_text}┐"))
         rlines.append(("normal", f"│{pad(l1, W - ansilen(r1))}{r1}│"))
         rlines.append(("sep",    f"├" + "─" * W + "┤"))
@@ -4246,7 +4246,7 @@ class UI:
             display_name = prof.name
             res_display  = f" [{prof.res}]"
         l4     = f" 📺 {BLU}{display_name[:20]}{RST}{res_display}{preset_info}"
-        # Stała pozycja prawej ramki — token dopasowany do wolnego miejsca
+        # Fixed right-frame position — token fitted to available space
         _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=58 → 80)
         _tok_raw   = prof.token if prof.token else prof.name
         t_info     = f" {YLW}(t){RST} Token: {BLU}{_tok_raw[:13]}{RST} "
@@ -4300,7 +4300,7 @@ class UI:
 
         FW = LW + 1 + W
         print('├' + '─' * LW + rlines[-1][1])
-        # Kolor krzyża: zielony=PTZ, żółty=PAN
+        # Crosshair colour: green=PTZ, yellow=PAN
         _arrow_col = YLW if getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN' else GRN
         def _ds(k):
             sym_char = dir_sym_raw[k]
@@ -4315,7 +4315,7 @@ class UI:
         _pan_s  = f"{GRN}1.0x{RST}"
         _xy_s   = f"x:{_pan_x:+.2f} y:{_pan_y:+.2f}"
         _COL79  = FW + 2  # prawa │ absolutna (FW=78 → col 80)
-        _C34 = 50  # środkowy │ — absolutna kolumna 50
+        _C34 = 50  # centre │ — absolute column 50
         sys.stdout.write(f"│    {dsU}    │ Progress: {p_view}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
@@ -4323,7 +4323,7 @@ class UI:
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
 
-        ### ZMIANA: wskaźnik trybu [ptz]/[pan] w tym samym rzędzie co ▼, przed współrzędnymi
+        ### CHANGE: mode indicator [ptz]/[pan] on same row as ▼, before coordinates
         _cur_cam  = self.current_camera
         _cmode    = getattr(_cur_cam, "_ctrl_mode", "PTZ") if _cur_cam else "PTZ"
         _mode_tag = f" {DIM}[{_cmode.lower()}]{RST}"
@@ -4362,7 +4362,7 @@ class UI:
         _ncol  = GRN if "OK" in _notif else (RED if any(w in _notif.lower() for w in ("err","fail","stop")) else YLW)
         _scan  = getattr(self, "_scan_status", "")
 
-        ### ZMIANA: usunięto _mode_tag z linii F2/F3 (było po _nav_l)
+        ### CHANGE: removed _mode_tag from F2/F3 lines (was appended after _nav_l)
         _nav_l    = f" {YLW}F2{RST} Discovery {YLW}F3{RST} Batch {YLW}1-9{RST} Cam {YLW}{cam_nav}{RST} {_mute_icon}{YLW}(F6){RST}"
         sys.stdout.write("│" + _nav_l)
         sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
@@ -4399,7 +4399,7 @@ class UI:
         sys.stdout.write("│" + _srow)
         sys.stdout.write(f"\033[{_COL_R}G|\n".replace("|","│"))
 
-        # Dolna ramka z nazwą i ESC/Q
+        # Bottom frame with camera name and ESC/Q
         _vtag    = f" ptz-master v {VERSION} "
         _right_plain = f"[{_vtag}]\u2500(ESC/Q)\u2500\u2518"
         _ld      = max(0, FW - len(_right_plain) + 1)
@@ -4416,16 +4416,16 @@ class UI:
         self.progress = progress
 
     def update_status_line(self, message: str, color: str = "\033[92m"):
-        """Aktualizuje tylko linię 18 (powiadomienia) bez pełnego draw()."""
-        # FW to szerokość Twojej ramki (LW + 1 + W), z Twojego kodu to ok. 78
+        """Update only row 18 (notifications) without a full draw()."""
+        # FW is your frame width (LW + 1 + W), approx 78 from your code
         FW = 19 + 1 + 58
 
-        # 1. Przejdź do linii 18, kolumny 2 (zaraz za pionową kreską │)
-        # 2. Wyczyść linię do końca ramki (\033[K)
-        # 3. Wypisz ikonę i wiadomość
-        # 4. Na końcu dodaj prawą krawędź ramki
+        # 1. Move to row 18, column 2 (just after the vertical bar │)
+        # 2. Clear line to end of frame (\033[K)
+        # 3. Print the icon and message
+        # 4. Append the right frame border
         sys.stdout.write(f"\033[18;1H│ {color}🔔 ▸ {message[:FW-6]}{RST}")
-        sys.stdout.write(f"\033[{FW+2}G│") # Skok do prawej krawędzi i domknięcie
+        sys.stdout.write(f"\033[{FW+2}G│") # Jump to right edge and close
         sys.stdout.flush()
 
 # =============================================================================
@@ -4462,17 +4462,17 @@ class PTZMasterApp:
         atexit.register(self.cleanup)
 
     def notify(self, msg: str, type: str = "info"):
-        """Wysyła komunikat do wiersza 18 w UI."""
+        """Send a message to row 18 in the UI."""
         color = GRN if type == "info" else (RED if type == "error" else YLW)
-        # Wywołujemy nową metodę z UI
+        # Call the new UI method
         self.ui.update_status_line(msg, color)
 
     def _on_mouse_click(self, x, y):
-        """Przykład obsługi kliknięcia - poprawione."""
-        # Załóżmy, że tutaj obliczasz kliknięcie na krzyżu PTZ
+        """Example click handler - corrected."""
+        # Assume you calculate the PTZ crosshair click here
         # Zamiast: print(f"x:{px} y:{py}")
-        # Użyj:
-        px, py = 0.40, 0.05 # przykładowe wartości
+        # Use:
+        px, py = 0.40, 0.05 # example values
         self.notify(f"PTZ Click: x:{px:+.2f} y:{py:+.2f}")
 
     def cleanup(self, save_session: bool = False):
@@ -4582,7 +4582,7 @@ class PTZMasterApp:
 
     def _prompt_at_status_line(self, prompt_text: str) -> str:
         """
-        Wyświetla prompt w wierszu 18, bezpiecznie pobiera dane
+        Display a prompt on row 18 and safely collect input
         i przywraca stan terminala.
         """
         import sys
@@ -4590,19 +4590,19 @@ class PTZMasterApp:
         import tty
 
         fd = sys.stdin.fileno()
-        # 1. Zapisujemy stan 'surowy', w którym aktualnie znajduje się aplikacja
+        # 1. Save the 'raw' state the application is currently in
         old_settings = termios.tcgetattr(fd)
 
         try:
-            # 2. Wyłączamy mysz (kody ANSI: stop 1000, 1002, 1006)
+            # 2. Disable mouse (ANSI codes: stop 1000, 1002, 1006)
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
 
-            # 3. Przełączamy na tryb 'cooked' (widoczne znaki i obsługa Enter)
+            # 3. Switch to 'cooked' mode (visible characters and Enter handling)
             new_settings = termios.tcgetattr(fd)
             new_settings[3] |= (termios.ECHO | termios.ICANON)
             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
 
-            # 4. Ustawiamy kursor w wierszu 18 i czyścimy linię przed pytaniem
+            # 4. Position cursor on row 18 and clear the line before the prompt
             sys.stdout.write(f'\033[18;1H\033[2K{YLW}│ {prompt_text}{RST}')
             sys.stdout.flush()
 
@@ -4611,7 +4611,7 @@ class PTZMasterApp:
                 result = input()
                 return result
             except (KeyboardInterrupt, EOFError):
-                # Jeśli użytkownik anuluje (Ctrl+C lub Ctrl+D), zwracamy pusty ciąg
+                # If the user cancels (Ctrl+C or Ctrl+D), return an empty string
                 return ""
 
         finally:
@@ -4619,7 +4619,7 @@ class PTZMasterApp:
             # Przywracamy ustawienia zapisane w punkcie 1.
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-            # 7. Ponownie włączamy mysz dla głównego interfejsu
+            # 7. Re-enable mouse tracking for the main interface
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
 
@@ -5108,12 +5108,12 @@ class PTZMasterApp:
 
             key = None
             deadline = time.time() + 10
-            time.sleep(0.2)  # krótki debounce
+            time.sleep(0.2)  # short debounce
             while key is None:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
-                # get_key z timeoutem 1s — nie blokuje, odświeża odliczanie
+                # get_key with 1s timeout — non-blocking, refreshes countdown
                 ch = get_key(min(remaining, 1.0))
                 if ch == Key.TIMEOUT:
                     continue
@@ -5125,7 +5125,7 @@ class PTZMasterApp:
                         elif r == 10 and 4 <= c <= 6: key = 'c'
                         else: key = 'c'
                     continue
-                # ESC = anuluj (wróć do programu)
+                # ESC = cancel (return to program)
                 if ch in (Key.ESC, Key.ESC_ESC):
                     key = 'c'
                 elif ch.lower() in ('s', 'q', 'c'):
@@ -5410,7 +5410,7 @@ class PTZMasterApp:
             while True:
                 key = get_key(timeout=0.3)
 
-                # Redraw gdy status zmieniony przez wątek tła (auto-check, discovery)
+                # Redraw when status changed by background thread (auto-check, discovery)
                 if key == Key.TIMEOUT:
                     _cur_status = getattr(self.ui, '_scan_status', '')
                     if _cur_status != _last_status:
@@ -5449,7 +5449,7 @@ class PTZMasterApp:
                     # Keys p, x, e, a, d, w, c, ,, ., 1-9, F1-F6, q work normally
 
                 if key in (Key.ESC, Key.ESC_ESC):
-                    # ESC = wróć / anuluj (identycznie jak q)
+                    # ESC = go back / cancel (identical to q)
                     logger.info("ESC pressed - confirm exit")
                     self._mouse_off(); self._confirm_exit(); self._mouse_on()
                     continue
@@ -5554,11 +5554,11 @@ class PTZMasterApp:
                             if _cam:
                                 _cam.pan_x = _px; _cam.pan_y = _py
                             notify(f'PAN x:{_px:+.2f} y:{_py:+.2f}', 'info')
-                            self.ui.draw()   # <--- DODAJ TĘ LINIĘ
+                            self.ui.draw()   # <--- ADD THIS LINE
                         else:
                             notify('mpv nie gra — uruchom (p)', 'warning')
                     else:
-                        # PTZ mode — steruj kamerą jak dotychczas
+                        # PTZ mode — control camera as before
                         if   key == Key.UP:    self._move_timed(0.0, 1.0, 0.0, 'U')
                         elif key == Key.DOWN:  self._move_timed(0.0, -1.0, 0.0, 'D')
                         elif key == Key.LEFT:  self._move_timed(-1.0, 0.0, 0.0, 'L')
@@ -5756,10 +5756,10 @@ class PTZMasterApp:
                         logger.debug(f"Duration changed: {old} -> {cam.duration}")
                     self.ui.draw()
                 elif key in (Key.F6, '\\'):
-                    # Global mute toggle — działa niezależnie od aktywnej kamery
+                    # Global mute toggle — works regardless of active camera
                     self.config.global_mute = not self.config.global_mute
                     _gm = self.config.global_mute
-                    # Zastosuj natychmiast do wszystkich grających instancji mpv
+                    # Apply immediately to all playing mpv instances
                     for _cam in self.config.cameras:
                         for _prof in _cam.profiles:
                             if _prof.pid and ProcessManager.is_running(_prof.pid):
@@ -5772,7 +5772,7 @@ class PTZMasterApp:
                     logger.info(f"Global mute toggled: {_gm}")
                     self.ui.draw()
                 elif key == '0':
-                    # 0 = reset speed/duration do defaults (było: z)
+                    # 0 = reset speed/duration to defaults (was: z)
                     cam = self.ui.current_camera
                     if cam:
                         cam.speed = 0.5
@@ -5803,7 +5803,7 @@ class PTZMasterApp:
         if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
             return False
 
-        # --- Tymczasowe wyłączenie myszy, aby uniknąć wycieków escape'ów ---
+        # --- Temporarily disable mouse to avoid escape sequence leaks ---
         self._mouse_off()
         try:
             NetworkUtils.resolve_ip(cam)
@@ -5828,7 +5828,7 @@ class PTZMasterApp:
 
             return False
         finally:
-            # Zawsze przywracamy mysz po zakończeniu (nawet po błędzie)
+            # Always restore mouse on exit (even after an error)
             self._mouse_on()
     
     def _sync_profiles(self):
@@ -5847,11 +5847,11 @@ class PTZMasterApp:
             notify("SCANNER: use (x) to configure", "warning")
             return
 
-        # --- Zabezpieczenie stanu terminala na czas całej metody ---
+        # --- Guard terminal state for the duration of this method ---
         fd = sys.stdin.fileno()
         old_termios = termios.tcgetattr(fd)
         try:
-            # Upewniamy się, że mysz jest włączona (na wypadek wcześniejszych błędów)
+            # Ensure mouse is enabled (in case of earlier errors)
             self._mouse_on()
 
             if cam.type == CameraType.AUTO:
@@ -5945,7 +5945,7 @@ class PTZMasterApp:
                                     key_pressed = k
                                     break
                                 elif isinstance(k, MouseEvent) and not k.release:
-                                    # kliknięcie myszy - kontynuuj
+                                    # mouse click - continue
                                     break
 
                         if key_pressed and key_pressed.lower() == 'd':
@@ -6057,7 +6057,7 @@ class PTZMasterApp:
                     self._wait_click_or_key()
 
         finally:
-            # Przywrócenie oryginalnych ustawień terminala i myszy
+            # Restore original terminal and mouse settings
             termios.tcsetattr(fd, termios.TCSADRAIN, old_termios)
             self._mouse_on()
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
@@ -6672,7 +6672,7 @@ class PTZMasterApp:
             self.ui.draw()
 
     # --------------------------------------------------------------------------
-    # Scanner configuration TUI (x) - Wersja finalna z obsługą komunikatów
+    # Scanner configuration TUI (x) - Final version with message handling
     # --------------------------------------------------------------------------
 
     def _scanner_control_screen(self):
@@ -7120,10 +7120,10 @@ class PTZMasterApp:
     @staticmethod
     def _discover_scanners_usb() -> list:
         """Wykryj skanery SANE z VID:PID przez scanimage -f + udevadm.
-        Zwraca listę słowników:
+        Returns a list of dicts:
           {vendor, model, sane_type, device, vidpid, display}
-        device = aktualny device string (zmienia się przy hot-plug)
-        vidpid = VID:PID np. "04a9:220e" (stały)
+        device = current device string (may change on hot-plug)
+        vidpid = VID:PID e.g. "04a9:220e" (permanent)
         """
         import re as _re
         found = []
@@ -7163,7 +7163,7 @@ class PTZMasterApp:
             if not device:
                 continue
 
-            # --- Krok 2: wyciągnij VID:PID przez udevadm ---
+            # --- Step 2: extract VID:PID via udevadm ---
             vidpid = ""
             # device string: "backend:libusb:BUS:DEV" np. plustek:libusb:001:006
             m = _re.search(r'libusb:(\d+):(\d+)', device)
@@ -7181,7 +7181,7 @@ class PTZMasterApp:
                     pid = props.get('ID_MODEL_ID', '')
                     if vid and pid:
                         vidpid = f"{vid}:{pid}"
-                        # Uzupełnij vendor/model z udev jeśli SANE nie podał
+                        # Fill in vendor/model from udev if SANE did not provide it
                         if vendor in ('?', ''):
                             vendor = props.get('ID_VENDOR_ENC', props.get('ID_VENDOR', vendor)).replace('\\x20', ' ')
                         if model in ('?', ''):
@@ -7189,7 +7189,7 @@ class PTZMasterApp:
                 except Exception as e:
                     logger.debug(f"udevadm for {usb_path}: {e}")
 
-            # Wyczyść prefix "a " i suffix "flatbed scanner" z typu
+            # Strip prefix "a " and suffix "flatbed scanner" from type
             import re as _re2
             clean_type = _re2.sub(r'^(a|an)\s+', '', sane_type, flags=_re2.IGNORECASE)
             clean_type = _re2.sub(r'\s+(flatbed|scanner).*$', '', clean_type, flags=_re2.IGNORECASE)
@@ -7209,9 +7209,9 @@ class PTZMasterApp:
 
     @staticmethod
     def _resolve_scanner_device(vidpid: str) -> str:
-        """Znajdź aktualny device string SANE dla danego VID:PID.
-        Wywołuje scanimage -f przy każdym skanie — adresuje hot-plug.
-        Zwraca device string lub "" jeśli nie znaleziono.
+        """Find the current SANE device string for a given VID:PID.
+        Calls scanimage -f on each scan — handles hot-plug.
+        Returns device string or "" if not found.
         """
         if not vidpid:
             return ""
@@ -7222,7 +7222,7 @@ class PTZMasterApp:
         return ""
 
     def _add_scanner_camera(self):
-        """Wykryj skanery SANE z VID:PID (stały identyfikator USB)."""
+        """Detect SANE scanners by VID:PID (permanent USB identifier)."""
         print_header("SCANNER DISCOVERY")
         if not shutil.which('scanimage'):
             notify("scanimage not found! Install: sane-utils", "error")
@@ -7540,15 +7540,15 @@ class PTZMasterApp:
 
         print(f"  Scanning {prefix}0/24...")
         def _disc_progress(pct, i, total, msg):
-            # Aktualizuj linię statusu w głównym UI
+            # Update the status line in the main UI
             self.ui.set_scan_status(
                 format_progress_line(pct, width=25, label="📡 Scanning", subnet=prefix+"0/24")
             )
-            # Odśwież ekran, aby pokazać zmieniony status
+            # Refresh the screen to show the updated status
             self.ui.draw()
 
         active = NetworkUtils.scan_subnet(prefix, progress_cb=_disc_progress)
-        self.ui.set_scan_status("")  # Wyczyść linię statusu po zakończeniu
+        self.ui.set_scan_status("")  # Clear status line when done
         self.ui.draw()
 
         print()
@@ -7588,7 +7588,7 @@ class PTZMasterApp:
         for cam_data in to_add:
             _mac = cam_data["mac"]
             _ip  = cam_data["ip"]
-            # Sprawdź duplikat po IP lub po MAC (MAC jest pewniejszy po zmianie IP)
+            # Check for duplicate by IP or MAC (MAC is more reliable after IP change)
             _dup_ip  = any(c.ip == _ip for c in self.config.cameras)
             _dup_mac = (_mac not in ("", "UNKNOWN") and
                         any(c.mac == _mac for c in self.config.cameras))
@@ -7596,7 +7596,7 @@ class PTZMasterApp:
                 print(f"  {YLW}Skipping {_ip} (IP already in list){RST}")
                 continue
             if _dup_mac:
-                # Kamera istnieje pod innym IP — zaktualizuj zamiast dodawać
+                # Camera exists under a different IP — update instead of adding
                 existing = next(c for c in self.config.cameras if c.mac == _mac)
                 if existing.ip != _ip:
                     old_ip = existing.ip
@@ -7738,7 +7738,7 @@ class PTZMasterApp:
         print(f"{YLW}This may take 10-30 seconds{RST}\n")
         logger.info(f"nmap discovery: {subnet}")
 
-        # Ustaw status w UI na czas działania nmap
+        # Set UI status while nmap is running
         self.ui.set_scan_status(f"{CYN}🔍 nmap scanning {subnet}... (this may take a while){RST}")
         self.ui.draw()
 
@@ -7779,11 +7779,11 @@ class PTZMasterApp:
         print(f"{GRN}nmap found {len(active)} active hosts{RST}")
         print(f"\n{CYN}Phase 2: Deep scan (port check + type detect)...{RST}")
 
-        # Deep scan z paskiem postępu
+        # Deep scan with progress bar
         found = []
         total = len(active)
         for i, ip in enumerate(active, 1):
-            # Aktualizuj status co kilka hostów, żeby nie migało za często
+            # Update status every few hosts to avoid excessive flickering
             if i % 5 == 0 or i == total:
                 pct = (i / total) * 100
                 self.ui.set_scan_status(
@@ -7875,7 +7875,7 @@ class PTZMasterApp:
         print(f"  Session: {YLW}{'Wayland/' + compositor if wayland else 'X11'}{RST}")
 
         def _geom_via_ipc(prof) -> dict:
-            """Pobierz rozmiar z IPC + pozycję przez xdotool/window-pos."""
+            """Get size from IPC + position via xdotool/window-pos."""
             try:
                 ctrl = prof.get_mpv()
                 if not ctrl or not ctrl.is_alive(): return {}
@@ -7894,7 +7894,7 @@ class PTZMasterApp:
                     import os as _os
                     env = dict(_os.environ)
                     if not env.get("DISPLAY"): env["DISPLAY"] = ":0"
-                    # Kolejność prób: nazwa okna → PID → ^LIVE:
+                    # Attempt order: window name → PID → ^LIVE:
                     cam_title = None
                     if prof.ipc_path:
                         try:
@@ -7935,12 +7935,12 @@ class PTZMasterApp:
 
         def _geom_kwin(pid) -> dict:
             """KWin/Plasma: kdotool, qdbus, xdotool/XWayland."""
-            # Próba 0: kdotool (xdotool dla KDE Wayland)
+            # Attempt 0: kdotool (xdotool for KDE Wayland)
             # pip install kdotool  lub  yay -S kdotool (AUR)
             if shutil.which('kdotool'):
                 try:
                     import re as _re
-                    # Szukaj po dokładnym tytule okna (LIVE:Cam_101 itp.)
+                    # Search by exact window title (LIVE:Cam_101 etc.)
                     # ipc_path: /tmp/mpv-Cam_101-7262 → cam_name = Cam_101
                     cam_name = None
                     if prof.ipc_path:
@@ -7948,7 +7948,7 @@ class PTZMasterApp:
                         if m: cam_name = m[1]
                     searches = []
                     if cam_name: searches.append(f'LIVE:{cam_name}')
-                    searches.append('LIVE:')  # fallback — weź pierwszy
+                    searches.append('LIVE:')  # fallback — take the first match
                     for title in searches:
                         try:
                             wids = subprocess.check_output(
@@ -7973,18 +7973,18 @@ class PTZMasterApp:
                             logger.debug(f"kdotool '{title}': {e}")
                 except Exception as e:
                     logger.debug(f"kdotool error: {e}")
-            # Próba 1: qdbus/qdbus6 (KDE Plasma)
+            # Attempt 1: qdbus/qdbus6 (KDE Plasma)
             for qdbus in ('qdbus6', 'qdbus'):
                 if not shutil.which(qdbus): continue
                 try:
-                    # Pobierz listę okien przez KWin scripting
+                    # Get window list via KWin scripting
                     out = subprocess.check_output(
                         [qdbus, 'org.kde.KWin', '/KWin', 'queryWindowInfo'],
                         universal_newlines=True, timeout=2, stderr=subprocess.DEVNULL)
                     logger.debug(f"qdbus queryWindowInfo: {out[:200]}")
                 except Exception as e:
                     logger.debug(f"{qdbus} error: {e}")
-            # Próba 2: xdotool przez XWayland (KDE często ma XWayland)
+            # Attempt 2: xdotool via XWayland (KDE often has XWayland)
             if shutil.which('xdotool'):
                 try:
                     import os as _os
@@ -7995,7 +7995,7 @@ class PTZMasterApp:
                         ["xdotool", "search", "--pid", str(pid)],
                         universal_newlines=True, timeout=2,
                         stderr=subprocess.DEVNULL, env=env).strip().split()
-                    # Fallback: szukaj przez tytuł okna LIVE:*
+                    # Fallback: search by window title LIVE:*
                     if not wids:
                         wids = subprocess.check_output(
                             ["xdotool", "search", "--name", "^LIVE:"],
@@ -8017,7 +8017,7 @@ class PTZMasterApp:
                             return geom
                 except Exception as e:
                     logger.debug(f"xdotool/XWayland error: {e}")
-            # Próba 3: wmctrl (może działać przez XWayland)
+            # Attempt 3: wmctrl (may work via XWayland)
             if shutil.which('wmctrl'):
                 try:
                     out = subprocess.check_output(
@@ -8047,7 +8047,7 @@ class PTZMasterApp:
                 return {}
 
         def _geom_hyprland(pid) -> dict:
-            """Pobierz geometrię okna przez hyprctl clients."""
+            """Get window geometry via hyprctl clients."""
             try:
                 import json as _j
                 out = subprocess.check_output(
@@ -8064,7 +8064,7 @@ class PTZMasterApp:
             return {}
 
         def _geom_sway(pid) -> dict:
-            """Pobierz geometrię okna przez swaymsg."""
+            """Get window geometry via swaymsg."""
             try:
                 import json as _j
                 out = subprocess.check_output(
@@ -8089,7 +8089,7 @@ class PTZMasterApp:
             for prof in cam.profiles:
                 if not prof.pid or not ProcessManager.is_running(prof.pid):
                     continue
-                # Próbuj w kolejności: IPC → compositor-specific → kdotool → xdotool (X11)
+                # Try in order: IPC → compositor-specific → kdotool → xdotool (X11)
                 geom = _geom_via_ipc(prof)
                 if not geom and compositor == 'hyprland' and shutil.which('hyprctl'):
                     geom = _geom_hyprland(prof.pid)
@@ -8098,7 +8098,7 @@ class PTZMasterApp:
                 if not geom and compositor == 'kwin':
                     geom = _geom_kwin(prof.pid)
                 if not geom and shutil.which('kdotool'):
-                    # kdotool działa na X11 i Wayland/KDE — próbuj zawsze gdy dostępne
+                    # kdotool works on X11 and Wayland/KDE — try whenever available
                     geom = _geom_kwin(prof.pid)
                 if not geom and not wayland and shutil.which('xdotool'):
                     # X11 fallback przez xdotool search --pid
@@ -8117,23 +8117,23 @@ class PTZMasterApp:
                     print(f"  {GRN}✓{RST} {cam.name}  {geom['X']},{geom['Y']} {geom['WIDTH']}x{geom['HEIGHT']}")
                     saved += 1
                 else:
-                    # Pokaż co udało się zebrać
+                    # Show what could be collected
                     ctrl = prof.get_mpv()
                     ipc_ok = ctrl and ctrl.is_alive()
                     print(f"  {YLW}?{RST} {cam.name} [{prof.name}] pid={prof.pid}"
-                          f" ipc={'✓' if ipc_ok else '✗'} — geometria niedostępna")
+                          f" ipc={'✓' if ipc_ok else '✗'} — geometry unavailable")
 
         if saved == 0 and wayland:
-            # Na Wayland automatyczna detekcja niemożliwa — zaproponuj ręczne wpisanie
-            print(f"\n{YLW}Wayland: automatyczna detekcja pozycji okien niedostępna.{RST}")
-            print(f"{DIM}Aby włączyć automatyczny zapis na KDE/KWin zainstaluj kdotool:{RST}")
+            # On Wayland automatic detection is impossible — offer manual entry
+            print(f"\n{YLW}Wayland: automatic window position detection unavailable.{RST}")
+            print(f"{DIM}To enable automatic saving on KDE/KWin install kdotool:{RST}")
             print(f"{DIM}  pip install kdotool   lub   yay -S kdotool{RST}")
-            print(f"{DIM}Możesz wpisać pozycje ręcznie (x y) lub ENTER aby pominąć.{RST}")
-            print(f"{DIM}Wskazówka: PPM na tytuł okna mpv → Więcej → Geometria.{RST}\n")
+            print(f"{DIM}You can enter positions manually (x y) or press ENTER to skip.{RST}")
+            print(f"{DIM}Tip: Right-click mpv window title → More → Geometry.{RST}\n")
             import termios as _termios2
             _fd2 = sys.stdin.fileno()
             _old2 = _termios2.tcgetattr(_fd2)
-            # Wyłącz raportowanie myszy — bez tego ruch myszy generuje śmieci w input()
+            # Disable mouse reporting — otherwise mouse movement pollutes input()
             sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
             sys.stdout.flush()
             try:
@@ -8155,7 +8155,7 @@ class PTZMasterApp:
                               f"  rozmiar={w}x{h}"
                               f"  obecna_poz={cam.layout.x},{cam.layout.y if cam.layout else '?'}")
                         try:
-                            ans = input(f"    Wpisz 'x y' lub ENTER aby zachować obecną: ").strip()
+                            ans = input(f"    Enter 'x y' or ENTER to keep current: ").strip()
                             if ans:
                                 parts = ans.split()
                                 if len(parts) >= 2:
@@ -8167,14 +8167,14 @@ class PTZMasterApp:
                             pass
             finally:
                 _termios2.tcsetattr(_fd2, _termios2.TCSADRAIN, _old2)
-                # Przywróć raportowanie myszy
+                # Restore mouse reporting
                 sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
                 sys.stdout.flush()
         elif saved == 0:
             print(f"\n{YLW}Nie znaleziono aktywnych okien mpv.{RST}")
 
-        if saved > 0 or True:  # zawsze próbuj zapisać terminal
-            # Zapisz pozycję okna terminala
+        if saved > 0 or True:  # always try to save terminal
+            # Save terminal window position
             term_geom = {}
             if Terminal._window_id:
                 tool = Terminal._get_win_tool()
@@ -8208,11 +8208,11 @@ class PTZMasterApp:
                       f"{term_geom['WIDTH']}x{term_geom['HEIGHT']}")
                 saved += 1
             else:
-                print(f"  {DIM}? Terminal — pozycja niedostępna{RST}")
+                print(f"  {DIM}? Terminal — position unavailable{RST}")
 
         if saved > 0:
             self.config_mgr.save()
-            print(f"\n{GRN}Zapisano {saved} layout(ów).{RST}")
+            print(f"\n{GRN}Saved {saved} layout(s).{RST}")
 
         print(f"\n{YLW}Press any key...{RST}")
         self._wait_click_or_key()
@@ -8357,7 +8357,7 @@ class PTZMasterApp:
                 sys.stdout.flush()
 
             while True:
-                # Pobieramy wymiary na początku każdej iteracji, aby bw było dostępne globalnie w pętli
+                # Fetch dimensions at the start of each iteration so bw is available globally in the loop
                 try: tw, th = shutil.get_terminal_size((80, 24))
                 except: tw, th = 80, 24
                 bw = min(78, tw) # <--- Definicja bw tutaj naprawia NameError
@@ -8366,7 +8366,7 @@ class PTZMasterApp:
                     _draw()
                     resized[0] = False
 
-                # Oczekiwanie na ukończenie wpisywania numeru
+                # Wait for number input to complete
                 if num_buf and time.time() - last_digit >= DIGIT_TIMEOUT:
                     try:
                         n = int(num_buf) - 1
@@ -8409,19 +8409,19 @@ class PTZMasterApp:
                             break
                         continue
 
-                    # --- LISTA: klik w pozycję ---
+                    # --- LIST: click on position ---
                     if 7 <= key.row < 7 + max_vis:
                         clicked = scroll_offset + (key.row - 7)
                         if 0 <= clicked < len(items):
                             if clicked == sel and key.btn == 0:
-                                idx = sel # drugie kliknięcie = wykonaj
+                                idx = sel # second click = execute
                                 break
-                            sel = clicked # pierwsze kliknięcie = zaznacz
+                            sel = clicked # first click = select
                             status = f"Selected: {items[sel]}"
                             resized[0] = True
                         continue
 
-                # Obsługa rolki myszki
+                # Mouse wheel handling
                 if key == Key.MOUSE_SCROLL_UP:
                     sel = (sel - 1) % len(items)
                     status = f"Selected: {items[sel]}"
@@ -8431,7 +8431,7 @@ class PTZMasterApp:
                     status = f"Selected: {items[sel]}"
                     resized[0] = True
 
-                # Obsługa strzałek i klawiszy funkcyjnych
+                # Arrow keys and function key handling
                 elif key == Key.UP:
                     sel = (sel - 1) % len(items)
                     status = f"Selected: {items[sel]}"
@@ -8454,7 +8454,7 @@ class PTZMasterApp:
                     idx = sel
                     break
 
-                # Wybieranie numerami z klawiatury (wpisuje się obok Enter: #:)
+                # Select by typing a number (appears next to Enter: #:)
                 elif isinstance(key, str) and key.isdigit():
                     num_buf += key
                     last_digit = time.time()
@@ -8584,7 +8584,7 @@ class PTZMasterApp:
             logger.warning("Auto-check: no active subnets found")
             return
 
-        # Kolory per subnet — sekwencyjne, nie nakrywają się
+        # Colours per subnet — sequential, non-overlapping
         _SUBNET_COLORS = [CYN, YLW, MAG, GRN, BLU]
         _n_subnets = len(subnets)
 
@@ -9571,7 +9571,8 @@ class PTZMasterApp:
         try:
             tty.setraw(fd)
             sys.stdout.write('\033[?1049h')
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            # Ukrycie kursora na starcie (\033[?25l)
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
 
             def _draw_help_screen():
@@ -9628,13 +9629,11 @@ class PTZMasterApp:
                 log_text = f" Log: {LOG_FILE}"
                 draw_slot(buf, term_h-2, 1, box_w, f"{GRN}║{pad(log_text, inside_w)}{RST}", "", f"{GRN}║{RST}")
 
-                # Footer like scanner
+                # Footer
                 footer_row = term_h - 1
-                left_lbl = "[↑][↓] Help"
-                # Build footer similar to txt
+                left_lbl = "[↑][↓] PgUp/Dn"
                 footer_content = f" {YLW}{left_lbl}{RST}"
                 right_text = f"{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST}"
-                # pad middle
                 total_inside = box_w - 2
                 middle_spaces = max(0, total_inside - ansilen(left_lbl) - 1 - ansilen(f"ptz-master v{VERSION} (ESC/Q)") - 2)
                 footer_full = f"{footer_content}{' ' * middle_spaces}{right_text} "
@@ -9642,14 +9641,24 @@ class PTZMasterApp:
 
                 buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
 
-                sys.stdout.write("".join(buf))
+                # Append \033[?25l so cursor stays hidden after redraw
+                sys.stdout.write("".join(buf) + "\033[?25l")
                 sys.stdout.flush()
-                return max_off
 
+                # Zwracamy parametry hitboksa dla myszy
+                up_start, up_end = 2, 5
+                down_start, down_end = 6, 9
+                return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
+
+            footer_r = 0
+            btn_start = 0
+            btn_end = 0
             max_off = 0
+            up_start = up_end = down_start = down_end = 0
+
             while True:
                 if resized[0]:
-                    max_off = _draw_help_screen()
+                    footer_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
                     resized[0] = False
 
                 key = get_key(timeout=0.2)
@@ -9658,6 +9667,7 @@ class PTZMasterApp:
                 if key in (Key.ESC, 'q', 'Q'):
                     return
 
+                # --- Scroll key handling ---
                 if key == Key.UP:
                     if scroll_offset > 0:
                         scroll_offset -= 1
@@ -9674,10 +9684,49 @@ class PTZMasterApp:
                     if scroll_offset < max_off:
                         scroll_offset = min(max_off, scroll_offset + 10)
                         resized[0] = True
+
+                # --- Mouse handling (wheel + click on ESC/Q and arrows) ---
+                elif key == Key.MOUSE_SCROLL_DOWN:
+                    if scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 3)
+                        resized[0] = True
+                elif key == Key.MOUSE_SCROLL_UP:
+                    if scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 3)
+                        resized[0] = True
+                elif isinstance(key, MouseEvent):
+                    if not key.release:
+                        if key.row == footer_r:
+                            # klik na (ESC/Q)
+                            if btn_start <= key.col <= btn_end:
+                                return
+                            # klik na [↑] i [↓] w stopce
+                            if up_start <= key.col <= up_end:
+                                if scroll_offset > 0:
+                                    scroll_offset = max(0, scroll_offset - 1)
+                                    resized[0] = True
+                            elif down_start <= key.col <= down_end:
+                                if scroll_offset < max_off:
+                                    scroll_offset = min(max_off, scroll_offset + 1)
+                                    resized[0] = True
+
+                        # Fallback if terminal processes mouse scroll classically
+                        if key.btn == 64:  # scroll up
+                            if scroll_offset > 0:
+                                scroll_offset = max(0, scroll_offset - 3)
+                                resized[0] = True
+                        elif key.btn == 65:  # scroll down
+                            if scroll_offset < max_off:
+                                scroll_offset = min(max_off, scroll_offset + 3)
+                                resized[0] = True
+
         finally:
             try:
                 sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
                 sys.stdout.write('\033[?1049l')
+                sys.stdout.write('\033[2J\033[H')
+                # Restore cursor on exit (\033[?25h)
+                sys.stdout.write('\033[?25h')
                 sys.stdout.flush()
             except: pass
             try:
@@ -9710,7 +9759,7 @@ class PlayerModeApp:
 
     def _make_cam_prof(self, path: str):
         name = os.path.basename(path)
-        # Szukaj istniejącej kamery FILE z tym samym plikiem — zachowaj image_params
+        # Look for existing FILE camera with the same file — preserve image_params
         existing = next(
             (c for c in self.config.cameras
              if c.type == CameraType.FILE and c.file_path == path),
@@ -9724,11 +9773,11 @@ class PlayerModeApp:
                 cam_type=CameraType.FILE, file_path=path,
                 profiles=[],
             )
-            # Zastosuj DEFAULT_IMAGE_PARAMS dla nowych plików
+            # Apply DEFAULT_IMAGE_PARAMS for new files
             cam.image_params = Camera.DEFAULT_IMAGE_PARAMS.copy()
         # file_loop=True (--loop-file=inf) tylko gdy 1 plik w trybie loop.
-        # Dla playlisty (>1 pliku) loop obsługuje _run_control_loop w Pythonie,
-        # a mpv odtwarza każdy plik jeden raz i wychodzi (eof_stops).
+        # For a playlist (>1 file) loop is handled by _run_control_loop in Python,
+        # while mpv plays each file once and exits (eof_stops).
         single_file = (len(self.files) == 1)
         cam.file_loop = self.loop_mode and single_file
         prof = CameraProfile(name="FILE", uri=path)
@@ -9850,7 +9899,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     """
     Uniwersalny ekran sterowania mpv.
     - cam_mode=True  → tryb kamer: SELECT / PAN / PTZ
-    - cam_mode=False → tryb plików: SELECT / PAN
+    - cam_mode=False → file mode: SELECT / PAN
     """
     def _edit_pan_x(): pass
     def _edit_pan_y(): pass
@@ -9870,7 +9919,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     MIN_W = 80
 
     # --------------------------------------------------------------------------
-    # Tryb interfejsu – dla kamer: SELECT/PTZ/PAN, dla plików: SELECT/PAN
+    # UI mode – cameras: SELECT/PTZ/PAN, files: SELECT/PAN
     # --------------------------------------------------------------------------
     if cam_mode:
         ui_mode = "SELECT"   # SELECT, PTZ, PAN
@@ -9902,7 +9951,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     def out(s): sys.stdout.write(s); sys.stdout.flush()
 
     # --------------------------------------------------------------------------
-    # Inicjalizacja połączenia IPC
+    # Initialise IPC connection
     # --------------------------------------------------------------------------
     _ctrl_socket = prof.ipc_path if (prof and prof.ipc_path) else None
     ctrl = MpvController(_ctrl_socket) if _ctrl_socket else None
@@ -9938,15 +9987,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     ab_active     = False
     _clipping     = False
     _rec_active   = False   # stream-record aktywny (cam_mode)
-    _rec_path     = ""      # ścieżka aktualnego nagrania
+    _rec_path     = ""      # path of the current recording
     ptz_active = False          # czy trwa ruch PTZ
-    ptz_progress = 0.0          # postęp ruchu (0..1)
-    ptz_direction = ""          # opcjonalnie kierunek do wyświetlenia
+    ptz_progress = 0.0          # movement progress (0..1)
+    ptz_direction = ""          # optional direction to display
     is_file_cam   = (cam is not None and cam.type == CameraType.FILE)
     last_step_dir = None
     _ip    = cam.image_params if hasattr(cam, 'image_params') else {}
     speed  = _ip.get("speed",  1.0)
-    # global_mute ma priorytet — jeśli włączony globalnie, startuj wyciszony
+    # global_mute takes priority — if enabled globally, start muted
     _global_mute = config_mgr.config.global_mute if config_mgr else False
     muted  = _global_mute or _ip.get("mute", False)
 
@@ -10003,12 +10052,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if sp is not None: speed  = float(sp)
         if vo is not None: values["VOL"] = int(vo)
         if pa is not None and not auto_run: paused = bool(pa)
-        # Drag & drop: śledź aktualny plik bezpośrednio z mpv
+        # Drag & drop: track the current file directly from mpv
         _cur_path = ctrl.get_property("path")
         if _cur_path and _cur_path != getattr(_fetch_state, "_last_path", None):
             _fetch_state._last_path  = _cur_path
             _fetch_state._last_title = ctrl.get_property("media-title") or os.path.basename(_cur_path)
-            _fetch_state._ffprobe_br = None  # wymuś ponowny odczyt bitrate
+            _fetch_state._ffprobe_br = None  # force bitrate re-read
             logger.debug(f"mpv path changed: {_cur_path}")
         for pp in PARAMS:
             if pp == "VOL": continue
@@ -10032,21 +10081,21 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             for track in track_list.get("data", []):
                 if track.get("type") == "audio" and track.get("selected"):
                     ac  = track.get("codec")
-                    # demux-samplerate jest int — nie używaj "or" (0 jest falsy)
+                    # demux-samplerate is int — do not use "or" (0 is falsy)
                     _sr = track.get("demux-samplerate")
                     ar  = _sr if _sr is not None else track.get("samplerate")
                     _ch = track.get("demux-channel-count")
                     ach = _ch if _ch is not None else track.get("audio-channels")
                     abr = track.get("demux-bitrate")
                     break
-        # Fallback — stare właściwości (gdy track-list puste: RTSP przed buforem)
+        # Fallback — old properties (when track-list is empty: RTSP before buffer)
         if not ac:
             ac = ctrl.get_property("audio-codec-name") or ctrl.get_property("audio-codec")
         if ar is None:
             _ar = ctrl.get_property("audio-params/samplerate")
             ar  = _ar if (_ar is not None and _ar != 0) else None
         if ach is None:
-            # audio-channels zwraca "auto-safe" — bezużyteczne
+            # audio-channels returns "auto-safe" — useless
             # audio-params/channel-count zwraca int — poprawne
             _ach = ctrl.get_property("audio-params/channel-count")
             ach  = _ach if (_ach is not None and _ach != 0) else None
@@ -10057,7 +10106,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         hs = str(int(h)) if h else "—"
         fps_s = f" {fps:.1f}fps" if fps else ""
         ar_s  = f" {int(ar)//1000}kHz" if ar else ""
-        # Formatowanie kanałów z int (nie string "auto-safe")
+        # Format channels from int (not the string "auto-safe")
         if ach:
             _ACH_MAP = {
                 1: "mono", 2: "stereo", 3: "3.0", 4: "4.0",
@@ -10116,7 +10165,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 _sp_hi = max(_br_hist) or 1.0
                 _sp_lo = min(_br_hist)
                 _sp_rng = _sp_hi - _sp_lo
-                if _sp_rng < _sp_hi * 0.05:  # stabilny → płaska linia
+                if _sp_rng < _sp_hi * 0.05:  # stable → flat line
                     spark = "▄" * len(_br_hist)
                 else:
                     spark = "".join(" ▁▂▃▄▅▆▇█"[min(8, int((_v - _sp_lo) / _sp_rng * 8))]
@@ -10200,7 +10249,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if not ctrl or not ctrl.is_alive(): last_msg = "mpv disconnected"; return
         muted = not muted
         ctrl.set_property("mute", muted)
-        # Synchronizuj global_mute — następna kamera/plik dziedziczy
+        # Sync global_mute — next camera/file inherits it
         if config_mgr:
             config_mgr.config.global_mute = muted
         last_msg = f"🔇 Global mute {'ON' if muted else 'OFF'}"
@@ -10230,7 +10279,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     def _zoom_zero():
         nonlocal zoom_val, zoom_mode, last_msg
         zoom_val = 0.0
-        zoom_mode = False   # lub True? Dla 0 nie ma zoomu, ale pan może być niezależne
+        zoom_mode = False   # or True? At 0 there is no zoom, but pan may be independent
         _zoom_apply()
         last_msg = "🔍 Zoom → 1.0x"
 
@@ -10339,7 +10388,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         return f"{col}{chr(9608) * filled}{RST}{DIM}{chr(9617) * (width - filled)}{RST}"
 
     # --------------------------------------------------------------------------
-    # AB-Loop i funkcje pomocnicze dla klipów
+    # AB-Loop and clip helper functions
     # --------------------------------------------------------------------------
     def _ab_set_a():
         nonlocal ab_a, ab_b, ab_active, last_msg
@@ -10348,16 +10397,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if ctrl and ctrl.is_alive():
             ctrl._send(["set_property", "ab-loop-a", "no"])
             ctrl._send(["set_property", "ab-loop-b", "no"])
-        last_msg = f"[a] ▷ {_fmt_time(ab_a)} — naciśnij [a] ponownie dla stop"
+        last_msg = f"[a] ▷ {_fmt_time(ab_a)} — press [a] again to stop"
 
     def _ab_set_b():
         nonlocal ab_b, ab_active, last_msg
         if ab_a < 0:
-            last_msg = "Naciśnij [a] aby ustawić start"
+            last_msg = "Press [a] to set start point"
             return
         ab_b = pos_f
         if ab_b <= ab_a:
-            last_msg = "[a] stop musi być po starcie"
+            last_msg = "[a] stop must be after start"
             return
         ab_active = True
         if ctrl and ctrl.is_alive():
@@ -10365,7 +10414,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             ctrl._send(["set_property", "ab-loop-b", ab_b])
             ctrl._send(["seek", ab_a, "absolute"])
             ctrl._send(["set_property", "pause", False])
-        last_msg = f"[a] loop: {_fmt_time(ab_a)}↔{_fmt_time(ab_b)}  — [a] aby wyczyścić"
+        last_msg = f"[a] loop: {_fmt_time(ab_a)}↔{_fmt_time(ab_b)}  — [a] to clear"
 
     def _ab_clear():
         nonlocal ab_a, ab_b, ab_active, last_msg
@@ -10373,7 +10422,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if ctrl and ctrl.is_alive():
             ctrl._send(["set_property", "ab-loop-a", "no"])
             ctrl._send(["set_property", "ab-loop-b", "no"])
-        last_msg = "[a] loop wyłączony"
+        last_msg = "[a] loop disabled"
 
     def _rec_toggle():
         """cam_mode: start/stop nagrywania strumienia przez mpv stream-record."""
@@ -10396,7 +10445,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _rec_active = False
             _saved = _rec_path
             _rec_path = ""
-            # Pełna ścieżka — oznacz gdy fallback do /tmp
+            # Full path — mark when falling back to /tmp
             _in_tmp = _saved.startswith("/tmp")
             _lbl = "[/tmp] " if _in_tmp else ""
             last_msg = f"⏹ REC {_lbl}{_saved}"
@@ -10507,25 +10556,25 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _extract_clip_current():
         nonlocal last_msg, _clipping
-        # REC działa tylko dla plików — w cam_mode files[] to obiekty Camera
+        # REC works only for files — in cam_mode files[] are Camera objects
         if not is_file_cam:
-            last_msg = "🎬 REC tylko dla plików (nie dla strumieni)"
+            last_msg = "🎬 REC for files only (not for streams)"
             return
         if not ab_active or ab_a < 0 or ab_b <= ab_a:
             last_msg = "🎬 Set AB loop first ([A] twice)"
             return
         fp = files[current_idx] if (files and current_idx < len(files)) else ""
-        # Upewnij się że fp to ścieżka do pliku, nie obiekt Camera
+        # Ensure fp is a file path, not a Camera object
         if not isinstance(fp, str):
             fp = getattr(fp, "file_path", "") or ""
         if not fp or not os.path.isfile(fp):
             last_msg = "🎬 No file path"
             return
-        # Pliki audio nie mają video — AB-loop clip extraction nie ma sensu
+        # Audio-only files have no video — AB-loop clip extraction makes no sense
         _AUDIO_EXTS = {'.mp3', '.flac', '.ogg', '.opus', '.m4a',
                        '.aac', '.wav', '.wma', '.ape', '.mka'}
         if os.path.splitext(fp)[1].lower() in _AUDIO_EXTS:
-            last_msg = "🎬 Clip extraction niedostępny dla plików audio"
+            last_msg = "🎬 Clip extraction unavailable for audio files"
             return
         _has_filters = any(values.get(p, 0) != 0 for p in ["BRIGHTNESS","CONTRAST","SATURATION","GAMMA","HUE"])
         _has_zoom    = zoom_mode and (zoom_val != 0.0 or pan_x != 0.0 or pan_y != 0.0)
@@ -10594,7 +10643,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         break
                 _clipping = False
                 last_msg = f"🎬 Gotowe: clip_{int(ab_a)}_{int(ab_b)}.mp4"
-                # Usuń plik logu ffmpeg po zakończeniu
+                # Remove ffmpeg log file after completion
                 try:
                     if os.path.exists(clip_log):
                         os.unlink(clip_log)
@@ -10639,10 +10688,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         old = termios.tcgetattr(fd)
         cooked = termios.tcgetattr(fd)
         cooked[3] |= termios.ECHO | termios.ICANON
-        # Wyłącz śledzenie myszy przed wejściem w cooked
+        # Disable mouse tracking before entering cooked mode
         sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
         sys.stdout.flush()
-        # Opróżnij bufor wejściowy – usuń zalegające zdarzenia myszy/klawiszy
+        # Flush input buffer – discard stale mouse/key events
         try:
             termios.tcflush(fd, termios.TCIFLUSH)
         except Exception:
@@ -10784,7 +10833,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     # Pomoc odtwarzacza (F1) - ARMORED TUI v1.3 + HW Info + Scroll
     # --------------------------------------------------------------------------
     def _show_player_help():
-        """Overlay z pomocą dla ekranu odtwarzacza (styl ARMORED TUI v1.3)."""
+        """Help overlay for the player screen (ARMORED TUI v1.3 style)."""
         import signal
         import shutil
         import platform
@@ -10813,10 +10862,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         # odfiltruj puste i generyczne kody typu "83F3", "To be filled"
                         if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
                             host = h
-                            # jeśli to już pełna nazwa produktu, przerywamy
+                            # if this is already a full product name, stop
                             if p.endswith('product_name') and ' ' in h:
                                 break
-                            # jeśli znaleźliśmy coś sensownego, ale nie product_name, kontynuuj szukanie lepszego
+                            # if we found something reasonable but not product_name, keep looking for better
                             if 'product' in p:
                                 break
                 except: pass
@@ -10897,15 +10946,15 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 except Exception:
                     term_w, term_h = 80, 24
 
-                # Zabezpieczenie szerokości
+                # Width guard
                 box_w = min(78, term_w)
                 buf = []
                 buf.append('\033[2J\033[H')
 
-                # Ramka góra
+                # Top frame
                 buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
 
-                # Tytuł
+                # Title
                 title = "🎬 PLAYER CONTROLS"
                 draw_slot(buf, 2, 1, box_w, f"{GRN}║ {BLU}{title.center(box_w-4)}{RST}", "", f"{GRN}║{RST}")
 
@@ -10914,7 +10963,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
                 hw1, hw2 = _get_hw_info()
 
-                # Treść pomocy - rozbudowana do scrollowania
+                # Help content - extended for scrolling
                 all_lines = [
                     f"{hw1}",
                     f"{hw2}",
@@ -10947,7 +10996,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     f"  {YLW}T{RST}          Screenshot",
                 ]
 
-                # Obliczenie scrolla: Zostawiamy miejsce na header (3 wiersze) i separator/stopkę/ramkę (3 wiersze)
+                # Scroll calculation: leave room for header (3 rows) and separator/footer/frame (3 rows)
                 max_vis = max(1, term_h - 6)
                 max_off = max(0, len(all_lines) - max_vis)
                 scroll_offset = max(0, min(scroll_offset, max_off))
@@ -10959,7 +11008,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     draw_slot(buf, row, 1, box_w, f"{GRN}║ {content}", "", f"{GRN}║{RST}")
                     row += 1
 
-                # Wypełnianie pustką jeśli okno terminala jest wyższe niż tekst do wyrenderowania
+                # Pad with blanks if the terminal window is taller than the text to render
                 while row < term_h - 2:
                     draw_slot(buf, row, 1, box_w, f"{GRN}║ ", "", f"{GRN}║{RST}")
                     row += 1
@@ -10972,7 +11021,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 left_lbl = "[↑][↓]PgUp/Dn"
                 right_lbl = f"ptz-master v{VERSION}  (ESC/Q)"
 
-                # Precyzyjne wyrównanie spacji między sekcjami w stopce
+                # Precise space alignment between footer sections
                 padding_len = max(0, box_w - 4 - len(left_lbl) - len(f"ptz-master v{VERSION}  (ESC/Q)"))
                 footer_content = f" {YLW}{left_lbl}{RST}{' ' * padding_len}{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST} "
 
@@ -10985,7 +11034,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 sys.stdout.flush()
 
                 # Zwracamy parametry hitboksa dla myszy
-                # lewy [↑] = kol 2-5, [↓] = kol 6-9 (względem początku linii z ramką)
+                # left [↑] = col 2-5, [↓] = col 6-9 (relative to frame line start)
                 up_start, up_end = 2, 5
                 down_start, down_end = 6, 9
                 return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
@@ -11007,7 +11056,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 if key in (Key.ESC, 'q', 'Q', ' '):
                     return
 
-                # --- Obsługa klawiszy przewijania ---
+                # --- Scroll key handling ---
                 if key == Key.UP:
                     if scroll_offset > 0:
                         scroll_offset -= 1
@@ -11025,7 +11074,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         scroll_offset = min(max_off, scroll_offset + 10)
                         resized[0] = True
 
-                # --- Obsługa myszy (rolka + klik w ESC/Q) ---
+                # --- Mouse handling (wheel + click on ESC/Q) ---
                 if key == Key.MOUSE_SCROLL_DOWN:
                     if scroll_offset > 0:
                         scroll_offset = max(0, scroll_offset - 3)
@@ -11048,7 +11097,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 if scroll_offset < max_off:
                                     scroll_offset = min(max_off, scroll_offset + 1)
                                     resized[0] = True
-                        # Fallback jeśli terminal przetwarza scrolla myszy klasycznie
+                        # Fallback if terminal processes mouse scroll classically
                         if key.btn == 64:
                             if scroll_offset > 0:
                                 scroll_offset = max(0, scroll_offset - 3)
@@ -11068,7 +11117,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _mouse_on()
 
     # --------------------------------------------------------------------------
-    # Główna funkcja rysująca
+    # Main drawing function
     # --------------------------------------------------------------------------
     def _draw():
         if _in_overlay: return
@@ -11080,8 +11129,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         _tw, _th = _term_size()
         if _th < MIN_H or _tw < MIN_W:
             _w("\033[2J\033[H\033[?25l")
-            _w(f"\r{YLW}⚠ Terminal za mały: {_tw}x{_th}  (min {MIN_W}x{MIN_H}){RST}\033[K\r\n")
-            _w(f"\r{DIM}Powiększ okno terminala{RST}\033[K\r\n")
+            _w(f"\r{YLW}⚠ Terminal too small: {_tw}x{_th}  (min {MIN_W}x{MIN_H}){RST}\033[K\r\n")
+            _w(f"\r{DIM}Resize the terminal window{RST}\033[K\r\n")
             sys.stdout.write("".join(_buf)); sys.stdout.flush()
             return
 
@@ -11089,7 +11138,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if _first_draw: _w("\033[2J\033[H"); _first_draw = False
         else: _w("\033[H")
 
-        # === GÓRNA RAMKA z (F1 Help) ===
+        # === TOP FRAME with (F1 Help) ===
         f1_text = f"{YLW}(F1{GRN}{DIM} Help{RST}{YLW})"
         f1_raw  = "(F1 Help)"
         fixed_len_top = len(f1_raw) + 1   # +1 za ═ po )
@@ -11102,7 +11151,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         def sep():
             _w(f"\r{BLU}╠{'═'*W}╣{RST}\033[K\r\n")
 
-        # --- Nagłówek ---------------------------------------------------------
+        # --- Header ----------------------------------------------------------
         if cam_mode:
             cur_cam = (all_cameras or files)[current_idx]
             cam_name = getattr(cur_cam, 'name', str(files[current_idx]))
@@ -11116,13 +11165,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             if len(fname) > 36: fname = fname[:33] + "..."
             row(f"{lewa_czesc} {fname:<38} {nav_next} {YLW}[P]{RST}T{YLW}[Z]{RST} {YLW}[L]{RST}{loop_char} {YLW}[K>]{RST}🎥")
         else:
-            # Drag & drop: użyj tytułu z IPC jeśli mpv gra inny plik
+            # Drag & drop: use IPC title if mpv is playing a different file
             _ipc_title = getattr(_fetch_state, "_last_title", None)
             _ipc_path  = getattr(_fetch_state, "_last_path", None)
             _static    = files[current_idx] if current_idx < len(files) else ""
             if _ipc_path and os.path.abspath(_ipc_path) != os.path.abspath(_static):
                 fname = (_ipc_title or os.path.basename(_ipc_path))
-                fname = fname + " ↕"  # wskaźnik że to plik wrzucony do mpv
+                fname = fname + " ↕"  # indicator that this file was dropped into mpv
             else:
                 fname = os.path.basename(_static)
             loop_char = "🔁" if loop_mode_local else "⏹ "
@@ -11136,12 +11185,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         row(f" {stream_info}")
         sep()
 
-        # --- Pasek postępu / AB-loop ------------------------------------------
+        # --- Progress bar / AB-loop ------------------------------------------
         ts = f"{_fmt_time(pos_f)} / {_fmt_time(dur_f)}"
-        _fps_vis = f"  {fps:.0f}fps" if fps > 0 else ""  # widoczna długość bez ANSI
+        _fps_vis = f"  {fps:.0f}fps" if fps > 0 else ""  # visible length without ANSI
         fps_tag  = f"  {DIM}{fps:.0f}fps{RST}" if fps > 0 else ""
         _L, _R = 48, 29
-        # ⏱(2)+spacje(2)=4, spacja(1) między pb a ts — reszta na pasek
+        # ⏱(2)+spaces(2)=4, space(1) between pb and ts — rest for bar
         _pb_w = max(8, _L - 4 - 1 - len(ts) - len(_fps_vis))
         pb = _prog_bar(pos_f, dur_f, width=_pb_w)
         _blink = int(_time.time() * 2) % 2
@@ -11168,9 +11217,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             _sp_lo  = min(_br_hist_draw)
             _sp_rng = _sp_hi - _sp_lo
             _data16 = _br_hist_draw[-16:]
-            if _sp_rng < _sp_hi * 0.05:  # stabilny bitrate → płaska linia ▄
+            if _sp_rng < _sp_hi * 0.05:  # stable bitrate → flat line ▄
                 spark16 = ("▄" * len(_data16)).ljust(16)
-            else:                         # min-max: pełen zakres paska
+            else:                         # min-max: full bar range
                 spark16 = "".join(
                     _SPARK16[min(8, int((_v - _sp_lo) / _sp_rng * 8))]
                     for _v in _data16
@@ -11220,7 +11269,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
         # --- Linia Select / Reset Progress ------------------------------------
         if ptz_active:
-            # animowany pasek postępu PTZ
+            # animated PTZ progress bar
             bar_len = 10
             filled = int(ptz_progress * bar_len)
             ptz_bar = f"{GRN}{'█' * filled}{DIM}{'─' * (bar_len - filled)}{RST}"
@@ -11237,7 +11286,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         else:
             active_mode = ui_mode_file
 
-        # Budowa nagłówka z ikonami trybów
+        # Build header with mode icons
         header_parts = []
         for mode_name, icon in [("SELECT", "📊"), ("PAN", "📺"), ("PTZ", "🎥")]:
             if mode_name == "PTZ" and not cam_mode:
@@ -11248,10 +11297,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 header_parts.append(f"{DIM}[Z{icon}]{RST}")
         header_str = "".join(header_parts)
 
-        # Definicje linii panelu dla każdego trybu
+        # Panel line definitions for each mode
         if active_mode == "SELECT":
             border_color = DIM
-            # Wybór prawej części: 11 kresek dla trybu plików, 7 dla trybu kamer
+            # Right section choice: 11 dashes for file mode, 7 for camera mode
             right_dashes = "────────────" if not cam_mode else "───────"
             line1 = f"{border_color}┌───────────{RST}{header_str}{border_color}{right_dashes}┐{RST}"
             line2 = f"{border_color}│{RST}   {DIM}▲{RST}   {border_color}│{RST} {YLW}Z📊{RST}{DIM}[0🔍]{RST}   {YLW}[↑]{RST}{YLW}[↓]{RST}       {border_color}│{RST}"
@@ -11288,7 +11337,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
         panel_parts = [line1, line2, line3, line4, line5]
 
-        # Rysowanie parametrów z doklejonym panelem
+        # Draw parameters with the panel attached
         for i, p in enumerate(PARAMS):
             cursor = f"{YLW}►{RST}" if i == sel else " "
             b = bar(p)
@@ -11320,11 +11369,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
         row(f"{tools_str} 🔔 {msg_col}{_msg_disp}{RST}")
 
-        # --- Statystyki systemowe (Row 18) z użyciem głównej funkcji ----------
+        # --- System stats (Row 18) using the main function --------------------
         sys_stats = tui_sys_stats()
         row(f" {sys_stats}")
 
-        # === DOLNA RAMKA z wersją i (ESC/Q) ===
+        # === BOTTOM FRAME with version and (ESC/Q) ===
         ver_raw = f"[ ptz-master v {VERSION} ]"
         esc_raw = "(ESC/Q)"
         fixed_len_bottom = len(ver_raw) + 1 + len(esc_raw) + 1  # ... ═ ... ═
@@ -11369,12 +11418,12 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 client.move(direction, ptz_speed, cam.duration)
 
     def _ptz_move_async(dx, dy, dz=0.0, direction_label=""):
-        """Uruchamia ruch PTZ w tle i animuje pasek postępu."""
+        """Start a PTZ move in the background and animate the progress bar."""
         nonlocal ptz_active, ptz_progress, ptz_direction, last_msg
         if not cam or not prof:
             return
         if ptz_active:
-            # już trwa ruch – ignorujemy kolejne kliknięcia
+            # movement already in progress – ignore subsequent clicks
             return
         ptz_active = True
         ptz_progress = 0.0
@@ -11472,7 +11521,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             else:          ctrl.set_property(PROP_MAP[p], values[p])
         ctrl.set_property("speed", speed)
         ctrl.set_property("mute", muted)
-        # loop-file: tylko dla 1 pliku — dla playlisty wrapper Pythona obsługuje loop
+        # loop-file: for 1 file only — for a playlist the Python wrapper handles loop
         _loop_file_val = "inf" if (loop_mode_local and len(files) == 1) else "no"
         ctrl.set_property("loop-file", _loop_file_val)
         _fetch_state()
@@ -11493,7 +11542,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             nonlocal sel, running, result, auto_dir, paused, step, auto_run, auto_fps, current_idx, loop_mode_local, last_msg
             nonlocal ui_mode, ui_mode_file
 
-            # Row 1: górna ramka z (F1 Help)
+            # Row 1: top frame with (F1 Help)
             if r == 1:
                 if 70 <= c <= 78:
                     _mouse_off()
@@ -11591,7 +11640,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     if 53 <= c <= 55:                                   # ● [A]REC / [R]EC
                         if cam_mode: _rec_toggle()
                         elif is_file_cam: _extract_clip_current()
-                        else: last_msg = "🎬 REC tylko dla plików"
+                        else: last_msg = "🎬 REC for files only"
                     elif 65 <= c <= 71 and ab_active:                   # Clear[A]
                         _ab_clear()
 
@@ -11649,14 +11698,14 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             # Row 10: Header with mode icons (different for CAMERA vs PLAYER)
             # ------------------------------------------------------------------
             if r == 10 and c >= 46:
-                # [Z📊] SELECT – kolumny ok. 55-59 (dla obu trybów)
+                # [Z📊] SELECT – columns approx. 55-59 (both modes)
                 if 55 <= c <= 59:
                     if cam_mode:
                         ui_mode = "SELECT"
                     else:
                         ui_mode_file = "SELECT"
                     last_msg = "Mode: SELECT"
-                # [Z📺] PAN – kolumny ok. 60-64 (dla obu trybów)
+                # [Z📺] PAN – columns approx. 60-64 (both modes)
                 elif 60 <= c <= 64:
                     if cam_mode:
                         ui_mode = "PAN"
@@ -11669,8 +11718,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     last_msg = "Mode: PTZ"
 
             # ------------------------------------------------------------------
-            # Rows 11–13: Zoom/Pan panel – identyczne dla obu trybów
-            # (różnica tylko w dostępności trybu PTZ)
+            # Rows 11–13: Zoom/Pan panel – identical for both modes
+            # (difference only in PTZ mode availability)
             # ------------------------------------------------------------------
             elif r == 11 and 46 <= c <= 79:                             # ▲ and zoom controls (PAN/PTZ)
                 if c == 49:                                             # ▲
@@ -11686,7 +11735,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             sel = (sel - 1) % len(PARAMS)
                         elif ui_mode_file == "PAN":
                             _pan(0, +PAN_STEP)
-                # Przyciski dostępne tylko w trybie SELECT
+                # Buttons available in SELECT mode only
                 elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 58 <= c <= 62:       # [0🔍] – reset obrazu
                         _reset_image_settings()
@@ -11759,37 +11808,37 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             _set_val(PARAMS[sel], +step)
                         elif ui_mode_file == "PAN":
                             _pan(-PAN_STEP, 0)
-                # Przyciski dostępne tylko w trybie SELECT
+                # Buttons available in SELECT mode only
                 elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 66 <= c <= 68:       # [←]
                         _set_val(PARAMS[sel], -step)
                     elif 69 <= c <= 71:     # [→]
                         _set_val(PARAMS[sel], +step)
-                # --- Tryb PAN: edycja wartości x/y z tekstu "Pan: x:+0.00 y:+0.00" ---
+                # --- PAN mode: edit x/y values from "Pan: x:+0.00 y:+0.00" text ---
                 elif (cam_mode and ui_mode == "PAN") or (not cam_mode and ui_mode_file == "PAN"):
-                    # Kliknięcie na wartość x (po "x:")
+                    # Click on x value (after "x:")
                     if 60 <= c <= 65:
                         _edit_pan_x()
-                    # Kliknięcie na wartość y (po "y:")
+                    # Click on y value (after "y:")
                     elif 66 <= c <= 71:
                         _edit_pan_y()
-                # --- Tryb PTZ: obsługa (m/l) Dur (tylko CAMERA) ---
+                # --- PTZ mode: handle (m/l) Dur (CAMERA only) ---
                 elif cam_mode and ui_mode == "PTZ":
                     # litera 'm' (zmniejsz duration)
                     if 56 <= c <= 57:
                         cam.duration = max(0.1, cam.duration - 0.1)
                         last_msg = f"Duration: {cam.duration:.1f}s"
-                    # litera 'l' (zwiększ duration)
+                    # letter 'l' (increase duration)
                     elif 58 <= c <= 59:
                         cam.duration = min(5.0, cam.duration + 0.1)
                         last_msg = f"Duration: {cam.duration:.1f}s"
-                    # wartość liczbowa (np. "0.4s") – otwórz prompt
+                    # numeric value (e.g. "0.4s") – open prompt
                     elif 66 <= c <= 71:
                         new_dur = _ask_duration_input()
                         if new_dur is not None:
                             cam.duration = new_dur
                             last_msg = f"Duration set to {cam.duration:.1f}s"
-                # Istniejące kontrolki zoomu (wspólne dla PAN/PTZ) – ale tylko jeśli nie były obsłużone
+                # Existing zoom controls (shared by PAN/PTZ) – only if not already handled
                 elif 55 <= c <= 59:     _zoom_toggle()
                 elif 60 <= c <= 64:     _zoom_zero()
                 elif 66 <= c <= 68:     _zoom_in()
@@ -11810,23 +11859,23 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             sel = (sel + 1) % len(PARAMS)
                         elif ui_mode_file == "PAN":
                             _pan(0, -PAN_STEP)
-                # Przyciski dostępne tylko w trybie SELECT
+                # Buttons available in SELECT mode only
                 elif (cam_mode and ui_mode == "SELECT") or (not cam_mode and ui_mode_file == "SELECT"):
                     if 66 <= c <= 68:       # [<]
                         step = max(1, step - 1)
                     elif 69 <= c <= 71:     # [>]
                         step = min(50, step + 1)
-                # --- Tryb PTZ: obsługa (s/f) Speed (tylko CAMERA) ---
+                # --- PTZ mode: handle (s/f) Speed (CAMERA only) ---
                 elif cam_mode and ui_mode == "PTZ":
                     # litera 's' (zmniejsz speed)
                     if 56 <= c <= 57:
                         cam.speed = max(0.1, cam.speed - 0.1)
                         last_msg = f"Speed: {cam.speed:.1f}"
-                    # litera 'f' (zwiększ speed)
+                    # letter 'f' (increase speed)
                     elif 58 <= c <= 59:
                         cam.speed = min(1.0, cam.speed + 0.1)
                         last_msg = f"Speed: {cam.speed:.1f}"
-                    # wartość liczbowa (np. "0.4") – otwórz prompt
+                    # numeric value (e.g. "0.4") – open prompt
                     elif 66 <= c <= 71:
                         new_speed = _ask_speed_input()
                         if new_speed is not None:
@@ -11835,10 +11884,10 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             # Rows 11–13: Zoom/Pan panel (right side end)
 
             # Rows 10–15: Parameter sliders (click to set value) – ale tylko dla r od 10 do 15,
-            # ale r=10 już obsłużyliśmy powyżej, więc żeby nie dubować, zaczynamy od r=11?
-            # W oryginalnym kodzie był blok dla 10 <= r <= 15, ale ponieważ r=10 mamy wyżej,
-            # to tutaj możemy zacząć od r=11. Dla bezpieczeństwa zostawiam oryginalną logikę,
-            # ale z wykluczeniem r==10, które już obslużyliśmy.
+            # but r=10 was already handled above, so to avoid duplication we start from r=11?
+            # In the original code there was a block for 10 <= r <= 15, but since r=10 is handled above,
+            # we can start from r=11 here. For safety I keep the original logic,
+            # but excluding r==10 which we already handled.
             elif 10 <= r <= 15:
                 new_sel = r - 10
                 # Mute button on VOL row (r==15)
@@ -11873,14 +11922,14 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 if 72 <= c <= 78:     running = False                 # [Q]
 # --- Mouse handling end -------------------------------------------------
 
-# --- Główna pętla -----------------------------------------------------
+# --- Main loop --------------------------------------------------------
         while running:
             _mpv_pid = prof.pid if prof else None
             _mpv_alive = _mpv_pid and ProcessManager.is_running(_mpv_pid)
             if not _mpv_alive:
-                # Plik zakończył się (EOF) lub mpv crashnął.
-                # Dla pliku bez loop → eof_next, żeby wrapper przeszedł do następnego.
-                # Dla kamer RTSP/V4L2 lub błędu → quit.
+                # File ended (EOF) or mpv crashed.
+                # For a file without loop → eof_next, so the wrapper moves to the next.
+                # For RTSP/V4L2 cameras or errors → quit.
                 if is_file_cam and not loop_mode_local:
                     last_msg = "EOF"; _draw(); _time.sleep(0.3)
                     result = "eof_next"; break
@@ -12015,8 +12064,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         last_msg = f"Duration: {cam.duration:.1f}s"
                 else:
                     loop_mode_local = not loop_mode_local
-                    # 1 plik: loop-file steruje mpv bezpośrednio
-                    # >1 plik: loop-file zawsze "no" — wrapper obsługuje listę
+                    # 1 file: loop-file controls mpv directly
+                    # >1 file: loop-file always "no" — wrapper handles the list
                     if len(files) == 1 and ctrl and ctrl.is_alive():
                         ctrl._send(["set_property", "loop-file", "inf" if loop_mode_local else "no"])
                     last_msg = f"Loop {'🔁 ON (file)' if (loop_mode_local and len(files)==1) else ('🔁 ON (playlist)' if loop_mode_local else '⏹ OFF')}"
@@ -12040,7 +12089,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             elif ch in ('r', 'R'):
                 if paused: _auto_toggle_run()
                 elif is_file_cam: _extract_clip_current()
-                else: last_msg = "🎬 REC tylko dla plików"
+                else: last_msg = "🎬 REC for files only"
             elif ch == 'x': _restore_image_settings()
             elif ch == 'X': _save_image_params()
             elif ch in ('i', 'I'): _zoom_in()
@@ -12060,7 +12109,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 if paused: _frame_step(False)    # krok wstecz
                 else: _seek(-1.0)               # przewijanie 1s gdy gra
             elif ch == ']':
-                if paused: _frame_step(True)     # krok wprzód
+                if paused: _frame_step(True)     # step forward
                 else: _seek(+1.0)               # przewijanie 1s gdy gra
             elif ch == '+':
                 if cam_mode and ui_mode == "PTZ": _ptz_move(0, 0, 1.0)
@@ -12113,7 +12162,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
 
 def _show_playlist(files, current_idx):
-    """Picker plików — lista + nawigacja po katalogu.
+    """File picker — list + directory navigation.
     Zwraca nowy index (int) lub -1 (anuluj).
     """
     import os, stat as _stat, time as _time
@@ -12126,14 +12175,14 @@ def _show_playlist(files, current_idx):
     def out(s): sys.stdout.write(s); sys.stdout.flush()
 
     # ── Stan pickera ──────────────────────────────────────────────
-    # Tryb: "playlist" = tylko files[], "dir" = przeglądanie katalogu
+    # Mode: "playlist" = files[] only, "dir" = directory browsing
     mode         = "playlist"
     cwd          = os.path.dirname(os.path.abspath(files[0])) if files else os.getcwd()
-    dir_entries  = []          # wypełniane w trybie dir
+    dir_entries  = []          # populated in dir mode
     selected     = current_idx
     dir_sel      = 0
     columns      = 1           # 1..4
-    col_w        = W - 4       # szerokość kolumny
+    col_w        = W - 4       # column width
     orientation  = "V"         # V/H
     show_hidden  = False
     filter_str   = ""          # wpisany filtr
@@ -12144,7 +12193,7 @@ def _show_playlist(files, current_idx):
 
     def _scan_dir(path, show_hid, flt):
         entries = []
-        # Wpis ".." zawsze na początku (chyba że filtrujemy)
+        # ".." entry always first (unless filtering)
         parent = os.path.dirname(path)
         if parent != path and not flt:
             entries.append({"name": "..", "path": parent,
@@ -12167,7 +12216,7 @@ def _show_playlist(files, current_idx):
                                  "is_dir": is_dir, "size": size, "mtime": mtime})
         except PermissionError:
             pass
-        # katalogi pierwsze (.. już jest na początku)
+        # directories first (.. already at top)
         non_dotdot = [e for e in entries if e["name"] != ".."]
         non_dotdot.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         dotdot = [e for e in entries if e["name"] == ".."]
@@ -12191,7 +12240,7 @@ def _show_playlist(files, current_idx):
     def _draw_playlist(sel, off):
         out("\033[2J\033[H\033[?25l")
         out(f"\r{BLU}╔{'═'*W}╗{RST}\r\n")
-        title = f" 📋 Playlista ({len(files)}) — {YLW}[↑↓]{RST} nawigacja  {YLW}[D]{RST} katalog  {YLW}[F]{RST} filtr  {YLW}[ESC]{RST} wróć"
+        title = f" 📋 Playlist ({len(files)}) — {YLW}[↑↓]{RST} navigate  {YLW}[D]{RST} dir  {YLW}[F]{RST} filter  {YLW}[ESC]{RST} back"
         out(f"\r{BLU}║{RST}{pad(title, W)}{BLU}║{RST}\r\n")
         if filter_str:
             out(f"\r{BLU}║{RST}{pad(f'  {YLW}Filtr:{RST} {filter_str}', W)}{BLU}║{RST}\r\n")
@@ -12210,7 +12259,7 @@ def _show_playlist(files, current_idx):
             else:
                 line = f"   {DIM}{icon} {name}{RST}"
             out(f"\r{BLU}║{RST}{pad(line, W)}{BLU}║{RST}\r\n")
-        # dopełnij do page_size
+        # pad to page_size
         for _ in range(page_size - len(visible)):
             out(f"\r{BLU}║{RST}{' '*W}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╠{'═'*W}╣{RST}\r\n")
@@ -12232,7 +12281,7 @@ def _show_playlist(files, current_idx):
         out(f"\r{BLU}╔{'═'*W}╗{RST}\r\n")
         cwd_short = cwd_path if len(cwd_path) <= W-4 else "…"+cwd_path[-(W-5):]
         out(f"\r{BLU}║{RST}{pad(f' 📁 {CYN}{cwd_short}{RST}', W)}{BLU}║{RST}\r\n")
-        flt_str = f"  {YLW}Filtr: {filter_str}{RST}" if filter_str else f"  {DIM}{n} elementów{RST}"
+        flt_str = f"  {YLW}Filter: {filter_str}{RST}" if filter_str else f"  {DIM}{n} items{RST}"
         out(f"\r{BLU}║{RST}{pad(flt_str, W)}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╠{'═'*W}╣{RST}\r\n")
 
@@ -12279,12 +12328,12 @@ def _show_playlist(files, current_idx):
             out(f"\r{BLU}║{RST}{pad(f'  {YLW}{_ename}{DIM}{info}{RST}', W)}{BLU}║{RST}\r\n")
         else:
             out(f"\r{BLU}║{RST}{' '*W}{BLU}║{RST}\r\n")
-        hint = f" {YLW}[ENTER]{RST} otwórz  {YLW}[F2]{RST} kolumny  {YLW}[F3]{RST} V/H  {YLW}[F4]{RST} ukryte  {YLW}[F]{RST} filtr  {YLW}[ESC]{RST} lista"
+        hint = f" {YLW}[ENTER]{RST} open  {YLW}[F2]{RST} columns  {YLW}[F3]{RST} V/H  {YLW}[F4]{RST} hidden  {YLW}[F]{RST} filter  {YLW}[ESC]{RST} list"
         out(f"\r{BLU}║{RST}{pad(hint, W)}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╚{'═'*W}╝{RST}\r\n")
         out("\033[?25l")
 
-    # ── Główna pętla ──────────────────────────────────────────────
+    # ── Main loop ────────────────────────────────────────────────
     old_settings = termios.tcgetattr(fd)
     off = _page_offset(selected, 0, len(files))
     try:
@@ -12324,7 +12373,7 @@ def _show_playlist(files, current_idx):
                 elif key in ("q", "Q", "\x1b", Key.ESC):
                     return -1
                 elif key in ("d", "D"):
-                    # przejdź do trybu katalogu
+                    # switch to directory mode
                     mode = "dir"
                     dir_entries = _scan_dir(cwd, show_hidden, filter_str)
                     dir_sel = 0
@@ -12340,7 +12389,7 @@ def _show_playlist(files, current_idx):
                         if c in ("\r","\n","\x1b"): break
                         elif c == "\x7f": filter_str = filter_str[:-1]
                         else: filter_str += c
-                        # odśwież hint
+                        # refresh hint
                         out(f"\033[18;3H{YLW}Filtr:{RST} {filter_str}{DIM}█{RST}   ")
                     tty.setraw(fd)
                     out("\033[?25l")
@@ -12351,12 +12400,12 @@ def _show_playlist(files, current_idx):
                     off = 0
                 elif isinstance(key, MouseEvent) and not key.release:
                     r, c = key.row, key.col
-                    # Oblicz pozycje przycisków dynamicznie z tekstu nagłówka
-                    # ' 📋 Playlista (N) — [↑↓] nawigacja  [D] katalog  [F] filtr  [ESC] wróć'
+                    # Calculate button positions dynamically from header text
+                    # ' 📋 Playlist (N) — [↑↓] navigate  [D] dir  [F] filter  [ESC] back'
                     # Liczymy od col 2 (po ║)
                     if r == 2:
-                        # [D] katalog — znajdź "[D]" w nagłówku
-                        hdr = f" 📋 Playlista ({len(files)}) — [↑↓] nawigacja  [D] katalog  [F] filtr  [ESC] wróć"
+                        # [D] dir — find "[D]" in the header
+                        hdr = f" 📋 Playlist ({len(files)}) — [↑↓] navigate  [D] dir  [F] filter  [ESC] back"
                         _col = 2
                         _btn = {}
                         for _i, _ch in enumerate(hdr):
@@ -12382,7 +12431,7 @@ def _show_playlist(files, current_idx):
                             out("\033[?25l")
                         elif 'ESC' in _btn and _btn['ESC'][0] <= c <= _btn['ESC'][1]:
                             return -1
-                    # r3+: lista plików
+                    # r3+: file list
                     else:
                         header_rows = 4 if filter_str else 3
                         list_start = header_rows + 1
@@ -12445,7 +12494,7 @@ def _show_playlist(files, current_idx):
                             dir_entries = _scan_dir(cwd, show_hidden, filter_str)
                             dir_sel = 0
                         else:
-                            # Dodaj plik do zwróconego wyniku — kodujemy jako tuple
+                            # Add file to returned result — encoded as tuple
                             return ("add", e["path"])
                 elif key in (Key.BACKSPACE, "\x7f"):
                     parent = os.path.dirname(cwd)
@@ -12482,7 +12531,7 @@ def _show_playlist(files, current_idx):
                     filter_str = ""
                 elif isinstance(key, MouseEvent) and not key.release:
                     _r, _c = key.row, key.col
-                    # r4..r15: lista plików (vis_rows=12, zaczyna od r5)
+                    # r4..r15: file list (vis_rows=12, starts at r5)
                     _list_r0 = 5
                     _vis = 12
                     if _list_r0 <= _r <= _list_r0 + _vis - 1:
@@ -12494,7 +12543,7 @@ def _show_playlist(files, current_idx):
                             _idx = _row_in * cols + _col_in
                         if 0 <= _idx < n:
                             if _idx == dir_sel:
-                                # podwójny klik = enter
+                                # double click = enter
                                 e = dir_entries[dir_sel]
                                 if e["is_dir"]:
                                     cwd = e["path"]
@@ -12506,7 +12555,7 @@ def _show_playlist(files, current_idx):
                                 dir_sel = _idx
                     # r7 (hint): dynamiczne pozycje
                     elif _r == _list_r0 + _vis + 2:
-                        _hint = f" [ENTER] otwórz  [F2] kolumny  [F3] V/H  [F4] ukryte  [F] filtr  [ESC] lista"
+                        _hint = f" [ENTER] open  [F2] columns  [F3] V/H  [F4] hidden  [F] filter  [ESC] list"
                         _bp = _btn_pos(_hint)
                         if   'ENTER' in _bp and _bp['ENTER'][0] <= _c <= _bp['ENTER'][1]:
                             if 0 <= dir_sel < n:
@@ -12537,7 +12586,7 @@ def main():
     logger.info(f"PTZ Master v{VERSION} starting – {time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"{'='*60}")
 
-    # Sprawdź zależności przed uruchomieniem — w każdym trybie
+    # Check dependencies before starting — in every mode
     check_dependencies()
 
     if PLAYER_FILES:
