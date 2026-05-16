@@ -292,7 +292,7 @@ def _has_video_magic(path: str) -> bool:
     except OSError:
         return False
 
-def parse_arguments() -> Tuple[str, bool, bool, str, str, list]:
+def parse_arguments() -> Tuple[str, bool, bool, str, str, list, bool]:
     import glob as _glob
 
     def _is_video(path: str) -> bool:
@@ -1581,9 +1581,25 @@ def select_menu(items: list, selected: int = 0,
                 title: str = "Select", W: int = 57,
                 page_size: int = 0,
                 extra_keys: tuple = ()) -> int:
+    """Unified box-style selection menu.
+
+    Layout (all inside the box):
+        ╔══...══╗
+        ║  title  ║
+        ╠══...══╣  (or with page-counter)
+        ║  item 1  ║
+        ║  item 2  ║
+        ╠══...══╣
+        ║ [↑][↓] navigate   ENTER select   (X)...  ║
+        ╚══...══[ ptz-master vN ]═(ESC/Q)═╝
+
+    All clickable: [↑], [↓], ENTER, (ESC/Q), extra_keys.
+    Items also clickable (single click selects, click active → confirm).
+    """
     import shutil as _sh
 
     DIGIT_TIMEOUT = 0.6
+    HEADER_ROWS   = 3   # ╔╗  ║title║  ╠╣
 
     if page_size <= 0:
         term_h = _sh.get_terminal_size((24, 80)).lines
@@ -1592,6 +1608,22 @@ def select_menu(items: list, selected: int = 0,
     n = len(items)
     page_size = min(page_size, n)
 
+    # ── version / footer tag (same style as main UI) ──────────────────────
+    _vtag_plain  = f"[ ptz-master v{VERSION} ]"
+    _escq_plain  = "(ESC/Q)"
+    # footer: ╚═{fill}═{vtag}═{escq}═╝  total width = W+2
+    _foot_right  = f"═{_escq_plain}═╝"            # e.g. "═(ESC/Q)═╝"  10 chars
+    _foot_mid    = f"═{_vtag_plain}═"              # e.g. "═[ ptz-master v9.0.80 ]═"
+    _foot_fill   = max(0, W + 2 - 1 - len(_foot_mid) - len(_foot_right))
+    # column (1-indexed) where (ESC/Q) starts in the footer line:
+    _escq_col    = 1 + _foot_fill + len(_foot_mid) + 2  # ╚(1) + fill + mid + ═(1) + 1-idx
+
+    # ── click-zone registry – populated by _draw each redraw ──────────────
+    # Structure: {action_key: (row_1indexed, col_start, col_end)}
+    #   action_key: '\r'=confirm, 'q'=cancel, Key.UP, Key.DOWN, or extra char
+    click_zones: dict = {}
+
+    # ── helpers ───────────────────────────────────────────────────────────
     def _page_offset(sel, offset):
         if sel < offset:
             return sel
@@ -1600,84 +1632,124 @@ def select_menu(items: list, selected: int = 0,
         return offset
 
     def _draw(sel, offset, num_buf=""):
+        nonlocal click_zones
+        click_zones = {}
         sys.stdout.write('\033[2J\033[H')
         sys.stdout.flush()
-        t = f" {title} "
+
+        # ── header ────────────────────────────────────────────────────────
+        t  = f" {title} "
         sp = max(0, (W - ansilen(t)) // 2)
         print(f"{YLW}╔{'═'*W}╗{RST}")
-        print(f"{YLW}║{RST}{BLU}{' '*sp}{t}{' '*max(0,W-ansilen(t)-sp)}{RST}{YLW}║{RST}")
+        print(f"{YLW}║{RST}{BLU}{' '*sp}{t}{' '*max(0, W - ansilen(t) - sp)}{RST}{YLW}║{RST}")
+
+        # ── page separator ────────────────────────────────────────────────
         if n > page_size:
-            pg_info = f" {offset+1}-{min(offset+page_size,n)}/{n} "
+            pg_info = f" {offset+1}-{min(offset+page_size, n)}/{n} "
             pg_len  = len(pg_info)
-            left    = (W - pg_len) // 2
-            right   = W - pg_len - left
-            sep = f"{YLW}╠{'═'*left}{RST}{DIM}{pg_info}{RST}{YLW}{'═'*right}╣{RST}"
+            lft     = (W - pg_len) // 2
+            rgt     = W - pg_len - lft
+            print(f"{YLW}╠{'═'*lft}{RST}{DIM}{pg_info}{RST}{YLW}{'═'*rgt}╣{RST}")
         else:
-            sep = f"{YLW}╠{'═'*W}╣{RST}"
-        print(sep)
-        for i in range(offset, min(offset + page_size, n)):
+            print(f"{YLW}╠{'═'*W}╣{RST}")
+
+        # ── items ─────────────────────────────────────────────────────────
+        actual = min(page_size, n)
+        for i in range(offset, offset + actual):
             active = (i == sel)
             marker = f"\033[5m{GRN}▶{RST}" if active else " "
             bg     = "\033[48;5;234m" if active else ""
             line   = f" {i+1:3}) {marker} {bg}{items[i]}{RST}"
             print(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
-        up_arrow   = f" {DIM}↑ more{RST}" if offset > 0 else ""
-        down_arrow = f" {DIM}↓ more{RST}" if offset + page_size < n else ""
-        print(f"{YLW}╚{'═'*W}╝{RST}")
-        hint_plain = " ↑↓ navigate"
-        if n > page_size:
-            hint_plain += "  PgUp/PgDn page  Home/End"
-        hint_plain += "   ENTER select   (Q) exit"
-        hint_cols = {}
-        hint_cols['\r'] = hint_plain.index('ENTER') + 1
-        hint_cols['q']   = hint_plain.index('(Q) exit') + 1
+
+        # ── nav separator ─────────────────────────────────────────────────
+        print(f"{YLW}╠{'═'*W}╣{RST}")
+
+        # ── nav row: ║ [↑][↓] navigate   ENTER select   (X)... ║ ─────────
+        #   Build plain string first to track column positions (1-indexed
+        #   from start of line; col 1 = '║', col 2 = ' ').
+        nav_row_idx = HEADER_ROWS + actual + 2   # 1-indexed terminal row
+        nav_plain   = " [↑][↓] navigate"
+
+        # [↑] at plain cols 3-5,  [↓] at 6-8  (after leading ║+space)
+        _up_col_s  = 3;  _up_col_e  = 5
+        _dn_col_s  = 6;  _dn_col_e  = 8
+
+        nav_plain  += "   ENTER select"
+        _enter_col  = len(" [↑][↓] navigate   ") + 2   # ║(1) + prefix + 1-indexed
+        _enter_col_e = _enter_col + len("ENTER") - 1
+
         if extra_keys:
             for k in extra_keys:
-                hint_plain += f"   ({k.upper()})"
-                hint_cols[k] = hint_plain.rindex(f'({k.upper()})') + 1
-
-        hint_colored = (f"{DIM} ↑↓ navigate"
-                        + (f"  PgUp/PgDn page  Home/End" if n > page_size else "")
-                        + f"   {RST}{YLW}ENTER{RST}{DIM} select"
-                        + f"   {RST}{YLW}(Q){RST}{DIM} exit{RST}")
-        if extra_keys:
-            for k in extra_keys:
-                hint_colored += f"{DIM}   {RST}{YLW}({k.upper()}){RST}"
-
-        hint = hint_colored
+                nav_plain += f"   ({k.upper()})"
         if num_buf:
-            hint += f"  {YLW}# {num_buf}_{RST}"
-        print(hint)
-        if up_arrow or down_arrow:
-            print(f"{up_arrow}  {down_arrow}")
+            nav_plain += f"   # {num_buf}_"
 
-    fd = sys.stdin.fileno()
+        # coloured version
+        nav_col = (f" {YLW}[↑]{RST}{YLW}[↓]{RST}{DIM} navigate{RST}"
+                   f"   {YLW}ENTER{RST}{DIM} select{RST}")
+        if extra_keys:
+            for k in extra_keys:
+                nav_col += f"   {YLW}({k.upper()}){RST}"
+        if num_buf:
+            nav_col += f"   {YLW}# {num_buf}_{RST}"
+
+        print(f"{YLW}║{RST}{pad(nav_col, W)}{YLW}║{RST}")
+
+        # register click zones for this row
+        click_zones[Key.UP]  = (nav_row_idx, _up_col_s,    _up_col_e)
+        click_zones[Key.DOWN]= (nav_row_idx, _dn_col_s,    _dn_col_e)
+        click_zones['\r']    = (nav_row_idx, _enter_col,   _enter_col_e)
+        if extra_keys:
+            _ec = len(f" [↑][↓] navigate   ENTER select") + 2
+            for k in extra_keys:
+                tag = f"({k.upper()})"
+                _ec += 4   # "   " + "("
+                click_zones[k] = (nav_row_idx, _ec, _ec + len(tag) - 1)
+                _ec += len(tag)
+
+        # ── footer ────────────────────────────────────────────────────────
+        foot_row_idx = HEADER_ROWS + actual + 3   # 1-indexed terminal row
+        _foot_colored = (f"{YLW}╚{'═'*_foot_fill}{RST}"
+                         f"{CYN}{_foot_mid}{RST}"
+                         f"{GRN}═{RST}{YLW}{_escq_plain}{RST}{GRN}═╝{RST}")
+        sys.stdout.write(_foot_colored + "\n")
+        sys.stdout.flush()
+
+        # register (ESC/Q) click zone in footer
+        click_zones['q'] = (foot_row_idx, _escq_col, _escq_col + len(_escq_plain) - 1)
+
+    # ── state ─────────────────────────────────────────────────────────────
+    fd       = sys.stdin.fileno()
     old_term = termios.tcgetattr(fd)
-    sel    = max(0, min(selected, n - 1))
-    offset = _page_offset(sel, 0)
-    num_buf      = ""
+    sel      = max(0, min(selected, n - 1))
+    offset   = _page_offset(sel, 0)
+    num_buf  = ""
     last_digit_t = 0
 
-    HEADER_ROWS = 3
-
-    hint_cols = {}
-    hint_row  = [0]
-
-    def _hint_row():
-        return HEADER_ROWS + min(page_size, n) + 2
-
-    def _row_to_idx(row):
-        item_row = row - HEADER_ROWS
-        if 1 <= item_row <= page_size:
+    def _item_row_to_idx(row):
+        """Convert 1-indexed terminal row → item index, or -1 if not on an item."""
+        item_row = row - HEADER_ROWS   # 1-based within item block
+        actual   = min(page_size, n)
+        if 1 <= item_row <= actual:
             return offset + item_row - 1
         return -1
+
+    def _hit_zone(row, col):
+        """Return action key if (row,col) lands in any registered click zone."""
+        for k, (zr, zcs, zce) in click_zones.items():
+            if row == zr and zcs <= col <= zce:
+                return k
+        return None
 
     try:
         tty.setcbreak(fd)
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
         _draw(sel, offset)
+
         while True:
+            # ── digit-timeout confirm ──────────────────────────────────────
             if num_buf and (time.time() - last_digit_t) >= DIGIT_TIMEOUT:
                 idx = int(num_buf) - 1
                 num_buf = ""
@@ -1690,27 +1762,42 @@ def select_menu(items: list, selected: int = 0,
             if key == Key.TIMEOUT:
                 continue
 
+            # ── mouse ──────────────────────────────────────────────────────
             if isinstance(key, MouseEvent):
                 if not key.release:
-                    if key.row == _hint_row() and hint_cols:
-                        for k, col in hint_cols.items():
-                            if abs(key.col - col) <= 3:
-                                if k == '\r':
-                                    return sel
-                                elif k == 'q':
-                                    return -1
-                                elif extra_keys and k in extra_keys:
-                                    return (sel, k)
-                                break
+                    action = _hit_zone(key.row, key.col)
+                    if action is not None:
+                        if action == '\r':                          # ENTER
+                            if num_buf:
+                                idx = int(num_buf) - 1; num_buf = ""
+                                if 0 <= idx < n: return idx
+                            else:
+                                return sel
+                        elif action == 'q':                         # ESC/Q
+                            return -1
+                        elif action == Key.UP:                      # [↑]
+                            if sel > 0:
+                                num_buf = ""; sel -= 1
+                                offset = _page_offset(sel, offset)
+                                _draw(sel, offset)
+                        elif action == Key.DOWN:                    # [↓]
+                            if sel < n - 1:
+                                num_buf = ""; sel += 1
+                                offset = _page_offset(sel, offset)
+                                _draw(sel, offset)
+                        elif extra_keys and action in extra_keys:   # extra
+                            return (sel, action)
                     else:
-                        item_idx = _row_to_idx(key.row)
+                        item_idx = _item_row_to_idx(key.row)
                         if 0 <= item_idx < n:
                             if item_idx == sel:
-                                return sel
+                                return sel          # second click on active → confirm
                             sel = item_idx
                             offset = _page_offset(sel, offset)
                             _draw(sel, offset)
                 continue
+
+            # ── scroll wheel ───────────────────────────────────────────────
             if key == Key.MOUSE_SCROLL_UP:
                 if sel > 0:
                     num_buf = ""; sel -= 1
@@ -1722,16 +1809,17 @@ def select_menu(items: list, selected: int = 0,
                     offset = _page_offset(sel, offset); _draw(sel, offset)
                 continue
 
+            # ── keyboard ───────────────────────────────────────────────────
             if key == Key.UP and sel > 0:
                 num_buf = ""; sel -= 1
                 offset = _page_offset(sel, offset); _draw(sel, offset)
             elif key == Key.DOWN and sel < n - 1:
                 num_buf = ""; sel += 1
                 offset = _page_offset(sel, offset); _draw(sel, offset)
-            elif key in (Key.PAGE_UP,) and sel > 0:
+            elif key == Key.PAGE_UP:
                 num_buf = ""; sel = max(0, sel - page_size)
                 offset = _page_offset(sel, offset); _draw(sel, offset)
-            elif key in (Key.PAGE_DOWN,) and sel < n - 1:
+            elif key == Key.PAGE_DOWN:
                 num_buf = ""; sel = min(n - 1, sel + page_size)
                 offset = _page_offset(sel, offset); _draw(sel, offset)
             elif key == Key.HOME:
@@ -1741,17 +1829,15 @@ def select_menu(items: list, selected: int = 0,
                 offset = _page_offset(sel, 0); _draw(sel, offset)
             elif key in ('\r', '\n', Key.ENTER):
                 if num_buf:
-                    idx = int(num_buf) - 1
-                    num_buf = ""
-                    if 0 <= idx < n:
-                        return idx
+                    idx = int(num_buf) - 1; num_buf = ""
+                    if 0 <= idx < n: return idx
                 else:
                     return sel
             elif key in ('q', 'Q', '\x1b'):
                 return -1
             elif extra_keys and isinstance(key, str) and key.lower() in extra_keys:
                 return (sel, key.lower())
-            elif key.isdigit():
+            elif isinstance(key, str) and key.isdigit():
                 num_buf += key
                 last_digit_t = time.time()
                 tentative = int(num_buf) - 1
@@ -9670,7 +9756,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
     def _edit_pan_x(): pass
     def _edit_pan_y(): pass
-    def _zoom_toggle(): pass
+    def _zoom_toggle():
+        # Toggle zoom between 0 (no zoom) and last non-zero value (or ZOOM_STEP if was 0)
+        # Uses nonlocal – zoom_val / zoom_mode are defined later in the function body;
+        # this stub is replaced after those variables are bound at runtime.
+        pass   # real body injected below after zoom_val is available
     def _edit_zoom(): pass
     import select as _sel
     import signal as _sig
@@ -10050,6 +10140,21 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         zoom_mode = False   # or True? At 0 there is no zoom, but pan may be independent
         _zoom_apply()
         last_msg = "🔍 Zoom → 1.0x"
+
+    # Fix: real _zoom_toggle – replaces pass-stub defined earlier in the outer scope.
+    # Toggles mpv zoom between 1× and one ZOOM_STEP.
+    def _zoom_toggle():  # noqa: F811
+        nonlocal zoom_val, zoom_mode, last_msg
+        if zoom_val != 0.0:
+            zoom_val = 0.0
+            zoom_mode = False
+            _zoom_apply()
+            last_msg = "🔍 Zoom → 1.0x (toggle off)"
+        else:
+            zoom_val = ZOOM_STEP
+            zoom_mode = True
+            _zoom_apply()
+            last_msg = f"🔍 Zoom: {2.0**zoom_val:.2f}x (toggle on)"
 
     def _zoom_reset():
         nonlocal zoom_val, pan_x, pan_y, zoom_mode, last_msg
@@ -11045,11 +11150,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     _mouse_on()
                 elif 59 <= c <= 61:                                     # [P]list / [P]T[Z]
                     if cam_mode:
+                        # Fix: [P] in cam_mode → camera playlist (same as keyboard 'P'),
+                        # NOT ui_mode="PTZ" (that belongs to the [Z] button at cols 63-65).
                         _mouse_off()
                         _in_overlay = True
-                        ui_mode = "PTZ"
+                        new_idx = _show_camera_playlist(files, current_idx)
                         _in_overlay = False
-                        _first_draw = True
+                        if new_idx >= 0 and new_idx != current_idx:
+                            result = ("goto", new_idx); running = False
+                        else:
+                            _first_draw = True; _draw()
                         _mouse_on()
                     else:
                         _mouse_off()
@@ -11067,6 +11177,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                             result = ("goto", new_idx)
                             running = False
                         _mouse_on()
+                elif c == 62:                                           # T → Screenshot (same as key T)
+                    _screenshot()
                 elif 63 <= c <= 65:                                     # [Z] mode toggle
                     if cam_mode:
                         ui_mode = {"SELECT": "PAN", "PAN": "PTZ", "PTZ": "SELECT"}[ui_mode]
@@ -11320,7 +11432,24 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         if new_dur is not None:
                             cam.duration = new_dur
                             last_msg = f"Duration set to {cam.duration:.1f}s"
-                # Existing zoom controls (shared by PAN/PTZ) – only if not already handled
+                # Zoom controls – behaviour depends on current mode:
+                #   SELECT/PAN → operate on mpv (video-zoom / video-pan)
+                #   PTZ        → send zoom command to physical camera
+                elif cam_mode and ui_mode == "PTZ":
+                    # Fix: in PTZ mode mouse zoom buttons must drive the camera, not mpv
+                    if 55 <= c <= 59:       # [⇄] toggle zoom → stop / neutral
+                        _ptz_move_async(0.0, 0.0, 0.0, "Z0")
+                        last_msg = "🔍 PTZ Zoom stop"
+                    elif 60 <= c <= 64:     # [0🔍] reset zoom (absolute 0)
+                        _ptz_move_async(0.0, 0.0, 0.0, "Z0")
+                        last_msg = "🔍 PTZ Zoom reset"
+                    elif 66 <= c <= 68:     # [+] zoom in
+                        _ptz_move_async(0.0, 0.0, 1.0, "Z+")
+                        last_msg = "🔍 PTZ Zoom +"
+                    elif 69 <= c <= 71:     # [-] zoom out
+                        _ptz_move_async(0.0, 0.0, -1.0, "Z-")
+                        last_msg = "🔍 PTZ Zoom -"
+                    elif 73 <= c <= 76:     _edit_zoom()
                 elif 55 <= c <= 59:     _zoom_toggle()
                 elif 60 <= c <= 64:     _zoom_zero()
                 elif 66 <= c <= 68:     _zoom_in()
