@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.77"
+VERSION = "9.0.80"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -742,7 +742,7 @@ def _win_tool_available() -> bool:
     return any(shutil.which(t) for t in ('xdotool', 'kdotool'))
 
 def _detect_distro() -> tuple:
-    """Zwraca (os_id, pretty_name) na podstawie /etc/os-release."""
+    """Returns (os_id, pretty_name) based on /etc/os-release."""
     os_id, pretty = "unknown", "Unknown Linux"
     try:
         with open('/etc/os-release') as f:
@@ -1260,7 +1260,7 @@ def pad(text: str, length: int) -> str:
 
 def btn_pos(text: str, offset: int = 0) -> dict:
     """Calculate button [X] positions in text (excluding ANSI colour codes).
-    Zwraca {label: (col_start, col_end)} 1-indexed, z opcjonalnym offset.
+    Returns {label: (col_start, col_end)} 1-indexed, with optional offset.
     Compound labels like [Q/ESC] are mapped under each key separately.
     """
     clean = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)
@@ -4107,6 +4107,202 @@ class Player:
         return True
 
 # =============================================================================
+# UNIVERSAL TUI HELP ENGINE
+# =============================================================================
+def display_tui_help(title_text, help_content):
+    """
+    Universal help screen engine (Armored TUI).
+    Works for Main Menu, Player and Scanner.
+    """
+    import signal
+    import shutil
+    import platform
+    import glob
+    import os
+    import subprocess
+
+    mouse_off()
+    fd = sys.stdin.fileno()
+    old_term = termios.tcgetattr(fd)
+
+    resized = [True]
+    def handle_winch(sig, frame):
+        resized[0] = True
+
+    old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+
+    # --- hardware / system info ---
+    def _get_hw_info():
+        host = "Unknown Host"
+        for p in ['/sys/devices/virtual/dmi/id/product_name', '/sys/devices/virtual/dmi/id/product_version']:
+            try:
+                with open(p, 'r') as f:
+                    h = f.read().strip()
+                    if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown'):
+                        host = h; break
+            except: pass
+        os_name = "Linux"
+        try:
+            with open('/etc/os-release') as f:
+                for line in f:
+                    if line.startswith('PRETTY_NAME='): os_name = line.split('=')[1].strip().strip('"'); break
+        except: pass
+        cpu = "Unknown CPU"
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if line.startswith('model name'): cpu = line.split(':')[1].strip(); break
+        except: pass
+        temp_str = "N/A"
+        try:
+            for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
+                with open(os.path.join(tz, 'type'), 'r') as f:
+                    if 'x86_pkg_temp' in f.read() or 'coretemp' in f.read():
+                        with open(os.path.join(tz, 'temp'), 'r') as tf:
+                            temp_str = f"+{int(tf.read().strip()) / 1000.0:.1f}°C"
+                            break
+        except: pass
+        ram_str = "N/A"
+        try:
+            with open('/proc/meminfo') as f:
+                mem = {}
+                for line in f:
+                    if ':' in line: k, v = line.split(':', 1); mem[k.strip()] = int(v.strip().split()[0])
+                total = mem.get('MemTotal', 1)
+                used = total - mem.get('MemAvailable', 0)
+                ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
+        except: pass
+        py_ver = platform.python_version()
+        return (f"🖥  {host} 🐍 Python {py_ver}  [🐧 {os_name}]", f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}")
+
+    scroll_offset = 0
+
+    # Applied trick (printf) forcing less to preserve TUI colors
+    def _view_log_in_less():
+        if os.path.exists(LOG_FILE):
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l\033[?25h')
+            sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+
+            subprocess.run(['less', '-R', '--use-color', '+G', LOG_FILE])
+
+            tty.setraw(fd)
+            sys.stdout.write('\033[0m\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+            sys.stdout.flush()
+            resized[0] = True
+
+    try:
+        tty.setraw(fd)
+        sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+        sys.stdout.flush()
+
+        def _draw_screen():
+            nonlocal scroll_offset
+            try: term_w, term_h = shutil.get_terminal_size((80, 24))
+            except: term_w, term_h = 80, 24
+
+            box_w = min(78, term_w)
+            buf = ['\033[2J\033[H']
+
+            buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
+            title_centered = f" {title_text} "
+            draw_slot(buf, 2, 1, box_w, f"{GRN}║{YLW}{title_centered.center(box_w-2)}{RST}", "", f"{GRN}║{RST}")
+            buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+
+            hw1, hw2 = _get_hw_info()
+            draw_slot(buf, 4, 1, box_w, f"{GRN}║ {CYN}{hw1[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
+            draw_slot(buf, 5, 1, box_w, f"{GRN}║ {CYN}{hw2[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
+            buf.append(f"\033[6;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
+
+            max_vis = max(1, term_h - 9)
+            max_off = max(0, len(help_content) - max_vis)
+            scroll_offset = max(0, min(scroll_offset, max_off))
+            vis_items = help_content[scroll_offset:scroll_offset + max_vis]
+
+            row = 7
+            inside_w = box_w - 2
+            for item in vis_items:
+                if isinstance(item, tuple) and len(item) == 2:
+                    left, right = item
+                    if not right: content = f" {MAG}{left}{RST}"
+                    else: content = f"  {GRN}{left:<12}{RST} {right}"
+                else:
+                    content = f" {item}"
+                draw_slot(buf, row, 1, box_w, f"{GRN}║{pad(content, inside_w)}", "", f"{GRN}║{RST}")
+                row += 1
+
+            while row < term_h - 2:
+                draw_slot(buf, row, 1, box_w, f"{GRN}║", "", f"{GRN}║{RST}")
+                row += 1
+
+            sep_row = term_h - 2
+            scroll_txt = "[ [↑][↓] Pg (Up)/(Dn) ]"
+            pad_len = max(0, box_w - 2 - 2 - len(scroll_txt))
+            buf.append(f"\033[{sep_row};1H{GRN}╠══{YLW}{scroll_txt}{GRN}{'═'*pad_len}╣{RST}")
+
+            log_row = term_h - 1
+            log_text = f" Log: {LOG_FILE}"
+            draw_slot(buf, log_row, 1, box_w, f"{GRN}║ {CYN}{pad(log_text, box_w-3)}{RST}", "", f"{GRN}║{RST}")
+
+            bottom_row = term_h
+            right_part = f"{CYN}[ ptz-master v{VERSION} ]{GRN}═{YLW}(ESC/Q){GRN}═╝{RST}"
+            left_dashes = max(0, box_w - 2 - len(f"[ ptz-master v{VERSION} ]=(ESC/Q)="))
+            buf.append(f"\033[{bottom_row};1H{GRN}╚{'═'*left_dashes}{right_part}{RST}")
+
+            sys.stdout.write("".join(buf) + "\033[?25l")
+            sys.stdout.flush()
+
+            btn_start = box_w - len("(ESC/Q)=")
+            return log_row, sep_row, bottom_row, btn_start, box_w - 1, max_off
+
+        log_r = sep_r = bot_r = btn_start = btn_end = max_off = 0
+
+        while True:
+            if resized[0]:
+                log_r, sep_r, bot_r, btn_start, btn_end, max_off = _draw_screen()
+                resized[0] = False
+
+            key = get_key(timeout=0.2)
+            if key == Key.TIMEOUT: continue
+            if key in (Key.ESC, 'q', 'Q'): return
+
+            if key == Key.UP and scroll_offset > 0:
+                scroll_offset -= 1; resized[0] = True
+            elif key == Key.DOWN and scroll_offset < max_off:
+                scroll_offset += 1; resized[0] = True
+            elif key == Key.PAGE_UP and scroll_offset > 0:
+                scroll_offset = max(0, scroll_offset - 10); resized[0] = True
+            elif key == Key.PAGE_DOWN and scroll_offset < max_off:
+                scroll_offset = min(max_off, scroll_offset + 10); resized[0] = True
+            elif key == Key.MOUSE_SCROLL_UP and scroll_offset > 0:
+                scroll_offset = max(0, scroll_offset - 3); resized[0] = True
+            elif key == Key.MOUSE_SCROLL_DOWN and scroll_offset < max_off:
+                scroll_offset = min(max_off, scroll_offset + 3); resized[0] = True
+            elif isinstance(key, MouseEvent) and not key.release:
+                if key.row == log_r:
+                    _view_log_in_less()
+                elif key.row == bot_r and btn_start <= key.col <= btn_end:
+                    return
+                elif key.row == sep_r:
+                    if 6 <= key.col <= 8 and scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 1); resized[0] = True
+                    elif 9 <= key.col <= 11 and scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 1); resized[0] = True
+                elif key.btn == 64 and scroll_offset > 0:
+                    scroll_offset = max(0, scroll_offset - 3); resized[0] = True
+                elif key.btn == 65 and scroll_offset < max_off:
+                    scroll_offset = min(max_off, scroll_offset + 3); resized[0] = True
+
+    finally:
+        try:
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l\033[2J\033[H\033[?25h')
+            sys.stdout.flush()
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+            signal.signal(signal.SIGWINCH, old_winch)
+        except: pass
+        mouse_on()
+
+# =============================================================================
 # UI - MAIN INTERFACE
 # =============================================================================
 
@@ -4580,6 +4776,84 @@ class PTZMasterApp:
             self._mouse_off()
             _t.tcsetattr(fd, _t.TCSADRAIN, old_settings)
 
+    def _show_scanner_help(self):
+        content = [
+            ("STANDARD PAPER SIZES (Width x Height in mm):", ""),
+            ("  • A4", ": 210.0 x 297.0 (International)"),
+            ("  • Letter (US)", ": 215.9 x 279.4 (8.5 x 11 in)"),
+            ("  • Legal (US)", ": 215.9 x 355.6 (8.5 x 14 in)"),
+            ("  • Ledger (US)", ": 279.4 x 431.8 (11 x 17 in)"),
+            ("  (Scanner width is typically max 215-216 mm)", ""),
+            ("", ""),
+            ("DPI TO PIXELS (For A4 @ 210x297 mm):", ""),
+            ("  • 600 DPI", ": 4960 x 7016 (Master/Archive)"),
+            ("  • 300 DPI", ": 2480 x 3508 (OCR/Translation)"),
+            ("  • 150 DPI", ": 1240 x 1754 (Web/Screen)"),
+            ("  • 100 DPI", ":  827 x 1169 (Fast preview)"),
+            ("  •  75 DPI", ":  620 x  877 (Thumbnail)"),
+            ("", ""),
+            ("⚙  RECOMMENDED WORKFLOW (High Quality):", ""),
+            ("  1. Scan → TIFF @ 600 DPI (Raw data)", ""),
+            ("  2. Save to /tmp/ (Use RAM disk for speed)", ""),
+            ("  3. Process with ImageMagick (convert):", ""),
+            ("     -sharpen 0x1.0 -resize 2480x3508 -quality 85%", ""),
+            ("  4. Send to Google Translate / Tesseract OCR", ""),
+            ("", ""),
+            ("🌐 ISO 639-1 LANGUAGE CODES (for OCR/Translation):", ""),
+            ("  pl Polish    en English   de German    fr French", ""),
+            ("  es Spanish   it Italian   uk Ukrainian ru Russian", ""),
+        ]
+        display_tui_help("📐 SCANNER GEOMETRY & 🖼 IMAGE WORKFLOW REFERENCE", content)
+
+    def _show_help(self):
+        content = [
+            ("NAVIGATION", ""),
+            ("Arrow Keys", "Move camera (Pan/Tilt)"),
+            ("+ / -", "Zoom in/out"),
+            ("Space", "Stop current movement"),
+            (", / .", "Previous/Next camera"),
+            ("", ""),
+            ("CAMERA CONTROL", ""),
+            ("e", "Edit all camera parameters"),
+            ("i", "Edit IP address & port"),
+            ("I", "Imaging settings (brightness/contrast/saturation)"),
+            ("u", "Edit username"),
+            ("h", "Edit password"),
+            ("?", "Change camera TYPE"),
+            ("a", "Add new camera"),
+            ("d", "Delete current camera"),
+            ("g", "Sync profiles & detect TYPE"),
+            ("t", "Cycle through profiles"),
+            ("", ""),
+            ("STREAM CONTROL", ""),
+            ("p", "Play stream (RTSP/V4L2/FILE)"),
+            ("x", "MPV live control (image/speed/seek/pause)"),
+            ("k", "Kill current stream player"),
+            ("o", "Edit player command"),
+            ("", ""),
+            ("PRESETS", ""),
+            ("F4", "Recall preset position"),
+            ("F5", "Save current position as preset"),
+            ("", ""),
+            ("SETTINGS", ""),
+            ("s / f", "Decrease/Increase speed"),
+            ("m / l", "Decrease/Increase duration"),
+            ("z", "Reset speed & duration"),
+            ("w", "Save configuration"),
+            ("c", "Change config file"),
+            ("", ""),
+            ("BATCH & DISCOVERY", ""),
+            ("F2", "Discover cameras (ping/nmap/V4L2/SANE)"),
+            ("F3", "Batch operations"),
+            ("F6 / \\", "Global mute toggle (all playing cameras)"),
+            ("", ""),
+            ("HELP & SYSTEM", ""),
+            ("F1", "Show this help"),
+            ("1-9", "Jump to camera N"),
+            ("q", "Quit application (double q for quick exit)"),
+        ]
+        display_tui_help(f" PTZ MASTER v{VERSION} - KEYBOARD SHORTCUTS ", content)
+
     def _prompt_at_status_line(self, prompt_text: str) -> str:
         """
         Display a prompt on row 18 and safely collect input
@@ -4606,7 +4880,7 @@ class PTZMasterApp:
             sys.stdout.write(f'\033[18;1H\033[2K{YLW}│ {prompt_text}{RST}')
             sys.stdout.flush()
 
-            # 5. Bezpieczne pobranie danych
+            # 5. Safe data retrieval
             try:
                 result = input()
                 return result
@@ -5590,7 +5864,7 @@ class PTZMasterApp:
                     if cam and cam.profiles:
                         cam.active_profile = (cam.active_profile + 1) % len(cam.profiles)
                         prof_new = cam.profiles[cam.active_profile]
-                        # Dla SCANNER: token koduje tryb i DPI → aktualizuj parametry
+                        # For SCANNER: token encodes mode and DPI → update parameters
                         if cam.type == CameraType.SCANNER and prof_new.token:
                             _tok = prof_new.token  # np. "A4@150_gray"
                             if '_' in _tok:
@@ -5935,7 +6209,7 @@ class PTZMasterApp:
 
                         print(f"\n{YLW}Press 'd' for XML debug, any other key to continue (auto-continue in 10s)...{RST}")
 
-                        # Bezpieczne oczekiwanie na klawisz z timeoutem
+                        # Safe key wait with timeout
                         start_time = time.time()
                         key_pressed = None
                         while time.time() - start_time < 10:
@@ -7284,253 +7558,6 @@ class PTZMasterApp:
         self.config_mgr.save()
         notify(f"Added scanner: {name}  VID:PID={vidpid_str or 'unknown'}", "info")
         logger.info(f"Added scanner: {name} vidpid={vidpid_str} device={device_str}")
-
-    def _show_scanner_help(self):
-        """Display scanner help - ARMORED TUI v1.3 style (matching PLAYER CONTROLS)."""
-        import signal
-        import shutil
-        import platform
-        import glob
-        import os
-        mouse_off()
-        fd = sys.stdin.fileno()
-        old_term = termios.tcgetattr(fd)
-
-        resized = [True]
-        def handle_winch(sig, frame):
-            resized[0] = True
-
-        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
-
-        def _get_hw_info():
-            host = "Unknown Host"
-            for p in ['/sys/devices/virtual/dmi/id/product_name',
-                      '/sys/devices/virtual/dmi/id/product_version',
-                      '/sys/devices/virtual/dmi/id/board_name',
-                      '/sys/devices/virtual/dmi/id/chassis_version',
-                      '/sys/devices/virtual/dmi/id/sys_vendor']:
-                try:
-                    with open(p, 'r') as f:
-                        h = f.read().strip()
-                        if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
-                            host = h
-                            if p.endswith('product_name') and ' ' in h:
-                                break
-                            if 'product' in p:
-                                break
-                except: pass
-            if not host.startswith('HP') and not host.startswith('Dell') and not host.startswith('Lenovo'):
-                try:
-                    with open('/sys/devices/virtual/dmi/id/sys_vendor', 'r') as f:
-                        vendor = f.read().strip()
-                        if vendor and vendor.lower() not in ('hp', 'hewlett-packard') and len(host) < 20:
-                            if vendor not in host:
-                                host = f"{vendor} {host}"
-                except: pass
-
-            os_name = "Linux"
-            try:
-                with open('/etc/os-release') as f:
-                    for line in f:
-                        if line.startswith('PRETTY_NAME='):
-                            os_name = line.split('=')[1].strip().strip('"')
-                            break
-            except: pass
-
-            cpu = "Unknown CPU"
-            try:
-                with open('/proc/cpuinfo') as f:
-                    for line in f:
-                        if line.startswith('model name'):
-                            cpu = line.split(':')[1].strip()
-                            break
-            except: pass
-
-            temp_str = "N/A"
-            try:
-                for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
-                    with open(os.path.join(tz, 'type'), 'r') as f:
-                        ttype = f.read().strip()
-                        if 'x86_pkg_temp' in ttype or 'acpitz' in ttype or 'coretemp' in ttype:
-                            with open(os.path.join(tz, 'temp'), 'r') as tf:
-                                t = int(tf.read().strip()) / 1000.0
-                                if t > 0:
-                                    temp_str = f"+{t:.1f}°C"
-                                    break
-            except: pass
-
-            ram_str = "N/A"
-            try:
-                with open('/proc/meminfo') as f:
-                    mem = {}
-                    for line in f:
-                        if ':' in line:
-                            k, v = line.split(':', 1)
-                            mem[k.strip()] = int(v.strip().split()[0])
-                    total = mem.get('MemTotal', 1)
-                    avail = mem.get('MemAvailable', 0)
-                    used = total - avail
-                    ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}"
-            except: pass
-
-            py_ver = platform.python_version()
-
-            line1 = f"🖨  {host} 🐍 Python {py_ver}  [🐧 {os_name}]"
-            line2 = f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}"
-            return line1, line2
-
-        scroll_offset = 0
-
-        try:
-            tty.setraw(fd)
-            sys.stdout.write('\033[?1049h')
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-            sys.stdout.flush()
-
-            def _draw_help_screen():
-                nonlocal scroll_offset
-                try:
-                    term_w, term_h = shutil.get_terminal_size((80, 24))
-                except Exception:
-                    term_w, term_h = 80, 24
-
-                box_w = min(78, term_w)
-                buf = []
-                buf.append('\033[2J\033[H')
-
-                buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
-
-                title = "📐 SCANNER GEOMETRY & 🖼 IMAGE WORKFLOW REFERENCE"
-                draw_slot(buf, 2, 1, box_w, f"{GRN}║ {BLU}{title.center(box_w-4)}{RST}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                hw1, hw2 = _get_hw_info()
-
-                all_lines = [
-                    f"{hw1}",
-                    f"{hw2}",
-                    f"{WHT}STANDARD PAPER SIZES (Width x Height in mm):{RST}",
-                    f"   • A4            : 210.0 x 297.0 (International)",
-                    f"   • Letter (US)   : 215.9 x 279.4 (8.5 x 11 in)",
-                    f"   • Legal (US)    : 215.9 x 355.6 (8.5 x 14 in)",
-                    f"   • Ledger (US)   : 279.4 x 431.8 (11 x 17 in)",
-                    f"   {DIM}(Scanner width is typically max 215-216 mm){RST}",
-                    f"",
-                    f"{WHT}DPI TO PIXELS (For A4 @ 210x297 mm):{RST}",
-                    f"   • 600 DPI : 4960 x 7016 (Master/Archive)",
-                    f"   • 300 DPI : 2480 x 3508 (OCR/Translation)",
-                    f"   • 150 DPI : 1240 x 1754 (Web/Screen)",
-                    f"   • 100 DPI :  827 x 1169 (Fast preview)",
-                    f"   •  75 DPI :  620 x  877 (Thumbnail)",
-                    f"",
-                    f"{WHT}⚙  RECOMMENDED WORKFLOW (High Quality):{RST}",
-                    f"   1. Scan → TIFF @ 600 DPI (Raw data)",
-                    f"   2. Save to /tmp/ (Use RAM disk for speed)",
-                    f"   3. Process with ImageMagick (convert):",
-                    f"      {DIM}-sharpen 0x1.0 -resize 2480x3508 -quality 85%{RST}",
-                    f"   4. Send to Google Translate / Tesseract OCR",
-                    f"",
-                    f"{WHT}🌐 ISO 639-1 LANGUAGE CODES (for OCR/Translation):{RST}",
-                    f"   {GRN}pl{RST} Polish    {GRN}en{RST} English   {GRN}de{RST} German    {GRN}fr{RST} French",
-                    f"   {GRN}es{RST} Spanish   {GRN}it{RST} Italian   {GRN}uk{RST} Ukrainian {GRN}ru{RST} Russian",
-                ]
-
-                max_vis = max(1, term_h - 6)
-                max_off = max(0, len(all_lines) - max_vis)
-                scroll_offset = max(0, min(scroll_offset, max_off))
-
-                vis_lines = all_lines[scroll_offset : scroll_offset + max_vis]
-
-                row = 4
-                for content in vis_lines:
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║ {content}", "", f"{GRN}║{RST}")
-                    row += 1
-
-                while row < term_h - 2:
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║ ", "", f"{GRN}║{RST}")
-                    row += 1
-
-                buf.append(f"\033[{term_h-2};1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                footer_row = term_h - 1
-                left_lbl = "[↑][↓]PgUp/Dn"
-                padding_len = max(0, box_w - 4 - len(left_lbl) - len(f"ptz-master v{VERSION}  (ESC/Q)"))
-                footer_content = f" {YLW}{left_lbl}{RST}{' ' * padding_len}{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST} "
-
-                draw_slot(buf, footer_row, 1, box_w, f"{GRN}║{footer_content}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
-
-                sys.stdout.write("".join(buf))
-                sys.stdout.flush()
-
-                up_start, up_end = 2, 5
-                down_start, down_end = 6, 9
-                return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
-
-            footer_r = 0
-            btn_start = 0
-            btn_end = 0
-            max_off = 0
-            up_start = up_end = down_start = down_end = 0
-
-            while True:
-                if resized[0]:
-                    footer_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
-                    resized[0] = False
-
-                key = get_key(timeout=0.2)
-                if key == Key.TIMEOUT:
-                    continue
-                if key in (Key.ESC, 'q', 'Q'):
-                    return
-
-                if key == Key.UP:
-                    if scroll_offset > 0:
-                        scroll_offset -= 1
-                        resized[0] = True
-                elif key == Key.DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset += 1
-                        resized[0] = True
-                elif key == Key.PAGE_UP:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 10)
-                        resized[0] = True
-                elif key == Key.PAGE_DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 10)
-                        resized[0] = True
-                elif key == Key.MOUSE_SCROLL_DOWN:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 3)
-                        resized[0] = True
-                elif key == Key.MOUSE_SCROLL_UP:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 3)
-                        resized[0] = True
-                elif isinstance(key, MouseEvent) and not key.release:
-                    if key.row == footer_r:
-                        if btn_start <= key.col <= btn_end:
-                            return
-                        if up_start <= key.col <= up_end:
-                            if scroll_offset > 0:
-                                scroll_offset -= 1
-                                resized[0] = True
-                        elif down_start <= key.col <= down_end:
-                            if scroll_offset < max_off:
-                                scroll_offset += 1
-                                resized[0] = True
-
-        finally:
-            signal.signal(signal.SIGWINCH, old_winch)
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.write('\033[?1049l')
-            sys.stdout.write('\033[2J\033[H')
-            sys.stdout.flush()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-            mouse_on()
 
     def _discover_network(self):
         print_header("NETWORK CAMERA DISCOVERY")
@@ -9444,334 +9471,6 @@ class PTZMasterApp:
             print(f"{CYN}Press any key to continue...{RST}")
             self._wait_click_or_key()
 
-    def _show_help(self):
-        """Display main help - ARMORED TUI v1.3 style (matching SCANNER)."""
-        import signal
-        import shutil
-        import platform
-        import glob
-        import os
-        import subprocess
-
-        mouse_off()
-        fd = sys.stdin.fileno()
-        old_term = termios.tcgetattr(fd)
-
-        resized = [True]
-        def handle_winch(sig, frame):
-            resized[0] = True
-
-        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
-
-        # --- hardware / system info (jak w scanner help) ---
-        def _get_hw_info():
-            host = "Unknown Host"
-            for p in ['/sys/devices/virtual/dmi/id/product_name',
-                      '/sys/devices/virtual/dmi/id/product_version',
-                      '/sys/devices/virtual/dmi/id/board_name',
-                      '/sys/devices/virtual/dmi/id/sys_vendor']:
-                try:
-                    with open(p, 'r') as f:
-                        h = f.read().strip()
-                        if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
-                            host = h
-                            break
-                except: pass
-            os_name = "Linux"
-            try:
-                with open('/etc/os-release') as f:
-                    for line in f:
-                        if line.startswith('PRETTY_NAME='):
-                            os_name = line.split('=')[1].strip().strip('"')
-                            break
-            except: pass
-            cpu = "Unknown CPU"
-            try:
-                with open('/proc/cpuinfo') as f:
-                    for line in f:
-                        if line.startswith('model name'):
-                            cpu = line.split(':')[1].strip()
-                            break
-            except: pass
-            temp_str = "N/A"
-            try:
-                for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
-                    with open(os.path.join(tz, 'type'), 'r') as f:
-                        if 'x86_pkg_temp' in f.read() or 'coretemp' in f.read():
-                            with open(os.path.join(tz, 'temp'), 'r') as tf:
-                                t = int(tf.read().strip()) / 1000.0
-                                if t > 0:
-                                    temp_str = f"+{t:.1f}°C"
-                                    break
-            except: pass
-            ram_str = "N/A"
-            try:
-                with open('/proc/meminfo') as f:
-                    mem = {}
-                    for line in f:
-                        if ':' in line:
-                            k, v = line.split(':', 1)
-                            mem[k.strip()] = int(v.strip().split()[0])
-                    total = mem.get('MemTotal', 1)
-                    avail = mem.get('MemAvailable', 0)
-                    used = total - avail
-                    ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
-            except: pass
-            py_ver = platform.python_version()
-            line1 = f"🖥  {host} 🐍 Python {py_ver}  [🐧 {os_name}]"
-            line2 = f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}"
-            return line1, line2
-
-        help_text = [
-            ("NAVIGATION", ""),
-            ("Arrow Keys", "Move camera (Pan/Tilt)"),
-            ("+ / -", "Zoom in/out"),
-            ("Space", "Stop current movement"),
-            (", / .", "Previous/Next camera"),
-            ("", ""),
-            ("CAMERA CONTROL", ""),
-            ("e", "Edit all camera parameters"),
-            ("i", "Edit IP address & port"),
-            ("I", "Imaging settings (brightness/contrast/saturation)"),
-            ("u", "Edit username"),
-            ("h", "Edit password"),
-            ("?", "Change camera TYPE"),
-            ("a", "Add new camera"),
-            ("d", "Delete current camera"),
-            ("g", "Sync profiles & detect TYPE"),
-            ("t", "Cycle through profiles"),
-            ("", ""),
-            ("STREAM CONTROL", ""),
-            ("p", "Play stream (RTSP/V4L2/FILE)"),
-            ("x", "MPV live control (image/speed/seek/pause)"),
-            ("k", "Kill current stream player"),
-            ("o", "Edit player command"),
-            ("", ""),
-            ("PRESETS", ""),
-            ("F4", "Recall preset position"),
-            ("F5", "Save current position as preset"),
-            ("", ""),
-            ("SETTINGS", ""),
-            ("s / f", "Decrease/Increase speed"),
-            ("m / l", "Decrease/Increase duration"),
-            ("z", "Reset speed & duration"),
-            ("w", "Save configuration"),
-            ("c", "Change config file"),
-            ("", ""),
-            ("BATCH & DISCOVERY", ""),
-            ("F2", "Discover cameras (ping/nmap/V4L2/SANE)"),
-            ("F3", "Batch operations"),
-            ("F6 / \\", "Global mute toggle (all playing cameras)"),
-            ("", ""),
-            ("HELP & SYSTEM", ""),
-            ("F1", "Show this help"),
-            ("1-9", "Jump to camera N"),
-            ("q", "Quit application (double q for quick exit)"),
-        ]
-
-        scroll_offset = 0
-
-        # Funkcja do wyświetlania logu w programie 'less'
-        def _view_log():
-            if os.path.exists(LOG_FILE):
-                # Wyjście z trybu raw i alternatywnego bufora
-                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-                sys.stdout.write('\033[?1049l\033[?25h')
-                sys.stdout.flush()
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-
-                # Uruchomienie systemowej przeglądarki logów na końcu pliku (+G)
-                subprocess.run(['less', '+G', LOG_FILE])
-
-                # Powrót do TUI
-                tty.setraw(fd)
-                sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
-                sys.stdout.flush()
-                resized[0] = True
-
-        try:
-            tty.setraw(fd)
-            sys.stdout.write('\033[?1049h')
-            # Ukrycie kursora na starcie (\033[?25l)
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
-            sys.stdout.flush()
-
-            def _draw_help_screen():
-                nonlocal scroll_offset
-                try:
-                    term_w, term_h = shutil.get_terminal_size((80, 24))
-                except Exception:
-                    term_w, term_h = 80, 24
-
-                box_w = min(78, term_w)
-                buf = []
-                buf.append('\033[2J\033[H')
-
-                buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
-
-                title = f" PTZ MASTER v{VERSION} - KEYBOARD SHORTCUTS "
-                draw_slot(buf, 2, 1, box_w, f"{GRN}║{YLW}{title.center(box_w-2)}{RST}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                hw1, hw2 = _get_hw_info()
-                draw_slot(buf, 4, 1, box_w, f"{GRN}║ {CYN}{hw1[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
-                draw_slot(buf, 5, 1, box_w, f"{GRN}║ {CYN}{hw2[:box_w-4]}{RST}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[6;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                # Content area
-                max_vis = max(1, term_h - 9) # Dostosowane do nowej stopki
-                max_off = max(0, len(help_text) - max_vis)
-                scroll_offset = max(0, min(scroll_offset, max_off))
-                vis_items = help_text[scroll_offset:scroll_offset + max_vis]
-
-                row = 7
-                inside_w = box_w - 2
-                for action, keys in vis_items:
-                    if action == "":
-                        content = ""
-                    elif action.isupper() and not keys:
-                        content = f" {MAG}{action}{RST}"
-                    else:
-                        left = f"  {GRN}{action}{RST}"
-                        right = f"{keys} "
-                        content = pad(left, inside_w - ansilen(right) - 1) + right
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║{content}", "", f"{GRN}║{RST}")
-                    row += 1
-
-                while row < term_h - 2:
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║", "", f"{GRN}║{RST}")
-                    row += 1
-
-                # ---------------- NOWA STOPKA ----------------
-
-                # Wiersz: term_h - 2 (Separator z [↑][↓] Pg (Up)/(Dn))
-                sep_row = term_h - 2
-                scroll_txt = "[ [↑][↓] Pg (Up)/(Dn) ]"
-                pad_len = max(0, box_w - 2 - 2 - len(scroll_txt))
-                buf.append(f"\033[{sep_row};1H{GRN}╠══{YLW}{scroll_txt}{GRN}{'═'*pad_len}╣{RST}")
-
-                # Wiersz: term_h - 1 (Klikalny Log)
-                log_row = term_h - 1
-                log_text = f" Log: {LOG_FILE}"
-                draw_slot(buf, log_row, 1, box_w, f"{GRN}║{CYN}{pad(log_text, box_w-2)}{RST}", "", f"{GRN}║{RST}")
-
-                # Wiersz: term_h (Dolna ramka z wersją i ESC)
-                bottom_row = term_h
-                ver_text = f"[ ptz-master v{VERSION} ]"
-                esc_text = "(ESC/Q)"
-                right_part = f"{CYN}{ver_text}{GRN}═{YLW}{esc_text}{GRN}═╝{RST}"
-                # 2 zdejmujemy za ╚ i ═, reszta to odpowiednie wypełnienie
-                right_len = len(f"[ ptz-master v{VERSION} ]=(ESC/Q)=")
-                left_dashes = max(0, box_w - 2 - right_len)
-                buf.append(f"\033[{bottom_row};1H{GRN}╚{'═'*left_dashes}{right_part}{RST}")
-
-                # Append \033[?25l so cursor stays hidden after redraw
-                sys.stdout.write("".join(buf) + "\033[?25l")
-                sys.stdout.flush()
-
-                # Zwracamy parametry hitboksa dla myszy
-                # separator: ╠══[ [↑][↓]
-                # kolumny liczone od 1: ╠(1) ═(2) ═(3) [(4)  (5) [(6) ↑(7) ](8) [(9) ↓(10) ](11)
-                up_start, up_end = 6, 8
-                down_start, down_end = 9, 11
-                # ESC_Q box is at the very right of the bottom row
-                btn_start = box_w - len("(ESC/Q)=")
-                btn_end = box_w - 1
-
-                return log_row, sep_row, bottom_row, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end
-
-            log_r = sep_r = bot_r = 0
-            btn_start = btn_end = max_off = 0
-            up_start = up_end = down_start = down_end = 0
-
-            while True:
-                if resized[0]:
-                    log_r, sep_r, bot_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
-                    resized[0] = False
-
-                key = get_key(timeout=0.2)
-                if key == Key.TIMEOUT:
-                    continue
-                if key in (Key.ESC, 'q', 'Q'):
-                    return
-
-                # --- Scroll key handling ---
-                if key == Key.UP:
-                    if scroll_offset > 0:
-                        scroll_offset -= 1
-                        resized[0] = True
-                elif key == Key.DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset += 1
-                        resized[0] = True
-                elif key == Key.PAGE_UP:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 10)
-                        resized[0] = True
-                elif key == Key.PAGE_DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 10)
-                        resized[0] = True
-
-                # --- Mouse handling (wheel + clicks) ---
-                elif key == Key.MOUSE_SCROLL_DOWN:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 3)
-                        resized[0] = True
-                elif key == Key.MOUSE_SCROLL_UP:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 3)
-                        resized[0] = True
-                elif isinstance(key, MouseEvent):
-                    if not key.release:
-                        # 1. Klik w LOG
-                        if key.row == log_r:
-                            _view_log()
-
-                        # 2. Klik na (ESC/Q) w dolnej ramce
-                        elif key.row == bot_r:
-                            if btn_start <= key.col <= btn_end:
-                                return
-
-                        # 3. Klik na strzałki [↑][↓] w separatorze
-                        elif key.row == sep_r:
-                            if up_start <= key.col <= up_end:
-                                if scroll_offset > 0:
-                                    scroll_offset = max(0, scroll_offset - 1)
-                                    resized[0] = True
-                            elif down_start <= key.col <= down_end:
-                                if scroll_offset < max_off:
-                                    scroll_offset = min(max_off, scroll_offset + 1)
-                                    resized[0] = True
-
-                        # Fallback if terminal processes mouse scroll classically
-                        if key.btn == 64:  # scroll up
-                            if scroll_offset > 0:
-                                scroll_offset = max(0, scroll_offset - 3)
-                                resized[0] = True
-                        elif key.btn == 65:  # scroll down
-                            if scroll_offset < max_off:
-                                scroll_offset = min(max_off, scroll_offset + 3)
-                                resized[0] = True
-
-        finally:
-            try:
-                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-                sys.stdout.write('\033[?1049l')
-                sys.stdout.write('\033[2J\033[H')
-                # Restore cursor on exit (\033[?25h)
-                sys.stdout.write('\033[?25h')
-                sys.stdout.flush()
-            except: pass
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-            except: pass
-            try:
-                signal.signal(signal.SIGWINCH, old_winch)
-            except: pass
-            mouse_on()
 
 # =============================================================================
 # MAIN CAMERA CONTROL SCREEN (PTZMasterApp) End
@@ -9811,7 +9510,7 @@ class PlayerModeApp:
             )
             # Apply DEFAULT_IMAGE_PARAMS for new files
             cam.image_params = Camera.DEFAULT_IMAGE_PARAMS.copy()
-        # file_loop=True (--loop-file=inf) tylko gdy 1 plik w trybie loop.
+        # file_loop=True (--loop-file=inf) only when 1 file in loop mode.
         # For a playlist (>1 file) loop is handled by _run_control_loop in Python,
         # while mpv plays each file once and exits (eof_stops).
         single_file = (len(self.files) == 1)
@@ -9937,6 +9636,38 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     - cam_mode=True  → tryb kamer: SELECT / PAN / PTZ
     - cam_mode=False → file mode: SELECT / PAN
     """
+
+    def _show_player_help():
+        content = [
+            ("SPACE", "Play / Pause"),
+            ("← →", "Frame step (paused) / seek ±1s (playing)"),
+            ("[ ]", "Frame step back / forward"),
+            ("D", "Auto direction (paused)"),
+            ("R", "Auto run / stop (paused)"),
+            ("↑ ↓", "Change auto-fps (paused)"),
+            ("E / F", "Speed control"),
+            ("+ / -", "Zoom (PAN/PTZ) / seek ±30s (playing) / auto-fps (paused)"),
+            ("", ""),
+            ("Image & Audio:", ""),
+            ("B C S G H V", "Select parameter"),
+            ("0", "Reset image settings"),
+            ("M", "Mute toggle"),
+            ("x / X", "Restore / Store settings for camera"),
+            ("", ""),
+            ("Mode & Navigation:", ""),
+            ("Z", "Cycle mode (SELECT / PAN / PTZ)"),
+            (", .", "Previous / Next file"),
+            ("P", "Playlist / Camera list"),
+            ("L", "Loop toggle"),
+            ("K", "Save as camera"),
+            ("", ""),
+            ("AB-Loop & Clip:", ""),
+            ("A", "AB-loop start / stop (file mode)"),
+            ("R / A", "Extract clip (when AB-loop active)"),
+            ("T", "Screenshot"),
+        ]
+        display_tui_help("🎬 PLAYER CONTROLS", content)
+
     def _edit_pan_x(): pass
     def _edit_pan_y(): pass
     def _zoom_toggle(): pass
@@ -9993,7 +9724,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     ctrl = MpvController(_ctrl_socket) if _ctrl_socket else None
 
     # --------------------------------------------------------------------------
-    # Zmienne stanu odtwarzacza i interfejsu
+    # Player and interface state variables
     # --------------------------------------------------------------------------
     paused        = True
     pos_f         = 0.0
@@ -10010,6 +9741,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     auto_accum    = 0.0
     _first_draw   = True
     _in_overlay   = False
+    sys.stdout.write('\033[?25l'); sys.stdout.flush()  # hide cursor on enter
     zoom_mode     = False
     zoom_val      = 0.0
     pan_x         = 0.0
@@ -10865,292 +10597,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
 
-    # --------------------------------------------------------------------------
-    # Pomoc odtwarzacza (F1) - ARMORED TUI v1.3 + HW Info + Scroll
-    # --------------------------------------------------------------------------
-    def _show_player_help():
-        """Help overlay for the player screen (ARMORED TUI v1.3 style)."""
-        import signal
-        import shutil
-        import platform
-        import glob
-        import os
-        _mouse_off()
-        fd = sys.stdin.fileno()
-        old_term = termios.tcgetattr(fd)
-
-        resized = [True]
-        def handle_winch(sig, frame):
-            resized[0] = True
-
-        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
-
-        def _get_hw_info():
-            host = "Unknown Host"
-            for p in ['/sys/devices/virtual/dmi/id/product_name',
-                      '/sys/devices/virtual/dmi/id/product_version',
-                      '/sys/devices/virtual/dmi/id/board_name',
-                      '/sys/devices/virtual/dmi/id/chassis_version',
-                      '/sys/devices/virtual/dmi/id/sys_vendor']:
-                try:
-                    with open(p, 'r') as f:
-                        h = f.read().strip()
-                        # odfiltruj puste i generyczne kody typu "83F3", "To be filled"
-                        if h and h.lower() not in ('to be filled by o.e.m.', 'default string', 'unknown') and len(h) > 3:
-                            host = h
-                            # if this is already a full product name, stop
-                            if p.endswith('product_name') and ' ' in h:
-                                break
-                            # if we found something reasonable but not product_name, keep looking for better
-                            if 'product' in p:
-                                break
-                except: pass
-            # Dla HP czasem product_name = "ProDesk 400 G4 DM" a vendor osobno - sklej
-            if not host.startswith('HP') and not host.startswith('Dell') and not host.startswith('Lenovo'):
-                try:
-                    with open('/sys/devices/virtual/dmi/id/sys_vendor', 'r') as f:
-                        vendor = f.read().strip()
-                        if vendor and vendor.lower() not in ('hp', 'hewlett-packard') and len(host) < 20:
-                            # unikaj duplikacji
-                            if vendor not in host:
-                                host = f"{vendor} {host}"
-                except: pass
-
-            os_name = "Linux"
-            try:
-                with open('/etc/os-release') as f:
-                    for line in f:
-                        if line.startswith('PRETTY_NAME='):
-                            os_name = line.split('=')[1].strip().strip('"')
-                            break
-            except: pass
-
-            cpu = "Unknown CPU"
-            try:
-                with open('/proc/cpuinfo') as f:
-                    for line in f:
-                        if line.startswith('model name'):
-                            cpu = line.split(':')[1].strip()
-                            break
-            except: pass
-
-            temp_str = "N/A"
-            try:
-                for tz in glob.glob('/sys/class/thermal/thermal_zone*'):
-                    with open(os.path.join(tz, 'type'), 'r') as f:
-                        ttype = f.read().strip()
-                        if 'x86_pkg_temp' in ttype or 'acpitz' in ttype or 'coretemp' in ttype:
-                            with open(os.path.join(tz, 'temp'), 'r') as tf:
-                                t = int(tf.read().strip()) / 1000.0
-                                if t > 0:
-                                    temp_str = f"+{t:.1f}°C"
-                                    break
-            except: pass
-
-            ram_str = "N/A"
-            try:
-                with open('/proc/meminfo') as f:
-                    mem = {}
-                    for line in f:
-                        if ':' in line:
-                            k, v = line.split(':', 1)
-                            mem[k.strip()] = int(v.strip().split()[0])
-                    total = mem.get('MemTotal', 1)
-                    avail = mem.get('MemAvailable', 0)
-                    used = total - avail
-                    ram_str = f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
-            except: pass
-
-            py_ver = platform.python_version()
-
-            line1 = f"🖨  {host} 🐍 Python {py_ver}  [🐧 {os_name}]"
-            line2 = f"🔲 {cpu} 🔥{temp_str} 📏RAM {ram_str}"
-            return line1, line2
-
-        scroll_offset = 0
-
-        try:
-            tty.setraw(fd)
-            sys.stdout.write('\033[?1049h')        # alternatywny bufor
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
-            sys.stdout.flush()
-
-            def _draw_help_screen():
-                nonlocal scroll_offset
-                try:
-                    term_w, term_h = shutil.get_terminal_size((80, 24))
-                except Exception:
-                    term_w, term_h = 80, 24
-
-                # Width guard
-                box_w = min(78, term_w)
-                buf = []
-                buf.append('\033[2J\033[H')
-
-                # Top frame
-                buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
-
-                # Title
-                title = "🎬 PLAYER CONTROLS"
-                draw_slot(buf, 2, 1, box_w, f"{GRN}║ {BLU}{title.center(box_w-4)}{RST}", "", f"{GRN}║{RST}")
-
-                # Separator
-                buf.append(f"\033[3;1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                hw1, hw2 = _get_hw_info()
-
-                # Help content - extended for scrolling
-                all_lines = [
-                    f"{hw1}",
-                    f"{hw2}",
-                    f"{WHT}Playback:{RST}",
-                    f"  {YLW}SPACE{RST}      Play / Pause",
-                    f"  {YLW}← →{RST}       Frame step (paused) / seek ±1s (playing)",
-                    f"  {YLW}[ ]{RST}       Frame step back / forward",
-                    f"  {YLW}D{RST}          Auto direction (paused)",
-                    f"  {YLW}R{RST}          Auto run / stop (paused)",
-                    f"  {YLW}↑ ↓{RST}       Change auto-fps (paused)",
-                    f"  {YLW}E / F{RST}     Speed control",
-                    f"  {YLW}+/-{RST}       Zoom (PAN/PTZ) / seek ±30s (playing) / auto-fps (paused)",
-                    f"",
-                    f"{WHT}Image & Audio:{RST}",
-                    f"  {YLW}B C S G H V{RST} Select parameter",
-                    f"  {YLW}0{RST}          Reset image settings",
-                    f"  {YLW}M{RST}          Mute toggle",
-                    f"  {YLW}x / X{RST}      Restore / Store settings for camera",
-                    f"",
-                    f"{WHT}Mode & Navigation:{RST}",
-                    f"  {YLW}Z{RST}          Cycle mode (SELECT / PAN / PTZ)",
-                    f"  {YLW}, .{RST}       Previous / Next file",
-                    f"  {YLW}P{RST}          Playlist / Camera list",
-                    f"  {YLW}L{RST}          Loop toggle",
-                    f"  {YLW}K{RST}          Save as camera",
-                    f"",
-                    f"{WHT}AB-Loop & Clip:{RST}",
-                    f"  {YLW}A{RST}          AB-loop start / stop (file mode)",
-                    f"  {YLW}R / A{RST}     Extract clip (when AB-loop active)",
-                    f"  {YLW}T{RST}          Screenshot",
-                ]
-
-                # Scroll calculation: leave room for header (3 rows) and separator/footer/frame (3 rows)
-                max_vis = max(1, term_h - 6)
-                max_off = max(0, len(all_lines) - max_vis)
-                scroll_offset = max(0, min(scroll_offset, max_off))
-
-                vis_lines = all_lines[scroll_offset : scroll_offset + max_vis]
-
-                row = 4
-                for content in vis_lines:
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║ {content}", "", f"{GRN}║{RST}")
-                    row += 1
-
-                # Pad with blanks if the terminal window is taller than the text to render
-                while row < term_h - 2:
-                    draw_slot(buf, row, 1, box_w, f"{GRN}║ ", "", f"{GRN}║{RST}")
-                    row += 1
-
-                # Dolny separator
-                buf.append(f"\033[{term_h-2};1H{GRN}╠{'═'*(box_w-2)}╣{RST}")
-
-                # Stopka
-                footer_row = term_h - 1
-                left_lbl = "[↑][↓]PgUp/Dn"
-                right_lbl = f"ptz-master v{VERSION}  (ESC/Q)"
-
-                # Precise space alignment between footer sections
-                padding_len = max(0, box_w - 4 - len(left_lbl) - len(f"ptz-master v{VERSION}  (ESC/Q)"))
-                footer_content = f" {YLW}{left_lbl}{RST}{' ' * padding_len}{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST} "
-
-                draw_slot(buf, footer_row, 1, box_w, f"{GRN}║{footer_content}", "", f"{GRN}║{RST}")
-
-                # Dolna ramka
-                buf.append(f"\033[{term_h};1H{GRN}╚{'═'*(box_w-2)}╝{RST}")
-
-                sys.stdout.write("".join(buf))
-                sys.stdout.flush()
-
-                # Zwracamy parametry hitboksa dla myszy
-                # left [↑] = col 2-5, [↓] = col 6-9 (relative to frame line start)
-                up_start, up_end = 2, 5
-                down_start, down_end = 6, 9
-                return footer_row, box_w - 18, box_w, max_off, up_start, up_end, down_start, down_end
-
-            footer_r = 0
-            btn_start = 0
-            btn_end = 0
-            max_off = 0
-            up_start = up_end = down_start = down_end = 0
-
-            while True:
-                if resized[0]:
-                    footer_r, btn_start, btn_end, max_off, up_start, up_end, down_start, down_end = _draw_help_screen()
-                    resized[0] = False
-
-                key = get_key(timeout=0.2)
-                if key == Key.TIMEOUT:
-                    continue
-                if key in (Key.ESC, 'q', 'Q', ' '):
-                    return
-
-                # --- Scroll key handling ---
-                if key == Key.UP:
-                    if scroll_offset > 0:
-                        scroll_offset -= 1
-                        resized[0] = True
-                elif key == Key.DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset += 1
-                        resized[0] = True
-                elif key == Key.PAGE_UP:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 10)
-                        resized[0] = True
-                elif key == Key.PAGE_DOWN:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 10)
-                        resized[0] = True
-
-                # --- Mouse handling (wheel + click on ESC/Q) ---
-                if key == Key.MOUSE_SCROLL_DOWN:
-                    if scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 3)
-                        resized[0] = True
-                elif key == Key.MOUSE_SCROLL_UP:
-                    if scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 3)
-                        resized[0] = True
-                elif isinstance(key, MouseEvent):
-                    if not key.release:
-                        if key.row == footer_r:
-                            if btn_start <= key.col <= btn_end:
-                                return
-                            # --- NOWE: klik na [↑] i [↓] w stopce ---
-                            if up_start <= key.col <= up_end:
-                                if scroll_offset > 0:
-                                    scroll_offset = max(0, scroll_offset - 1)
-                                    resized[0] = True
-                            elif down_start <= key.col <= down_end:
-                                if scroll_offset < max_off:
-                                    scroll_offset = min(max_off, scroll_offset + 1)
-                                    resized[0] = True
-                        # Fallback if terminal processes mouse scroll classically
-                        if key.btn == 64:
-                            if scroll_offset > 0:
-                                scroll_offset = max(0, scroll_offset - 3)
-                                resized[0] = True
-                        elif key.btn == 65:
-                            if scroll_offset < max_off:
-                                scroll_offset = min(max_off, scroll_offset + 3)
-                                resized[0] = True
-
-        finally:
-            signal.signal(signal.SIGWINCH, old_winch)
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.write('\033[?1049l')
-            sys.stdout.write('\033[2J\033[H')
-            sys.stdout.flush()
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-            _mouse_on()
 
     # --------------------------------------------------------------------------
     # Main drawing function
@@ -11527,7 +10973,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             result = select_menu(
                 items,
                 selected=cur_idx,
-                title=f"📋 Kamery ({len(cameras)}) - ENTER wybierz, Q/ESC anuluj",
+                title=f"📋 Cameras ({len(cameras)}) - ENTER select, Q/ESC cancel",
                 W=70,
                 page_size=15
             )
@@ -11979,8 +11425,6 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             elif paused:            timeout = 0.3
             else:                   timeout = 1.0
 
-            rlist, _, _ = _sel.select([sys.stdin], [], [], timeout)
-
             now = _time.monotonic()
             dt  = now - last_tick; last_tick = now
 
@@ -12010,49 +11454,67 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     r = _frame_step(forward=auto_dir)
                     if r == "eof": auto_run = False; result = "eof_next"; running = False; break
 
-            if not rlist:
+            _tw, _th = _term_size()
+            _term_ok = (_th >= MIN_H and _tw >= MIN_W)
+
+            ch = get_key(timeout=timeout)
+
+            if ch == Key.TIMEOUT:
                 if _sigwinch_flag[0]: _sigwinch_flag[0] = False; _first_draw = True
                 continue
 
-            _tw, _th = _term_size()
-            _term_ok = (_th >= MIN_H and _tw >= MIN_W)
-###
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                ch2 = sys.stdin.read(1)
-                if ch2 == '[':
-                    ch3 = sys.stdin.read(1)
-                    if ch3 == '<':
-                        buf = ''
-                        while True:
-                            c2 = sys.stdin.read(1)
-                            if c2 in ('M', 'm', ''): release = (c2 == 'm'); break
-                            buf += c2
-                        try:
-                            parts = buf.split(';')
-                            btn_n, m_col, m_row = int(parts[0]), int(parts[1]), int(parts[2])
-                            if not release:
-                                if btn_n == 64: _seek(+5)
-                                elif btn_n == 65: _seek(-5)
-                                elif btn_n == 0 and _term_ok: _handle_mouse_p(m_row, m_col)
-                        except: pass
-                    elif ch3 in ('C', 'D'):
-                        forward = (ch3 == 'C')
-                        if cam_mode and ui_mode == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
-                        elif cam_mode and ui_mode == "PTZ": _ptz_move(1.0 if forward else -1.0, 0.0)
-                        elif not cam_mode and ui_mode_file == "PAN": _pan(-PAN_STEP if forward else +PAN_STEP, 0)
-                        else: _set_val(PARAMS[sel], +step if forward else -step)
-                    elif ch3 == 'A':
-                        if cam_mode and ui_mode == "PAN": _pan(0, +PAN_STEP)
-                        elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, 1.0)
-                        elif not cam_mode and ui_mode_file == "PAN": _pan(0, +PAN_STEP)
-                        else: sel = (sel - 1) % len(PARAMS)
-                    elif ch3 == 'B':
-                        if cam_mode and ui_mode == "PAN": _pan(0, -PAN_STEP)
-                        elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, -1.0)
-                        elif not cam_mode and ui_mode_file == "PAN": _pan(0, -PAN_STEP)
-                        else: sel = (sel + 1) % len(PARAMS)
-                else: running = False
+            # --- Unified input handling via KeyReader ---
+            if isinstance(ch, MouseEvent):
+                if not ch.release:
+                    if ch.btn == 64: _seek(+5)
+                    elif ch.btn == 65: _seek(-5)
+                    elif ch.btn == 0 and _term_ok: _handle_mouse_p(ch.row, ch.col)
+                continue
+
+            # Normalize space/enter
+            if ch == Key.SPACE: ch = ' '
+            if ch == Key.ENTER: ch = chr(10)
+            if ch == Key.BACKSPACE: ch = chr(127)
+            if ch == Key.TAB: ch = chr(9)
+
+            # Arrow keys and navigation
+            if ch == Key.UP:
+                if cam_mode and ui_mode == "PAN": _pan(0, +PAN_STEP)
+                elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, 1.0)
+                elif not cam_mode and ui_mode_file == "PAN": _pan(0, +PAN_STEP)
+                else: sel = (sel - 1) % len(PARAMS)
+                continue
+            if ch == Key.DOWN:
+                if cam_mode and ui_mode == "PAN": _pan(0, -PAN_STEP)
+                elif cam_mode and ui_mode == "PTZ": _ptz_move(0.0, -1.0)
+                elif not cam_mode and ui_mode_file == "PAN": _pan(0, -PAN_STEP)
+                else: sel = (sel + 1) % len(PARAMS)
+                continue
+            if ch == Key.LEFT:
+                if cam_mode and ui_mode == "PAN": _pan(+PAN_STEP, 0)
+                elif cam_mode and ui_mode == "PTZ": _ptz_move(-1.0, 0.0)
+                elif not cam_mode and ui_mode_file == "PAN": _pan(+PAN_STEP, 0)
+                else: _set_val(PARAMS[sel], -step)
+                continue
+            if ch == Key.RIGHT:
+                if cam_mode and ui_mode == "PAN": _pan(-PAN_STEP, 0)
+                elif cam_mode and ui_mode == "PTZ": _ptz_move(1.0, 0.0)
+                elif not cam_mode and ui_mode_file == "PAN": _pan(-PAN_STEP, 0)
+                else: _set_val(PARAMS[sel], +step)
+                continue
+
+            # Function keys
+            if ch == Key.F1:
+                _mouse_off(); _show_player_help(); _mouse_on(); _first_draw = True
+                continue
+            if ch in (Key.F2, Key.F3, Key.F4, Key.F5, Key.F6, Key.F7, Key.F8, Key.F9, Key.F10, Key.F11, Key.F12):
+                # reserved for future shortcuts
+                continue
+
+            # ESC / quit
+            if ch == Key.ESC:
+                running = False
+                continue
             elif ch in ('q', 'Q'): running = False
             elif ch == ' ': _toggle_pause()
             elif ch in ('z', 'Z'):
@@ -12142,7 +11604,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 else: _ab_clear()
             elif ch.lower() in JUMP_KEY: sel = JUMP_KEY[ch.lower()]
             elif ch == '[':
-                if paused: _frame_step(False)    # krok wstecz
+                if paused: _frame_step(False)    # step backward
                 else: _seek(-1.0)               # przewijanie 1s gdy gra
             elif ch == ']':
                 if paused: _frame_step(True)     # step forward
@@ -12179,7 +11641,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     else: out('\033[2J\033[H'); _draw()
             elif ch == '<': step = max(1, step - 1)
             elif ch == '>': step = min(50, step + 1)
-            # --- F1: pomoc odtwarzacza ---
+            # --- F1: player help ---
             elif ch == Key.F1:
                 _mouse_off()
                 _show_player_help()
@@ -12187,7 +11649,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 _first_draw = True
 
     finally:
-        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h')
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25l')
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -12199,7 +11661,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
 
 def _show_playlist(files, current_idx):
     """File picker — list + directory navigation.
-    Zwraca nowy index (int) lub -1 (anuluj).
+    Returns new index (int) or -1 (cancel).
     """
     import os, stat as _stat, time as _time
     fd  = sys.stdin.fileno()
@@ -12300,7 +11762,7 @@ def _show_playlist(files, current_idx):
             out(f"\r{BLU}║{RST}{' '*W}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╠{'═'*W}╣{RST}\r\n")
         pg = f"{sel+1}/{len(files)}"
-        nav = f" {YLW}[↑↓PgUp/Dn]{RST} {YLW}[ENTER]{RST} wybierz  {YLW}[D]{RST} katalog  {YLW}[Q/ESC]{RST} anuluj  {DIM}{pg}{RST}"
+        nav = f" {YLW}[↑↓PgUp/Dn]{RST} {YLW}[ENTER]{RST} select  {YLW}[D]{RST} directory  {YLW}[Q/ESC]{RST} cancel  {DIM}{pg}{RST}"
         out(f"\r{BLU}║{RST}{pad(nav, W)}{BLU}║{RST}\r\n")
         out(f"\r{BLU}╚{'═'*W}╝{RST}\r\n")
         out("\033[?25l")
@@ -12481,7 +11943,7 @@ def _show_playlist(files, current_idx):
                                 off = _page_offset(selected, off, len(files))
                         elif r == nav_row:
                             _pg   = f"{selected+1}/{len(files)}"
-                            _nav  = f" [↑↓PgUp/Dn] [ENTER] wybierz  [D] katalog  [Q/ESC] anuluj  {_pg}"
+                            _nav  = f" [↑↓PgUp/Dn] [ENTER] select  [D] directory  [Q/ESC] cancel  {_pg}"
                             _bp   = _btn_pos(_nav)
                             if   'ENTER' in _bp and _bp['ENTER'][0] <= c <= _bp['ENTER'][1]: return selected
                             elif 'D'     in _bp and _bp['D'][0]     <= c <= _bp['D'][1]:
