@@ -1243,6 +1243,10 @@ def ansilen(s: str) -> int:
     clean = re.sub('\x1b\\[[0-9;]*[a-zA-Z]', '', s)
     total = 0
     for c in clean:
+        # 1) use measured emoji width if available (fixes 🔩, 🛠, 📜 etc.)
+        if c in _EMOJI_CACHE:
+            total += _EMOJI_CACHE[c]
+            continue
         cp = ord(c)
         # Emoji and symbols (most occupy 2 columns)
         if cp >= 0x1F000:
@@ -7060,10 +7064,13 @@ class PTZMasterApp:
         C_LAB = "\033[97m"       # white for labels
         C_RST = "\033[0m"        # reset formatting
         C_CYN = "\033[96m"       # cyan
+        C_BLU = "\033[94m"       # blue
         C_YLW = "\033[93m"       # yellow
         C_GRN = "\033[92m"       # green
         C_DIM_CYN = "\033[2;96m" # dim cyan
         C_BOLD_YLW = "\033[1;93m"# bold yellow
+        C_DIM = "\033[2m"        # dim
+        C_RED = "\033[91m"       # red
 
         # Check write permissions for the destination directory
         dest_dir = cam.scan_dest or SCAN_DIR
@@ -7097,6 +7104,22 @@ class PTZMasterApp:
 
         num_padding = 3  # -1=NO, 1=1d, 2=2d, 3=3d
         date_format = 0
+        # ── Session Logs ──────────────────────────────────────────────────
+        session_logs: list = []    # list of str, max 50 entries
+        log_scroll   = 0           # 0 = newest at bottom
+
+        def _slog(msg: str):
+            """Append timestamped entry to session log, keep newest at end."""
+            import datetime as _dt
+            ts  = _dt.datetime.now().strftime("%H:%M:%S")
+            session_logs.append(f"[{ts}] {msg}")
+            if len(session_logs) > 50:
+                session_logs.pop(0)
+                # Ulepszenie: zapobieganie przeskakiwaniu logów podczas przewijania
+                nonlocal log_scroll
+                if log_scroll > 0:
+                    log_scroll = max(0, log_scroll - 1)
+
         override_num = None
 
         # ── ImageMagick PDF section state ─────────────────────────────────
@@ -7121,6 +7144,11 @@ class PTZMasterApp:
         scan_ok = [False]
         last_scanned_file = getattr(self, 'last_scanned_file', None)  # Load previous scan for 's' preview
         _bp = {}
+
+        pdf_phase = 0           # 0: idle, 1: generating, 2: done
+        pdf_pct = 0
+        pdf_current_file = ""
+        pdf_total_files = 0
 
         def _get_next_number():
             if override_num is not None:
@@ -7153,219 +7181,270 @@ class PTZMasterApp:
                 return lst[0]
 
         def _draw():
+            nonlocal log_scroll
             if not _EMOJI_CACHE:
-                calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░"])
-            buf = ['\033[2J\033[H']   # always full clear – eliminates ghost frames
+                # Ulepszenie: dodano wszystkie ikony TUI skanera do kalibracji
+                calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░","🔩","🛠","📝","📂","📜","▶","✓","✗"])
+            buf = ['\033[2J\033[H']
             full_redraw[0] = False
-            try:
-                term_w, term_h = shutil.get_terminal_size()
-            except:
-                term_w, term_h = 80, 24
+            try:   term_w, term_h = shutil.get_terminal_size()
+            except: term_w, term_h = 80, 24
             W = max(60, min(120, term_w - 2))
-            H = max(20, min(30, term_h - 2))
+            # Zmniejszono minimalną wysokość TUI z 24 na 22, co daje 21 wierszy interfejsu
+            H = max(22, term_h - 1)
+            iw = W - 2   # inner width
 
-            today = datetime.date.today()
-            date_str = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
-            next_num = _get_next_number()
-            num_str = _format_number(next_num)
-            pad_indicator = {-1:"NO", 1:"1d", 2:"2d", 3:"3d"}.get(num_padding, "3d")
+            import datetime as _dt
+            today     = _dt.date.today()
+            date_str  = today.strftime("%Y-%m-%d") if date_format == 0 else today.strftime("%d-%m-%Y")
+            next_num  = _get_next_number()
+            num_str   = _format_number(next_num)
+            pad_ind   = {-1:"NO", 1:"1d", 2:"2d", 3:"3d"}.get(num_padding, "3d")
+            ext       = cam.scan_format if cam.scan_format else "jpg"
+            desc      = cam.scan_desc if cam.scan_desc else ""
+            fname     = f"{date_str}_{desc}_{num_str}.{ext}"
+            dest_str  = str(cam.scan_dest)
+            scan_path = os.path.join(dest_str, fname)
 
-            # Window Header
-            f1_visible = "(F1 Help)"
-            f1 = f"{C_BOLD_YLW}(F1{C_RST} {C_CYN}Help){C_RST}"
-            top = f"╔{'═'*(W-len(f1_visible)-1)}{f1}═╗"
-            buf.append(f"\033[1;1H{top}")
+            # ── helper: labelled separator ────────────────────────────────
+            def _sep(label: str) -> str:
+                plain = f"[ {label} ]"
+                vis   = ansilen(plain) + 5   # ╠════[ ... ]
+                fills = max(0, W - vis + 1)  # ════...════╣  (+2 to match full width W+2)
+                C_VIOLET = "\033[95m"  # fioletowy dla tytułów sekcji
+                colored = f"[ {C_VIOLET}{label}{C_RST} ]"
+                return f"╠════{colored}{'═'*fills}╣"
 
-            header_txt = f"{C_DIM_CYN}🖨  Scanner:{C_RST} {C_YLW}{cam.name}{C_RST}  {C_DIM_CYN}dev:{C_RST} {C_YLW}{cam.scan_device or '(default)'}{C_RST}"
-            draw_slot(buf, 2, 1, W+2, f"║ {header_txt}", "", "║")
-            buf.append(f"\033[3;1H╠{'═'*W}╣")
+            # ── ROW 1: top border + F1 ────────────────────────────────────
+            _f1_text  = "(F1 Help)"
+            _f1 =  f"{YLW}(F1 {CYN}Help{YLW}){RST}"
+            _top = f"╔{'═'*(W-len(_f1_text)-1)}{_f1}═╗"
+            buf.append(f"\033[1;1H{_top}")
 
-            desc_str = cam.scan_desc or "(none)"
-            num_full = f"{num_str} [{pad_indicator}]"
+            # ── ROW 2: scanner title ──────────────────────────────────────
+            _dev  = str(getattr(cam, 'scan_device', ''))
+            _name = cam.name
+            draw_slot(buf, 2, 1, W+2,
+                      f"║ 🖨  Scanner: {C_YLW}{_name}{C_RST}  dev: {C_CYN}{_dev}{C_RST}", "", "║")
 
+            # ── ROW 3: ╠═════[ 🔩 Scanner Configurations ]══════╣ ─────────
+            buf.append(f"\033[3;1H{_sep('🔩 Scanner Configurations')}")
+
+            # ── ROWS 4-7: scanner params ──────────────────────────────────
             col1_1 = f"{C_KEY}(m){C_RST} {C_LAB}Mode  :{C_RST} {C_VAL}{cam.scan_mode:<11}{C_RST}"
-            col2_1 = f"{C_KEY}(d){C_RST} {C_LAB}DPI   :{C_RST} {C_VAL}{str(cam.scan_dpi):<10}{C_RST}"
+            col2_1 = f"{C_KEY}(d){C_RST} {C_LAB}DPI   :{C_RST} {C_VAL}{cam.scan_dpi:<10}{C_RST}"
             col3_1 = f"{C_KEY}(a){C_RST} {C_LAB}Area  :{C_RST} {C_VAL}{cam.scan_area}{C_RST}"
+            draw_slot(buf, 4, 1, W+2, f"║ {col1_1}{col2_1}{col3_1}", "", "║")
 
             col1_2 = f"{C_KEY}(f){C_RST} {C_LAB}Format:{C_RST} {C_VAL}{cam.scan_format:<11}{C_RST}"
             col2_2 = f"{C_KEY}(r){C_RST} {C_LAB}Resize:{C_RST} {C_VAL}{cam.scan_resize:<10}{C_RST}"
-            col3_2 = f"{C_KEY}(c){C_RST} {C_LAB}Compr :{C_RST} {C_VAL}{str(cam.scan_quality)}{C_RST}"
+            col3_2 = f"{C_KEY}(c){C_RST} {C_LAB}Compr :{C_RST} {C_VAL}{cam.scan_quality}{C_RST}"
+            draw_slot(buf, 5, 1, W+2, f"║ {col1_2}{col2_2}{col3_2}", "", "║")
 
             col1_3 = f"{C_KEY}(h){C_RST} {C_LAB}Date  :{C_RST} {C_VAL}{date_str:<11}{C_RST}"
-            col2_3 = f"{C_KEY}(n){C_RST} {C_LAB}Desc  :{C_RST} {C_VAL}{desc_str:<10}{C_RST}"
-            col3_3 = f"{C_KEY}(x){C_RST} {C_LAB}Number:{C_RST} {C_VAL}{num_full:<10}{C_RST}{C_KEY}(y){C_RST}"
+            col2_3 = f"{C_KEY}(n){C_RST} {C_LAB}Desc  :{C_RST} {C_VAL}{desc:<10}{C_RST}"
+            col3_3 = f"{C_KEY}(x){C_RST} {C_LAB}Number:{C_RST} {C_VAL}{num_str} [{pad_ind}]{C_RST}  {C_KEY}(y){C_RST}"
+            draw_slot(buf, 6, 1, W+2, f"║ {col1_3}{col2_3}{col3_3}", "", "║")
 
             col1_4 = f"{C_KEY}(v){C_RST} {C_LAB}Viewer:{C_RST} {C_VAL}{cam.scan_viewer:<11}{C_RST}"
-            dest_str = str(cam.scan_dest)
             col2_4 = f"{C_KEY}(t){C_RST} {C_LAB}Dest  :{C_RST} {C_VAL}{dest_str}{C_RST}"
             col3_4 = f"  {C_KEY}(T){C_RST}rans{C_KEY}(l){C_RST}ate=[{C_YLW}{translate_lang}{C_RST}]"
-
-            draw_slot(buf, 4, 1, W+2, f"║ {col1_1}{col2_1}{col3_1}", "", "║")
-            draw_slot(buf, 5, 1, W+2, f"║ {col1_2}{col2_2}{col3_2}", "", "║")
-            draw_slot(buf, 6, 1, W+2, f"║ {col1_3}{col2_3}{col3_3}", "", "║")
             draw_slot(buf, 7, 1, W+2, f"║ {col1_4}{col2_4}{col3_4}", "", "║")
-            buf.append(f"\033[8;1H╠{'═'*W}╣")
 
-            file_base = f"{date_str}_{cam.scan_desc or 'none'}_{num_str}.{cam.scan_format}"
-            full_path = os.path.join(cam.scan_dest, file_base)
-            if scan_phase == 0:
-                prog = f"{C_KEY}(p){C_RST} {C_LAB}Scan{C_RST}  {full_path}"
-            elif scan_phase == 1:
-                prog = f"🖨  Preparing scan... {full_path}"
+            # ── ROW 8: ╠═════[ 🛠  Scanner Operations ]══════╣ ───────────
+            buf.append(f"\033[8;1H{_sep('🛠  Scanner Operations')}")
+
+            # ── ROW 9: scan path + inline status ─────────────────────────
+            _scan_status = ""
+            if scan_phase == 1:
+                _scan_line = f"{C_CYN}🖨  Preparing scan...{C_RST} {C_BLU}{scan_path}{C_RST}"
             elif scan_phase == 2:
-                bar = "█" * int(scan_pct/100*15) + "░" * (15 - int(scan_pct/100*15))
-                prog = f"🖨  Scanning... {scan_pct:3d}% [{bar}] {file_base}"
+                # colorful progress: red->yellow->blue->green
+                if scan_pct < 25:
+                    _scan_color = "\033[91m"  # red
+                elif scan_pct < 50:
+                    _scan_color = "\033[93m"  # yellow
+                elif scan_pct < 75:
+                    _scan_color = "\033[94m"  # blue
+                else:
+                    _scan_color = "\033[92m"  # green
+                pct_bar = "█" * int(scan_pct/10) + "░" * (10 - int(scan_pct/10))
+                _base = os.path.basename(scan_path)
+                _scan_line = f"{C_CYN}🖨  Scanning...{C_RST}  {_scan_color}{int(scan_pct)}% [{pct_bar}]{C_RST} {C_BLU}{_base}{C_RST}"
+            elif scan_phase == 3 and last_scanned_file:
+                if scan_ok[0]:
+                    _scan_status = f"  {C_GRN}🔔 Scan saved ✓{C_RST}  {C_KEY}(s){C_RST} Show"
+                else:
+                    _scan_status = f"  {C_RED}✗ FAILED{C_RST}"
+                _scan_line = f"{C_KEY}(p){C_RST} Scan : {C_BLU}{scan_path}{C_RST}{_scan_status}"
             else:
-                prog = f"{C_KEY}(p){C_RST} {C_LAB}Scan{C_RST}  {full_path} {'OK' if scan_ok[0] else 'ERR'}"
-            draw_slot(buf, 9, 1, W+2, f"║ {prog}", "", "║")
-            buf.append(f"\033[10;1H╠{'═'*W}╣")
+                _scan_line = f"{C_KEY}(p){C_RST} Scan : {C_BLU}{scan_path}{C_RST}"
+            draw_slot(buf, 9, 1, W+2, f"║ {_scan_line}", "", "║")
 
-            # ── PDF section rows 11..H-7, status H-6..H-3, sys H-2, foot H-1
-            # Layout (rows relative to terminal):
-            #  11: ╠═══[ 📝 Imagemagick PDF  Mode: [N](size DPI) ]═══╣
-            #  12: ║ [1](595x842 72) [2](1240x1754 150) [3](2480x3508 300)
-            #  13: ║ [4](4961x7016 600) [5](9921x14031 1200)  [6](NoScale)
-            #  14: ╠═══════════════════════════════════════════════════╣
-            #  15: ║ [8] ▶ Generate PDF: <name>.pdf
-            #  16: ║ [t] Dir: <pdf_dir>             (o) Open 📂
-            #  17: ╠══════...══╣   (if terminal tall enough, else skip)
-            # H-3: ║ 🔔 status
-            # H-2: ║ sys_stats
-            # H-1: ╚══...═(ESC/Q)═╝
+            # ── ROW 10: ╠═════[ 🔩 PDF Configurations ]══════╣ ──────────
+            buf.append(f"\033[10;1H{_sep('🔩 PDF Configurations')}")
 
-            PDF_ROW_SEP1  = 11   # ╠═[ 📝 Imagemagick PDF … ]═╣
-            # All PDF row numbers computed from PDF_ROW_SEP1=11 + added separator
-            # row 11: badge content
-            # row 12: ╠═══╣  separator
-            # row 13: modes 1-3
-            # row 14: modes 4-6
-            # row 15: ╠═══╣  separator
-            # row 16: [8] Generate
-            # row 17: [t] Dir
-            # row 18: ╠═══╣  separator (if space)
-            _PR = PDF_ROW_SEP1          # =11
-            PDF_ROW_SEP_A  = _PR + 1   # 12 – separator after badge
-            PDF_ROW_MODE1  = _PR + 2   # 13 – modes 1-3
-            PDF_ROW_MODE2  = _PR + 3   # 14 – modes 4-6
-            PDF_ROW_SEP2   = _PR + 4   # 15 – separator after modes
-            PDF_ROW_GEN    = _PR + 5   # 16 – [8] Generate
-            PDF_ROW_DIR    = _PR + 6   # 17 – [t] Dir
-            PDF_ROW_SEP3   = _PR + 7   # 18 – separator before empty rows
-
-            # ── row 11: plain content row with mode badge ─────────────────
-            _m          = PDF_MODES[pdf_mode_sel]
-            _badge_col  = (f" 📝 Imagemagick PDF  "
-                           f"Mode: {C_KEY}[{pdf_mode_sel}]{C_RST}"
-                           f" {C_CYN}({_m[0].strip()} {_m[1].strip()}){C_RST}")
-            draw_slot(buf, _PR, 1, W+2, f"║{_badge_col}", "", "║")
-            buf.append(f"\033[{PDF_ROW_SEP_A};1H╠{'═'*W}╣")
-
-            # ── rows 12-13: mode buttons [1]-[6] ─────────────────────────
+            # ── ROWS 11-12: PDF mode buttons [1]-[6] ─────────────────────
             def _mode_btn(k):
                 m = PDF_MODES[k]
                 label = f"({m[0].strip()} {m[1].strip()})" if m[1] else f"({m[0].strip()})"
                 if k == pdf_mode_sel:
-                    # active: [N] yellow, label cyan on dark bg
                     return f"{C_YLW}[{k}]{C_RST}\033[48;5;234m{C_CYN}{label}{C_RST}"
                 return f"{C_KEY}[{k}]{C_RST}{label}"
 
-            line12 = f" {_mode_btn('1')}  {_mode_btn('2')}  {_mode_btn('3')}"
-            line13 = f" {_mode_btn('4')}  {_mode_btn('5')}  {_mode_btn('6')}"
-            draw_slot(buf, PDF_ROW_MODE1, 1, W+2, f"║{line12}", "", "║")
-            draw_slot(buf, PDF_ROW_MODE2, 1, W+2, f"║{line13}", "", "║")
-            buf.append(f"\033[{PDF_ROW_SEP2};1H╠{'═'*W}╣")
+            line11 = f" {_mode_btn('1')}     {_mode_btn('2')}    {_mode_btn('3')}"
+            line12 = f" {_mode_btn('4')}  {_mode_btn('5')}  {_mode_btn('6')}"
+            draw_slot(buf, 11, 1, W+2, f"║{line11}", "", "║")
+            draw_slot(buf, 12, 1, W+2, f"║{line12}", "", "║")
 
-            # ── row 15: [8] Generate PDF ──────────────────────────────────
-            import datetime as _dt
-            _today     = _dt.date.today().strftime("%Y-%m-%d")
-            _pdf_name  = f"{_today}_{os.path.basename(pdf_dir.rstrip('/'))}_print.pdf"
-            _pdf_out   = os.path.join(pdf_dir, _pdf_name)
-            _gen_line  = (f" {C_KEY}[8]{C_RST} {C_YLW}▶ Generate PDF:{C_RST}"
-                          f" {C_CYN}{_pdf_name}{C_RST}")
-            draw_slot(buf, PDF_ROW_GEN, 1, W+2, f"║{_gen_line}", "", "║")
+            # ── ROW 13: ╠═════[ 🛠  PDF Operations ]══════╣ ─────────────
+            buf.append(f"\033[13;1H{_sep('🛠  PDF Operations')}")
 
-            # ── row 17: [D] Dir edit  [O] Open filemanager ──────────────
-            _OPEN_BTN   = "[O] Open 📂"          # plain length = 13
-            _OPEN_PLAIN = len("[O] Open ")  + 2   # visible chars without emoji width fudge → 11
-            _dir_avail  = W - 2 - len(" [D] Dir: ") - 2 - len(_OPEN_BTN)
-            _dir_short  = pdf_dir if len(pdf_dir) <= _dir_avail else "…" + pdf_dir[-(_dir_avail-1):]
-            _dir_line   = (f" {C_KEY}[D]{C_RST} Dir: {C_CYN}{_dir_short}{C_RST}"
-                           f"  {C_KEY}[O]{C_RST} Open 📂")
-            draw_slot(buf, PDF_ROW_DIR, 1, W+2, f"║{_dir_line}", "", "║")
-            # hitbox [D]: cols 2 … W-15,  [O]: cols W-14 … W
-            _bp['pdfD'] = (PDF_ROW_DIR,  2,    W-15)
-            _bp['pdfO'] = (PDF_ROW_DIR,  W-14, W)
+            # ── ROW 14: PDF mode badge ────────────────────────────────────
+            _m = PDF_MODES[pdf_mode_sel]
+            _badge = (f" 📝 PDF Imagemagick Mode : "
+                      f"{C_KEY}[{pdf_mode_sel}]{C_RST}"
+                      f" {C_BLU}({_m[0].strip()} {_m[1].strip()}){C_RST}")
+            draw_slot(buf, 14, 1, W+2, f"║{_badge}", "", "║")
 
-            # ── optional separator row 17 ─────────────────────────────────
-            if H - 3 > PDF_ROW_DIR + 1:
-                buf.append(f"\033[{PDF_ROW_SEP3};1H╠{'═'*W}╣")
-                for _r in range(PDF_ROW_SEP3 + 1, H - 3):
-                    draw_slot(buf, _r, 1, W+2, "║", "", "║")
+            # ── ROW 15: [8] Generate PDF ──────────────────────────────────
+            import datetime as _dt2
+            _today    = _dt2.date.today().strftime("%Y-%m-%d")
+            _pdf_name = f"{_today}_{os.path.basename(pdf_dir.rstrip('/'))}_print.pdf"
+            if pdf_phase == 1:
+                # colorful progress: red->yellow->blue->green
+                if pdf_pct < 25:
+                    _pdf_color = "\033[91m"  # red
+                elif pdf_pct < 50:
+                    _pdf_color = "\033[93m"  # yellow
+                elif pdf_pct < 75:
+                    _pdf_color = "\033[94m"  # blue
+                else:
+                    _pdf_color = "\033[92m"  # green
+                pct_bar = "█" * int(pdf_pct/10) + "░" * (10 - int(pdf_pct/10))
+                _gen_line = (f" {C_KEY}[8]{C_RST} {C_YLW}▶ Generating PDF:{C_RST}"
+                             f" {_pdf_color}{int(pdf_pct)}% [{pct_bar}]{C_RST} {C_DIM}{pdf_current_file}{C_RST}")
+            elif pdf_phase == 2:
+                _gen_line = (f" {C_KEY}[8]{C_RST} {C_GRN}✓ PDF ready:{C_RST}"
+                             f" {C_CYN}{_pdf_name}{C_RST}")
             else:
-                for _r in range(PDF_ROW_DIR + 1, H - 3):
+                _gen_line = (f" {C_KEY}[8]{C_RST} {C_YLW}▶ Generate PDF:{C_RST}"
+                             f" {C_CYN}{_pdf_name}{C_RST}")
+            draw_slot(buf, 15, 1, W+2, f"║{_gen_line}", "", "║")
+
+            # ── ROW 16: [D] Dir  [O] Open ────────────────────────────────
+            _right_part = f"{C_KEY}[O]{C_RST} Open 📂 "
+            _right_len = ansilen(_right_part)
+            _dir_avail = iw - len(" [D] Dir: ") - 2 - _right_len
+            _dir_short = pdf_dir if len(pdf_dir) <= _dir_avail else "…" + pdf_dir[-(_dir_avail-1):]
+
+            _left_part = f" {C_KEY}[D]{C_RST} Dir: {C_CYN}{_dir_short}{C_RST}"
+            # Obliczamy ile spacji potrzeba, aby wypchnąć _right_part do samej prawej ramki
+            _spaces = max(0, W - ansilen(_left_part) - _right_len)
+
+            _dir_line = f"{_left_part}{' ' * _spaces}{_right_part}"
+            draw_slot(buf, 16, 1, W+2, f"║{_dir_line}", "", "║")
+
+            # ── ROW 17: ╠═════[ 📜 Session Logs ]══════╣ ─────────────────
+            buf.append(f"\033[17;1H{_sep('📜 Session Logs')}")
+
+            # ── LOG ROWS: 18 … H-3 ───────────────────────────────────────
+            LOG_ROW0  = 18
+            # Ulepszenie: Zmieniono H - 4 na H - 3, co domyka ramkę z logami
+            LOG_ROWEND = H - 3
+            log_vis   = max(1, LOG_ROWEND - LOG_ROW0)
+
+            # clamp scroll
+            max_scroll = max(0, len(session_logs) - log_vis)
+            log_scroll = max(0, min(log_scroll, max_scroll))
+
+            for _li in range(log_vis):
+                _r    = LOG_ROW0 + _li
+                # index into session_logs: show newest at bottom
+                _sidx = len(session_logs) - log_vis + _li - log_scroll
+                if 0 <= _sidx < len(session_logs):
+                    _entry = session_logs[_sidx]
+                    # colour: ✓ green, ✗ red, rest dim
+                    if "✓" in _entry or "OK" in _entry:
+                        _lc = C_GRN
+                    elif "✗" in _entry or "FAILED" in _entry or "ERROR" in _entry:
+                        _lc = C_RED
+                    else:
+                        _lc = C_DIM
+                    draw_slot(buf, _r, 1, W+2, f"║ {_lc}» {_entry}{C_RST}", "", "║")
+                else:
                     draw_slot(buf, _r, 1, W+2, "║", "", "║")
 
-            # ── status / sys / footer ─────────────────────────────────────
-            now_ts = time.time()
-            raw_notifs = [(msg, col) for msg, col, ts in NotificationManager()._queue
-                          if now_ts - ts < NotificationManager()._lifetime]
-
-            if raw_notifs:
-                status_msg = raw_notifs[-1][0]
-                status_col = raw_notifs[-1][1]
-            elif last_scanned_file and scan_phase == 3 and scan_ok[0]:
+            # ── STATUS ROW: H-3 ──────────────────────────────────────────
+            # (last notification or idle)
+            _now = time.time()
+            _notifs = [(m, c) for m, c, ts in NotificationManager()._queue
+                       if _now - ts < NotificationManager()._lifetime]
+            if scan_phase == 3 and last_scanned_file and scan_ok[0]:
                 try:
-                    _sz = os.path.getsize(last_scanned_file)
-                    _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
-                    _fname = os.path.basename(last_scanned_file)
-                    status_msg = (f"{C_GRN}Scan saved ✓{C_RST} {C_CYN}{_fname}{C_RST}"
-                                  f" \033[94m({_sz_s}){C_RST}  {C_KEY}(s){C_RST} Show")
-                    status_col = C_GRN
-                except:
-                    status_msg = f"{C_GRN}Scan saved{C_RST}  {C_KEY}(s){C_RST} Show"
-                    status_col = C_GRN
+                    _sz   = os.path.getsize(last_scanned_file)
+                    _szs  = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
+                    _fn   = os.path.basename(last_scanned_file)
+                    _stat = (f"{C_GRN}Scan saved ✓{C_RST} {C_CYN}{_fn}{C_RST}"
+                             f" \033[94m({_szs}){C_RST}  {C_KEY}(s){C_RST} Show")
+                except Exception:
+                    _stat = f"{C_GRN}Scan saved{C_RST}  {C_KEY}(s){C_RST} Show"
+            elif _notifs:
+                _sm, _sc = _notifs[-1]
+                _stat = f"{_sc}{_sm}{C_RST}"
             else:
-                status_msg = "OK"
-                status_col = C_RST
+                _stat = "OK"
+            draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {_stat}", "", "║")
 
-            draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {status_col}{status_msg}{C_RST}", "", "║")
-
+            # ── SYS STATS: H-2 ───────────────────────────────────────────
             sys_stats = tui_sys_stats()
             buf.append(f"\033[{H-2};1H║ {sys_stats}\033[K")
             buf.append(f"\033[{H-2};{W+2}H║")
 
+            # ── FOOTER: H-1 ──────────────────────────────────────────────
             foot_vis = f"[ ptz-master v {VERSION} ]═(ESC/Q)"
             foot     = f"[{C_CYN} ptz-master v {VERSION} {C_RST}]═{C_KEY}(ESC/Q){C_RST}"
             bottom   = f"╚{'═'*(W-len(foot_vis)-1)}{foot}═╝"
             buf.append(f"\033[{H-1};1H{bottom}")
+
             sys.stdout.write("".join(buf) + "\033[?25l")
             sys.stdout.flush()
 
-            # ── hitboxes ──────────────────────────────────────────────────
+            # ── HITBOXES ──────────────────────────────────────────────────
             _bp.clear()
-            _bp['F1']  = (1,  W - 15, W)
-            _bp['m']   = (4,  3, 25);  _bp['d'] = (4, 26, 47); _bp['a'] = (4, 48, W)
-            _bp['f']   = (5,  3, 25);  _bp['r'] = (5, 26, 47); _bp['c'] = (5, 48, W)
-            _bp['h']   = (6,  3, 25);  _bp['n'] = (6, 26, 47); _bp['x'] = (6, 48, 68); _bp['y'] = (6, 69, W)
-            _bp['v']   = (7,  3, 25);  _bp['t'] = (7, 26, W)
-            _bp['p']   = (9,  3, W)
-            # PDF section hitboxes (mode buttons 1-6 in rows 12-13)
-            # Approximate column positions (computed from _mode_btn widths ~18 chars each)
-            _bp['pdf1'] = (PDF_ROW_MODE1,  2, 20)
-            _bp['pdf2'] = (PDF_ROW_MODE1, 21, 40)
-            _bp['pdf3'] = (PDF_ROW_MODE1, 41, W)
-            _bp['pdf4'] = (PDF_ROW_MODE2,  2, 20)
-            _bp['pdf5'] = (PDF_ROW_MODE2, 21, 40)
-            _bp['pdf6'] = (PDF_ROW_MODE2, 41, W)
-            _bp['pdf8'] = (PDF_ROW_GEN,    2, W)    # [8] Generate
-            _bp['s']   = (H - 3, 2, W)
-            _bp['ESC'] = (H - 1, W - 15, W)
-            # T(r)ans(l)ate hitboxes – row 7, right section (after Dest)
-            # Approximate: Viewer col1_4 ~25 chars, Dest col2_4 ~40 chars → translate starts ~67
+            _bp['F1']  = (1,  W - 9, W)
+            # scanner config rows 4-7
+            _bp['m']   = (4,  2, 24);  _bp['d'] = (4, 25, 46); _bp['a'] = (4, 47, W)
+            _bp['f']   = (5,  2, 24);  _bp['r'] = (5, 25, 46); _bp['c'] = (5, 47, W)
+            _bp['h']   = (6,  2, 24);  _bp['n'] = (6, 25, 46); _bp['x'] = (6, 47, 68); _bp['y'] = (6, 69, W)
+            _bp['v']   = (7,  2, 24);  _bp['t'] = (7, 25, W-22)
             _translate_col_start = W - 20
-            _bp['T']   = (7, _translate_col_start,     _translate_col_start + 4)   # (T) open browser
-            _bp['l']   = (7, _translate_col_start + 7, _translate_col_start + 11)  # (l) toggle lang
-
+            _bp['T']   = (7, _translate_col_start,     _translate_col_start + 4)
+            _bp['l']   = (7, _translate_col_start + 7, _translate_col_start + 11)
+            # scanner ops row 9
+            # _bp['p'] ends at W-15 so that _bp['s'] (W-14..W) can be reached
+            _bp['p']   = (9,  2, W-15)
+            _bp['s']   = (9,  W-14, W)   # (s) Show – right side of row 9
+            # PDF config rows 11-12
+            _bp['pdf1'] = (11,  2, 20)
+            _bp['pdf2'] = (11, 21, 44)
+            _bp['pdf3'] = (11, 45, W)
+            _bp['pdf4'] = (12,  2, 24)
+            _bp['pdf5'] = (12, 25, 52)
+            _bp['pdf6'] = (12, 53, W)
+            # PDF ops rows 14-16
+            _bp['pdf8'] = (15,  2, W)
+            # Dynamiczne przypisanie koordynatów na podstawie zmierzonej szerokości przycisku
+            _bp['pdfD'] = (16,  2, W - _right_len + 1)
+            _bp['pdfO'] = (16, W - _right_len + 2, W + 1)
+            # (s) Show in status row H-3 (visible only after scan_phase==3)
+            if scan_phase == 3 and last_scanned_file and scan_ok[0]:
+                _bp['s_stat'] = (H-3, W-14, W)
+            # session log scroll (click top half = scroll up, bottom half = down)
+            _log_mid = LOG_ROW0 + log_vis // 2
+            _bp['log_up']   = (LOG_ROW0, 2, W)   # first log row click = scroll up
+            # ESC/Q
+            _bp['ESC'] = (H-1, W - len("(ESC/Q)") - 1, W)
 
         full_redraw = [True]
         import signal
@@ -7378,14 +7457,13 @@ class PTZMasterApp:
 
         running        = True
         need_draw      = True
-        _notif_deadline = 0.0   # time until which notification forces redraws
+        _notif_deadline = 0.0
         try:
             tty.setcbreak(fd)
             sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
 
             while running:
-                # keep redrawing while a notification is live
                 if time.time() < _notif_deadline:
                     need_draw = True
 
@@ -7396,6 +7474,14 @@ class PTZMasterApp:
                 key = get_key(0.25)
                 _mk = key
 
+                # session log scroll via mouse wheel
+                if key == Key.MOUSE_SCROLL_UP:
+                    log_scroll = min(log_scroll + 1, max(0, len(session_logs) - 1))
+                    need_draw = True; continue
+                if key == Key.MOUSE_SCROLL_DOWN:
+                    log_scroll = max(log_scroll - 1, 0)
+                    need_draw = True; continue
+
                 if isinstance(key, MouseEvent) and not key.release:
                     r, c = key.row, key.col
                     mouse_hit = False
@@ -7404,6 +7490,7 @@ class PTZMasterApp:
                         if r == box_r and box_c_start <= c <= box_c_end:
                             if k == 'ESC': running = False
                             elif k == 'F1': _mk = Key.F1
+                            elif k == 's_stat': _mk = 's'  # status-row (s) Show → same action as key 's'
                             else: _mk = k
                             mouse_hit = True; break
 
@@ -7497,13 +7584,24 @@ class PTZMasterApp:
                         else:
                             _cmd = [viewer, last_scanned_file]
 
+                        _env = dict(os.environ)
+                        if not _env.get("DISPLAY"):
+                            _env["DISPLAY"] = ":0"
                         try:
                             # Start external viewer process without blocking
-                            subprocess.Popen(_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            subprocess.Popen(_cmd,
+                                             stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL,
+                                             env=_env,
+                                             start_new_session=True)
                         except FileNotFoundError:
                             # Fallback to xdg-open if chosen viewer missing
                             try:
-                                subprocess.Popen(['xdg-open', last_scanned_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                subprocess.Popen(['xdg-open', last_scanned_file],
+                                                 stdout=subprocess.DEVNULL,
+                                                 stderr=subprocess.DEVNULL,
+                                                 env=_env,
+                                                 start_new_session=True)
                                 notify(f"Viewer '{viewer}' not found, using xdg-open", "warning")
                             except Exception as e2:
                                 notify(f"Error: '{viewer}' not found", "error")
@@ -7551,10 +7649,14 @@ class PTZMasterApp:
                     # Execute scan in a separate thread
                     threading.Thread(target=scan_task, daemon=True).start()
 
-                    # UI Refresh loop
+                    # UI Refresh loop z obsługą przerwania (ESC/q)
                     while not scan_done.is_set():
                         _draw()
-                        time.sleep(0.2)
+                        # Ulepszenie: nasłuchiwanie klawiszy bez blokowania, aby móc przerwać akcję
+                        key_check = get_key(timeout=0.2)
+                        if key_check in ('\x1b', 'q', 'Q'):
+                            _slog("Przerwano operację przez użytkownika...")
+                            break
 
                     # Restore mouse support
                     sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
@@ -7571,8 +7673,10 @@ class PTZMasterApp:
                                 f.write(last_scanned_file)
                         except Exception:
                             pass
+                        _slog(f"✓ {os.path.basename(last_scanned_file)}")
                         notify(f"Scan ready: {os.path.basename(last_scanned_file)}", "success")
                     else:
+                        _slog(f"✗ Scan FAILED: {scan_result[1]}")
                         notify(f"Scan failed: {scan_result[1]}", "error")
 
                     # Force immediate redraw so notification appears right away,
@@ -7602,9 +7706,14 @@ class PTZMasterApp:
                         notify(f"Dir not found: {_open_target}", "warning")
                     else:
                         try:
+                            _env = dict(os.environ)
+                            if not _env.get("DISPLAY"):
+                                _env["DISPLAY"] = ":0"
                             subprocess.Popen(['xdg-open', _open_target],
                                              stdout=subprocess.DEVNULL,
-                                             stderr=subprocess.DEVNULL)
+                                             stderr=subprocess.DEVNULL,
+                                             env=_env,
+                                             start_new_session=True)
                             logger.info(f"xdg-open {_open_target}")
                             notify(f"Opening: {_open_target}", "info")
                         except FileNotFoundError:
@@ -7643,6 +7752,7 @@ class PTZMasterApp:
                                    _gl.glob(os.path.join(pdf_dir, "*.JPG")))
                     logger.info(f"PDF generate start: dir={pdf_dir} mode={pdf_mode_sel} "
                                 f"files={len(_jpgs)}")
+                    _slog(f"PDF start: {len(_jpgs)} files, mode [{pdf_mode_sel}]")
 
                     if not _jpgs:
                         notify(f"No JPG files in {pdf_dir}", "warning")
@@ -7676,6 +7786,12 @@ class PTZMasterApp:
                         _tmp_pages = []
                         _failed    = []
 
+                        # Initialize PDF progress for TUI
+                        pdf_phase = 1
+                        pdf_total_files = len(_jpgs)
+                        pdf_pct = 0
+                        pdf_current_file = ""
+
                         sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
                         sys.stdout.flush()
 
@@ -7687,24 +7803,10 @@ class PTZMasterApp:
                             # label on page: same clean name
                             _label   = f"{_fn_safe[:-4]} #{_i}"
 
-                            # progress bar in status row
-                            _bar = "█" * int(_i / len(_jpgs) * 15) + "░" * (15 - int(_i / len(_jpgs) * 15))
-                            _prog_txt = f"⚙ PDF {_i}/{len(_jpgs)} [{_bar}] {_fn}"
-                            try:
-                                term_w2, term_h2 = shutil.get_terminal_size()
-                            except:
-                                term_w2, term_h2 = 80, 24
-                            _H2 = max(20, min(30, term_h2 - 2))
-                            _W2 = max(60, min(120, term_w2 - 2))
-                            # pad content to fill the row, add right border ║
-                            _inner = f" 🔔 \033[96m{_prog_txt}\033[0m"
-                            _pad_w = _W2 - 1 - len(f" 🔔 {_prog_txt}")
-                            sys.stdout.write(
-                                f"\033[{_H2-3};1H"
-                                f"║{_inner}{' ' * max(0, _pad_w)}║\033[K"
-                            )
-                            sys.stdout.flush()
-                            sys.stdout.flush()
+                            # Update PDF progress for TUI (replaces old status row write)
+                            pdf_current_file = _fn
+                            pdf_pct = int(_i / len(_jpgs) * 100)
+                            _draw()
 
                             if _no_scale:
                                 _cmd = [
@@ -7804,9 +7906,14 @@ class PTZMasterApp:
                                     _pdf_sz_s = "?"
                                 _fail_info = f"  ⚠{len(_failed)} skipped" if _failed else ""
                                 logger.info(f"PDF ready: {_pdf_out} size={_pdf_sz_s} pages={len(_tmp_pages)}")
+                                _slog(f"✓ PDF ready: {_pdf_name}  {_pdf_sz_s}  ({len(_tmp_pages)}p){_fail_info}")
                                 if _failed:
                                     logger.warning(f"Skipped: {', '.join(_failed)}")
                                 notify(f"PDF ✓ {_pdf_name}  {_pdf_sz_s}  ({len(_tmp_pages)}p){_fail_info}", "success")
+                                # Mark PDF as done for TUI
+                                pdf_phase = 2
+                                pdf_pct = 100
+                                _draw()
                                 try:
                                     subprocess.Popen(['xdg-open', pdf_dir],
                                                      stdout=subprocess.DEVNULL,
@@ -7832,6 +7939,8 @@ class PTZMasterApp:
                         except Exception as _ce:
                             logger.warning(f"PDF tmp cleanup error: {_ce}")
 
+                        # Reset PDF phase after completion (keep phase 2 briefly to show "ready")
+                        # pdf_phase will stay 2 until next PDF generation
                         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
                         sys.stdout.flush()
                         full_redraw[0] = True
