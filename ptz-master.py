@@ -153,7 +153,6 @@ def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
 # =============================================================================
 # ARMORED TUI v1.3 - slot drawing
 # =============================================================================
-import termios, tty
 
 _EMOJI_CACHE = {}
 
@@ -2402,17 +2401,18 @@ class ONVIFClient:
         self._session = session
         return self._session
 
-    def _send_onvif_request(self, url: str, body: str, timeout: tuple = (1.5, 3.5)) -> Optional[str]:
+    def _send_onvif_request(self, url: str, body: str, timeout: tuple = (1.5, 3.5)) -> str:
         """
         Safely send a SOAP request to an ONVIF camera with split timeout.
 
         Args:
             url: Full URL of the ONVIF endpoint
             body: SOAP request body (XML)
-            timeout: Krotka (connect_timeout, read_timeout) w sekundach
+            timeout: (connect_timeout, read_timeout) in seconds
 
         Returns:
-            Server response as a string, or None on error
+            Server response as a string, or "" on error (never None).
+            Callers can safely use `if xml:` or `if 'tag' in xml:`.
         """
         try:
             session = self._get_session()
@@ -2426,27 +2426,27 @@ class ONVIFClient:
                 return response.text
             else:
                 logger.warning(f"ONVIF unexpected status {response.status_code} from {url}")
-                return None
+                return ""
 
         except requests.exceptions.ConnectTimeout:
             logger.warning(f"ONVIF connection timeout – camera {self.cam.ip}:{self.cam.ports.onvif} unreachable")
-            return None
+            return ""
 
         except requests.exceptions.ReadTimeout:
             logger.warning(f"ONVIF read timeout – camera {self.cam.ip} connected but not responding")
-            return None
+            return ""
 
         except requests.exceptions.ConnectionError as e:
             logger.debug(f"ONVIF connection error for {self.cam.ip}: {e}")
-            return None
+            return ""
 
         except requests.exceptions.RequestException as e:
             logger.error(f"ONVIF request failed for {self.cam.ip}: {e}")
-            return None
+            return ""
 
         except Exception as e:
             logger.exception(f"Unexpected error in ONVIF request to {url}: {e}")
-            return None
+            return ""
 
     
     def get_profiles(self) -> Tuple[List[CameraProfile], str]:
@@ -2460,7 +2460,7 @@ class ONVIFClient:
 
         # Use the new, safe method with split timeout
         xml = self._send_onvif_request(url, body, timeout=(1.5, 3.5))
-        if xml is None:
+        if not xml:
             # Error already logged inside _send_onvif_request
             return ([], "")
 
@@ -2551,7 +2551,7 @@ class ONVIFClient:
         logger.debug(f"Getting URI for token {token}")
 
         xml = self._send_onvif_request(url, body, timeout=(1.5, 3.5))
-        if xml is None:
+        if not xml:
             return ""
 
         if '<tt:Uri>' in xml:
@@ -2628,7 +2628,7 @@ class ONVIFClient:
 </s:Envelope>'''
 
         xml = self._send_onvif_request(url, body, timeout=(1.5, 2.5))
-        if xml is None:
+        if not xml:
             return None
 
         pan_tilt = re.search(
@@ -2689,7 +2689,7 @@ class ONVIFClient:
         )
 
         xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
-        if xml is None:
+        if not xml:
             return ["VideoSource_1", "VideoSourceToken_1", "000", "0", "1"]
 
         tokens = re.findall(r'<trt:VideoSources[^>]*token="([^"]+)"', xml)
@@ -2758,10 +2758,7 @@ class ONVIFClient:
                     )
 
                     xml = self._send_onvif_request(url, body, timeout=(1.5, 2.5))
-                    if xml is None:
-                        if "ConnectionError" in str(xml) or "ConnectTimeout" in str(xml):
-                            dead_endpoints.add(url)
-                            break
+                    if not xml:
                         continue
 
                     if "Brightness" in xml or "Contrast" in xml:
@@ -2812,7 +2809,7 @@ class ONVIFClient:
         )
 
         xml = self._send_onvif_request(url, body, timeout=(1.5, 3.0))
-        if xml is None:
+        if not xml:
             return ""
 
         m = re.search(r'<tt:Uri>([^<]+)</tt:Uri>', xml)
@@ -3085,7 +3082,7 @@ class RTSPScanner:
                     'ffprobe',
                     '-v', 'quiet',
                     '-rtsp_transport', 'tcp',
-                    '-timeout', '3000000',
+                    '-timeout', '9000000',
                     '-probesize', '1000000',
                     '-analyzeduration', '1000000',
                     '-show_streams',
@@ -3095,7 +3092,7 @@ class RTSPScanner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 universal_newlines=True,
-                timeout=4
+                timeout=9
             )
 
             if result.returncode != 0 or not result.stdout:
@@ -3404,6 +3401,7 @@ class PlayerWatchdog:
             return None
 
         connected_once = False
+        _stable_since  = time.time()   # tracks continuous stable-playback time
         while not self._stop.is_set():
             time.sleep(self.POLL_INTERVAL)
             if self._stop.is_set():
@@ -3454,6 +3452,7 @@ class PlayerWatchdog:
             if not connected_once:
                 connected_once = True
                 PlayerWatchdog.reset_restart_count(self.cam.name)
+                _stable_since = now   # begin stable-uptime timer
                 logger.info(f"Watchdog: {self.cam.name} streaming OK, reset restart counter")
                 ip = getattr(self.cam, 'image_params', None)
                 if ip and ip != Camera.DEFAULT_IMAGE_PARAMS:
@@ -3472,6 +3471,14 @@ class PlayerWatchdog:
                         logger.info(f"Watchdog: applied image_params for {self.cam.name}")
                     except Exception as e:
                         logger.warning(f"Watchdog: image_params apply failed: {e}")
+
+            # Periodic counter reset: if stream stable for 10 min, forgive old restarts
+            STABLE_RESET_SECS = 600
+            if connected_once and (now - _stable_since) > STABLE_RESET_SECS:
+                if PlayerWatchdog._get_restart_count(self.cam.name) > 0:
+                    PlayerWatchdog.reset_restart_count(self.cam.name)
+                    logger.info(f"Watchdog: {self.cam.name} stable for {STABLE_RESET_SECS}s – restart counter reset")
+                _stable_since = now   # reset window
 
             if self._last_pts is None or pts > self._last_pts + 0.01:
                 self._last_pts = pts
@@ -3508,6 +3515,9 @@ class PlayerWatchdog:
         self.stop()
 
     def _restart(self):
+        # Do not restart if stop was requested externally (e.g. manual kill)
+        if self._stop.is_set():
+            return
         count = PlayerWatchdog._inc_restart_count(self.cam.name)
         if count > PlayerWatchdog.MAX_RESTARTS:
             logger.error(
@@ -7229,6 +7239,7 @@ class PTZMasterApp:
             if not _EMOJI_CACHE:
                 # Added all scanner TUI icons to emoji-width calibration table
                 calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░","🔩","🛠","📝","📂","📜","▶","✓","✗"])
+                _EMOJI_CACHE['🛠'] = 1  # override: measurement returns 1 for this glyph
             buf = ['\033[2J\033[H']
             full_redraw[0] = False
             try:   term_w, term_h = shutil.get_terminal_size()
@@ -12432,7 +12443,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     if r == "eof": auto_run = False; result = "eof_next"; running = False; break
 
             _tw, _th = _term_size()
-            _term_ok = (_th >= MIN_H and _tw >= MIN_W)
+            _term_ok = (_th >= MIN_H and _tw >= MIN_W)  # skip key handling when too small
 
             ch = get_key(timeout=timeout)
 
@@ -12626,7 +12637,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                 _first_draw = True
 
     finally:
-        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25l')
+        # Disable mouse, restore cursor, exit alt-screen
+        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l')
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -12642,7 +12654,8 @@ def _show_playlist(files, current_idx):
     """
     import os, stat as _stat, time as _time
     fd  = sys.stdin.fileno()
-    W   = 78
+    _tw, _th = shutil.get_terminal_size(fallback=(80, 24))
+    W   = min(78, _tw - 2)
     GRN = Colors.GREEN;  RED = Colors.RED;   YLW = Colors.YELLOW
     CYN = Colors.CYAN;   DIM = Colors.DIM;   RST = Colors.RESET
     BLU = Colors.BLUE;   WHT = Colors.WHITE; MAG = Colors.MAGENTA
@@ -12660,8 +12673,10 @@ def _show_playlist(files, current_idx):
     col_w        = W - 4       # column width
     orientation  = "V"         # V/H
     show_hidden  = False
-    filter_str   = ""          # wpisany filtr
-    page_size    = 10
+    filter_str   = ""          # current filter string
+    # page_size: number of visible list rows — derived from terminal height
+    # Header uses rows 1-3 (4 with filter), nav footer 1 row, borders 2 rows
+    page_size    = max(4, _th - 7)
 
     VIDEO_EXT = {".mp4",".mkv",".avi",".mov",".wmv",".flv",".ts",".mpg",
                  ".mpeg",".m4v",".webm",".ogv",".3gp",".vob",".mts",".m2ts"}
