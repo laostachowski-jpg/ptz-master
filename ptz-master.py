@@ -158,6 +158,9 @@ import termios, tty
 _EMOJI_CACHE = {}
 
 def _measure_emoji(ch: str) -> int:
+    # Guard: termios/tty only available on Unix TTY environments
+    if not _UNIX_TTY:
+        return 2 if ord(ch) > 127 else 1
     try:
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
@@ -5713,9 +5716,18 @@ class PTZMasterApp:
 
         while True:
             try:
+                # Disable mouse before readline input – mouse escape sequences
+                # would otherwise appear as garbage in the prompt
+                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h')
+                sys.stdout.flush()
                 new_val = rlinput(prompt_str, current).strip()
             except EOFError:
                 new_val = ""
+            finally:
+                # Restore mouse (caller's scanner loop re-enables it anyway,
+                # but be explicit here so it works in all call sites)
+                sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+                sys.stdout.flush()
 
             if not new_val:
                 print(f"{YLW}  Keeping current value{RST}")
@@ -7087,6 +7099,23 @@ class PTZMasterApp:
         date_format = 0
         override_num = None
 
+        # ── ImageMagick PDF section state ─────────────────────────────────
+        # Each entry: (size_str, dpi_str, page_fmt, canvas_w, canvas_h, font_sz, dpi)
+        PDF_MODES = {
+            "1": ("   595x842",   " 72 DPI",  "A4",     595,    842,  16,   72),
+            "2": (" 1240x1754",   "150 DPI",  "A4",    1240,   1754,  24,  150),
+            "3": (" 2480x3508",   "300 DPI",  "A4",    2480,   3508,  30,  300),
+            "4": (" 4961x7016",   "600 DPI",  "A4",    4961,   7016,  50,  600),
+            "5": ("9921x14031",  "1200 DPI",  "A4",    9921,  14031,  50, 1200),
+            "6": ("   NoScale",   "",      "NoScale",     0,      0,  28,    0),
+        }
+        pdf_mode_sel = "2"                                 # default DPI mode
+        pdf_dir      = str(cam.scan_dest or SCAN_DIR)     # defaults to scan dest
+
+        # ── Translate section ─────────────────────────────────────────────
+        TRANSLATE_LANGS = ["pl", "en", "de", "fr", "es", "uk", "ru", "zh"]
+        translate_lang  = "pl"   # (l) cycles TARGET language (tl= in Google Translate URL)
+
         scan_phase = 0          # 0: idle, 1: preparing, 2: scanning, 3: done
         scan_pct = 0
         scan_ok = [False]
@@ -7126,10 +7155,8 @@ class PTZMasterApp:
         def _draw():
             if not _EMOJI_CACHE:
                 calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░"])
-            buf = []
-            if full_redraw[0]:
-                buf.append('\033[2J\033[H')
-                full_redraw[0] = False
+            buf = ['\033[2J\033[H']   # always full clear – eliminates ghost frames
+            full_redraw[0] = False
             try:
                 term_w, term_h = shutil.get_terminal_size()
             except:
@@ -7171,11 +7198,12 @@ class PTZMasterApp:
             col1_4 = f"{C_KEY}(v){C_RST} {C_LAB}Viewer:{C_RST} {C_VAL}{cam.scan_viewer:<11}{C_RST}"
             dest_str = str(cam.scan_dest)
             col2_4 = f"{C_KEY}(t){C_RST} {C_LAB}Dest  :{C_RST} {C_VAL}{dest_str}{C_RST}"
+            col3_4 = f"  {C_KEY}(T){C_RST}rans{C_KEY}(l){C_RST}ate=[{C_YLW}{translate_lang}{C_RST}]"
 
             draw_slot(buf, 4, 1, W+2, f"║ {col1_1}{col2_1}{col3_1}", "", "║")
             draw_slot(buf, 5, 1, W+2, f"║ {col1_2}{col2_2}{col3_2}", "", "║")
             draw_slot(buf, 6, 1, W+2, f"║ {col1_3}{col2_3}{col3_3}", "", "║")
-            draw_slot(buf, 7, 1, W+2, f"║ {col1_4}{col2_4}", "", "║")
+            draw_slot(buf, 7, 1, W+2, f"║ {col1_4}{col2_4}{col3_4}", "", "║")
             buf.append(f"\033[8;1H╠{'═'*W}╣")
 
             file_base = f"{date_str}_{cam.scan_desc or 'none'}_{num_str}.{cam.scan_format}"
@@ -7192,11 +7220,95 @@ class PTZMasterApp:
             draw_slot(buf, 9, 1, W+2, f"║ {prog}", "", "║")
             buf.append(f"\033[10;1H╠{'═'*W}╣")
 
-            for r in range(11, H-3):
-                draw_slot(buf, r, 1, W+2, "║", "", "║")
+            # ── PDF section rows 11..H-7, status H-6..H-3, sys H-2, foot H-1
+            # Layout (rows relative to terminal):
+            #  11: ╠═══[ 📝 Imagemagick PDF  Mode: [N](size DPI) ]═══╣
+            #  12: ║ [1](595x842 72) [2](1240x1754 150) [3](2480x3508 300)
+            #  13: ║ [4](4961x7016 600) [5](9921x14031 1200)  [6](NoScale)
+            #  14: ╠═══════════════════════════════════════════════════╣
+            #  15: ║ [8] ▶ Generate PDF: <name>.pdf
+            #  16: ║ [t] Dir: <pdf_dir>             (o) Open 📂
+            #  17: ╠══════...══╣   (if terminal tall enough, else skip)
+            # H-3: ║ 🔔 status
+            # H-2: ║ sys_stats
+            # H-1: ╚══...═(ESC/Q)═╝
 
+            PDF_ROW_SEP1  = 11   # ╠═[ 📝 Imagemagick PDF … ]═╣
+            # All PDF row numbers computed from PDF_ROW_SEP1=11 + added separator
+            # row 11: badge content
+            # row 12: ╠═══╣  separator
+            # row 13: modes 1-3
+            # row 14: modes 4-6
+            # row 15: ╠═══╣  separator
+            # row 16: [8] Generate
+            # row 17: [t] Dir
+            # row 18: ╠═══╣  separator (if space)
+            _PR = PDF_ROW_SEP1          # =11
+            PDF_ROW_SEP_A  = _PR + 1   # 12 – separator after badge
+            PDF_ROW_MODE1  = _PR + 2   # 13 – modes 1-3
+            PDF_ROW_MODE2  = _PR + 3   # 14 – modes 4-6
+            PDF_ROW_SEP2   = _PR + 4   # 15 – separator after modes
+            PDF_ROW_GEN    = _PR + 5   # 16 – [8] Generate
+            PDF_ROW_DIR    = _PR + 6   # 17 – [t] Dir
+            PDF_ROW_SEP3   = _PR + 7   # 18 – separator before empty rows
+
+            # ── row 11: plain content row with mode badge ─────────────────
+            _m          = PDF_MODES[pdf_mode_sel]
+            _badge_col  = (f" 📝 Imagemagick PDF  "
+                           f"Mode: {C_KEY}[{pdf_mode_sel}]{C_RST}"
+                           f" {C_CYN}({_m[0].strip()} {_m[1].strip()}){C_RST}")
+            draw_slot(buf, _PR, 1, W+2, f"║{_badge_col}", "", "║")
+            buf.append(f"\033[{PDF_ROW_SEP_A};1H╠{'═'*W}╣")
+
+            # ── rows 12-13: mode buttons [1]-[6] ─────────────────────────
+            def _mode_btn(k):
+                m = PDF_MODES[k]
+                label = f"({m[0].strip()} {m[1].strip()})" if m[1] else f"({m[0].strip()})"
+                if k == pdf_mode_sel:
+                    # active: [N] yellow, label cyan on dark bg
+                    return f"{C_YLW}[{k}]{C_RST}\033[48;5;234m{C_CYN}{label}{C_RST}"
+                return f"{C_KEY}[{k}]{C_RST}{label}"
+
+            line12 = f" {_mode_btn('1')}  {_mode_btn('2')}  {_mode_btn('3')}"
+            line13 = f" {_mode_btn('4')}  {_mode_btn('5')}  {_mode_btn('6')}"
+            draw_slot(buf, PDF_ROW_MODE1, 1, W+2, f"║{line12}", "", "║")
+            draw_slot(buf, PDF_ROW_MODE2, 1, W+2, f"║{line13}", "", "║")
+            buf.append(f"\033[{PDF_ROW_SEP2};1H╠{'═'*W}╣")
+
+            # ── row 15: [8] Generate PDF ──────────────────────────────────
+            import datetime as _dt
+            _today     = _dt.date.today().strftime("%Y-%m-%d")
+            _pdf_name  = f"{_today}_{os.path.basename(pdf_dir.rstrip('/'))}_print.pdf"
+            _pdf_out   = os.path.join(pdf_dir, _pdf_name)
+            _gen_line  = (f" {C_KEY}[8]{C_RST} {C_YLW}▶ Generate PDF:{C_RST}"
+                          f" {C_CYN}{_pdf_name}{C_RST}")
+            draw_slot(buf, PDF_ROW_GEN, 1, W+2, f"║{_gen_line}", "", "║")
+
+            # ── row 17: [D] Dir edit  [O] Open filemanager ──────────────
+            _OPEN_BTN   = "[O] Open 📂"          # plain length = 13
+            _OPEN_PLAIN = len("[O] Open ")  + 2   # visible chars without emoji width fudge → 11
+            _dir_avail  = W - 2 - len(" [D] Dir: ") - 2 - len(_OPEN_BTN)
+            _dir_short  = pdf_dir if len(pdf_dir) <= _dir_avail else "…" + pdf_dir[-(_dir_avail-1):]
+            _dir_line   = (f" {C_KEY}[D]{C_RST} Dir: {C_CYN}{_dir_short}{C_RST}"
+                           f"  {C_KEY}[O]{C_RST} Open 📂")
+            draw_slot(buf, PDF_ROW_DIR, 1, W+2, f"║{_dir_line}", "", "║")
+            # hitbox [D]: cols 2 … W-15,  [O]: cols W-14 … W
+            _bp['pdfD'] = (PDF_ROW_DIR,  2,    W-15)
+            _bp['pdfO'] = (PDF_ROW_DIR,  W-14, W)
+
+            # ── optional separator row 17 ─────────────────────────────────
+            if H - 3 > PDF_ROW_DIR + 1:
+                buf.append(f"\033[{PDF_ROW_SEP3};1H╠{'═'*W}╣")
+                for _r in range(PDF_ROW_SEP3 + 1, H - 3):
+                    draw_slot(buf, _r, 1, W+2, "║", "", "║")
+            else:
+                for _r in range(PDF_ROW_DIR + 1, H - 3):
+                    draw_slot(buf, _r, 1, W+2, "║", "", "║")
+
+            # ── status / sys / footer ─────────────────────────────────────
             now_ts = time.time()
-            raw_notifs = [(msg, col) for msg, col, ts in NotificationManager()._queue if now_ts - ts < NotificationManager()._lifetime]
+            raw_notifs = [(msg, col) for msg, col, ts in NotificationManager()._queue
+                          if now_ts - ts < NotificationManager()._lifetime]
 
             if raw_notifs:
                 status_msg = raw_notifs[-1][0]
@@ -7206,10 +7318,11 @@ class PTZMasterApp:
                     _sz = os.path.getsize(last_scanned_file)
                     _sz_s = f"{_sz/1024:.1f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
                     _fname = os.path.basename(last_scanned_file)
-                    status_msg = f"{C_GRN}Scan saved successfully ✓{C_RST} {C_CYN}{_fname}{C_RST} \033[94m({_sz_s}){C_RST}  {C_KEY}(s){C_RST} Show"
+                    status_msg = (f"{C_GRN}Scan saved ✓{C_RST} {C_CYN}{_fname}{C_RST}"
+                                  f" \033[94m({_sz_s}){C_RST}  {C_KEY}(s){C_RST} Show")
                     status_col = C_GRN
                 except:
-                    status_msg = f"{C_GRN}Scan saved successfully{C_RST}  {C_KEY}(s){C_RST} Show"
+                    status_msg = f"{C_GRN}Scan saved{C_RST}  {C_KEY}(s){C_RST} Show"
                     status_col = C_GRN
             else:
                 status_msg = "OK"
@@ -7218,26 +7331,41 @@ class PTZMasterApp:
             draw_slot(buf, H-3, 1, W+2, f"║ 🔔 {status_col}{status_msg}{C_RST}", "", "║")
 
             sys_stats = tui_sys_stats()
-            buf.append(f"\033[{H-2};1H║ {sys_stats}")
+            buf.append(f"\033[{H-2};1H║ {sys_stats}\033[K")
             buf.append(f"\033[{H-2};{W+2}H║")
 
             foot_vis = f"[ ptz-master v {VERSION} ]═(ESC/Q)"
-            foot = f"[{C_CYN} ptz-master v {VERSION} {C_RST}]═{C_KEY}(ESC/Q){C_RST}"
-            bottom = f"╚{'═'*(W-len(foot_vis)-1)}{foot}═╝"
+            foot     = f"[{C_CYN} ptz-master v {VERSION} {C_RST}]═{C_KEY}(ESC/Q){C_RST}"
+            bottom   = f"╚{'═'*(W-len(foot_vis)-1)}{foot}═╝"
             buf.append(f"\033[{H-1};1H{bottom}")
             sys.stdout.write("".join(buf) + "\033[?25l")
             sys.stdout.flush()
 
-            # Update dynamic hitboxes based on current terminal dimensions
+            # ── hitboxes ──────────────────────────────────────────────────
             _bp.clear()
-            _bp['F1'] = (1, W - 15, W)
-            _bp['m']  = (4, 3, 25);  _bp['d'] = (4, 26, 47); _bp['a'] = (4, 48, W)
-            _bp['f']  = (5, 3, 25);  _bp['r'] = (5, 26, 47); _bp['c'] = (5, 48, W)
-            _bp['h']  = (6, 3, 25);  _bp['n'] = (6, 26, 47); _bp['x'] = (6, 48, 68); _bp['y'] = (6, 69, W)
-            _bp['v']  = (7, 3, 25);  _bp['t'] = (7, 26, W)
-            _bp['p']  = (9, 3, W)
-            _bp['s']  = (H - 3, 2, W) # Clicking anywhere on the status bar triggers preview
-            _bp['ESC']= (H - 1, W - 15, W)
+            _bp['F1']  = (1,  W - 15, W)
+            _bp['m']   = (4,  3, 25);  _bp['d'] = (4, 26, 47); _bp['a'] = (4, 48, W)
+            _bp['f']   = (5,  3, 25);  _bp['r'] = (5, 26, 47); _bp['c'] = (5, 48, W)
+            _bp['h']   = (6,  3, 25);  _bp['n'] = (6, 26, 47); _bp['x'] = (6, 48, 68); _bp['y'] = (6, 69, W)
+            _bp['v']   = (7,  3, 25);  _bp['t'] = (7, 26, W)
+            _bp['p']   = (9,  3, W)
+            # PDF section hitboxes (mode buttons 1-6 in rows 12-13)
+            # Approximate column positions (computed from _mode_btn widths ~18 chars each)
+            _bp['pdf1'] = (PDF_ROW_MODE1,  2, 20)
+            _bp['pdf2'] = (PDF_ROW_MODE1, 21, 40)
+            _bp['pdf3'] = (PDF_ROW_MODE1, 41, W)
+            _bp['pdf4'] = (PDF_ROW_MODE2,  2, 20)
+            _bp['pdf5'] = (PDF_ROW_MODE2, 21, 40)
+            _bp['pdf6'] = (PDF_ROW_MODE2, 41, W)
+            _bp['pdf8'] = (PDF_ROW_GEN,    2, W)    # [8] Generate
+            _bp['s']   = (H - 3, 2, W)
+            _bp['ESC'] = (H - 1, W - 15, W)
+            # T(r)ans(l)ate hitboxes – row 7, right section (after Dest)
+            # Approximate: Viewer col1_4 ~25 chars, Dest col2_4 ~40 chars → translate starts ~67
+            _translate_col_start = W - 20
+            _bp['T']   = (7, _translate_col_start,     _translate_col_start + 4)   # (T) open browser
+            _bp['l']   = (7, _translate_col_start + 7, _translate_col_start + 11)  # (l) toggle lang
+
 
         full_redraw = [True]
         import signal
@@ -7248,15 +7376,24 @@ class PTZMasterApp:
         fd = sys.stdin.fileno()
         old_term = termios.tcgetattr(fd)
 
-        running = True
+        running        = True
+        need_draw      = True
+        _notif_deadline = 0.0   # time until which notification forces redraws
         try:
             tty.setcbreak(fd)
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
 
             while running:
-                _draw()
-                key = get_key(0.15)
+                # keep redrawing while a notification is live
+                if time.time() < _notif_deadline:
+                    need_draw = True
+
+                if full_redraw[0] or need_draw:
+                    _draw()
+                    need_draw = False
+
+                key = get_key(0.25)
                 _mk = key
 
                 if isinstance(key, MouseEvent) and not key.release:
@@ -7274,18 +7411,21 @@ class PTZMasterApp:
 
                 if _mk == 'm':
                     cam.scan_mode = _cycled(MODES, cam.scan_mode)
-                    self.config_mgr.save()
+                    self.config_mgr.save(); need_draw = True
                 elif _mk == 'd':
                     try: idx = DPIS.index(cam.scan_dpi)
                     except ValueError: idx = 4
                     cam.scan_dpi = DPIS[(idx + 1) % len(DPIS)]
-                    self.config_mgr.save()
+                    self.config_mgr.save(); need_draw = True
                 elif _mk == 'f':
                     cam.scan_format = _cycled(FORMATS, cam.scan_format)
-                    self.config_mgr.save()
+                    self.config_mgr.save(); need_draw = True
                 elif _mk == 'a':
                     items = list(AREAS.keys())
                     ai = select_menu(items, selected=0, title="Scan area")
+                    # select_menu disables mouse in finally – restore it
+                    sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+                    sys.stdout.flush()
                     if ai >= 0:
                         key_ = items[ai]
                         if key_ == "Custom":
@@ -7293,9 +7433,13 @@ class PTZMasterApp:
                             if new_area: cam.scan_area = new_area
                         else: cam.scan_area = AREAS[key_]
                         self.config_mgr.save()
+                    full_redraw[0] = True
                 elif _mk == 'r':
                     items = list(RESIZES.keys())
                     ri = select_menu(items, selected=0, title="Output resize")
+                    # select_menu disables mouse in finally – restore it
+                    sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+                    sys.stdout.flush()
                     if ri >= 0:
                         key_ = items[ri]
                         if key_ == "Custom":
@@ -7303,28 +7447,37 @@ class PTZMasterApp:
                             if new_resize: cam.scan_resize = new_resize
                         else: cam.scan_resize = RESIZES[key_]
                         self.config_mgr.save()
+                    full_redraw[0] = True
                 elif _mk == 'c':
                     val = self._edit_param("Compression (0-100)", str(cam.scan_quality))
                     try:
                         cam.scan_quality = max(0, min(100, int(val)))
                         self.config_mgr.save()
                     except ValueError: pass
+                    full_redraw[0] = True
                 elif _mk == 'v':
                     cam.scan_viewer = _cycled(VIEWERS, cam.scan_viewer)
-                    self.config_mgr.save()
+                    self.config_mgr.save(); need_draw = True
                 elif _mk == 't':
+                    # (t) Dest – scanner destination directory
                     new_dest = self._edit_param("Destination directory", str(cam.scan_dest))
-                    if new_dest: cam.scan_dest = new_dest; self.config_mgr.save()
+                    if new_dest:
+                        cam.scan_dest = new_dest
+                        pdf_dir = new_dest   # sync PDF dir to same dest
+                        self.config_mgr.save()
+                    full_redraw[0] = True
                 elif _mk == 'n':
                     new_desc = self._edit_param("Desc (Enter=keep, empty=none)", cam.scan_desc)
                     if new_desc is not None: cam.scan_desc = new_desc.strip(); self.config_mgr.save()
-                elif _mk == 'h': date_format = 1 - date_format
+                    full_redraw[0] = True
+                elif _mk == 'h':
+                    date_format = 1 - date_format; need_draw = True
                 elif _mk == 'x':
                     if num_padding == -1: num_padding = 1
                     elif num_padding == 1: num_padding = 2
                     elif num_padding == 2: num_padding = 3
                     else: num_padding = -1
-                    self.config_mgr.save()
+                    self.config_mgr.save(); need_draw = True
                 elif _mk == 'y':
                     val = self._edit_param("Next file number (1-999)", str(_get_next_number()))
                     try:
@@ -7332,6 +7485,7 @@ class PTZMasterApp:
                         if 1 <= num <= 999: override_num = num
                         else: notify("Number must be 1-999", "warning")
                     except ValueError: pass
+                    full_redraw[0] = True
                 elif isinstance(_mk, str) and _mk.lower() == 's':
                     # Manual preview trigger
                     if last_scanned_file and os.path.exists(last_scanned_file):
@@ -7410,11 +7564,8 @@ class PTZMasterApp:
                     scan_ok[0] = scan_result[0]
 
                     if scan_ok[0]:
-                        # --- CRITICAL: We only store the path here ---
-                        # DO NOT CALL subprocess.Popen HERE!
                         last_scanned_file = scan_result[1]
-                        self.last_scanned_file = last_scanned_file  # Persist for main UI and next sessions
-                        # Save to disk for persistence across restarts
+                        self.last_scanned_file = last_scanned_file
                         try:
                             with open(os.path.join(BASE_DIR, ".last_scan"), 'w', encoding='utf-8') as f:
                                 f.write(last_scanned_file)
@@ -7424,7 +7575,266 @@ class PTZMasterApp:
                     else:
                         notify(f"Scan failed: {scan_result[1]}", "error")
 
-                    _draw()
+                    # Force immediate redraw so notification appears right away,
+                    # then keep redrawing for the notification lifetime (3s)
+                    full_redraw[0] = True
+                    _notif_deadline = time.time() + NotificationManager()._lifetime
+
+                    _draw()   # immediate paint
+
+                # ── PDF section handlers ───────────────────────────────────
+                elif _mk in ('pdf1','pdf2','pdf3','pdf4','pdf5','pdf6'):
+                    pdf_mode_sel = _mk[-1]
+                    need_draw = True
+
+                elif _mk == 'pdfD':
+                    new_dir = self._edit_param("PDF source dir", pdf_dir)
+                    if new_dir and os.path.isdir(new_dir):
+                        pdf_dir = new_dir
+                    elif new_dir:
+                        notify(f"Dir not found: {new_dir}", "warning")
+                    full_redraw[0] = True
+
+                elif _mk == 'pdfO' or (isinstance(_mk, str) and _mk in ('o', 'O')):
+                    # [O] – open PDF dir in filemanager immediately
+                    _open_target = os.path.realpath(pdf_dir)
+                    if not os.path.isdir(_open_target):
+                        notify(f"Dir not found: {_open_target}", "warning")
+                    else:
+                        try:
+                            subprocess.Popen(['xdg-open', _open_target],
+                                             stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL)
+                            logger.info(f"xdg-open {_open_target}")
+                            notify(f"Opening: {_open_target}", "info")
+                        except FileNotFoundError:
+                            notify("xdg-open not found – install xdg-utils", "error")
+                        except Exception as _e:
+                            notify(f"Open error: {_e}", "error")
+                            logger.error(f"xdg-open: {_e}")
+
+                elif _mk == 'T':
+                    # (T)ranslate → open Google Translate Images in browser
+                    # sl=auto (detect source), tl=translate_lang (target chosen by user)
+                    _tl_url = (f"https://translate.google.com/?sl=auto"
+                               f"&tl={translate_lang}&op=images")
+                    try:
+                        subprocess.Popen(['xdg-open', _tl_url],
+                                         stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+                        logger.info(f"Google Translate Images opened: auto→{translate_lang}")
+                        notify(f"Google Translate [auto→{translate_lang}] opened", "info")
+                    except Exception as _e:
+                        notify(f"Browser error: {_e}", "error")
+                        logger.error(f"xdg-open translate error: {_e}")
+
+                elif _mk == 'l':
+                    # T(r)ans(l)ate → cycle through source language codes
+                    _li = TRANSLATE_LANGS.index(translate_lang)
+                    translate_lang = TRANSLATE_LANGS[(_li + 1) % len(TRANSLATE_LANGS)]
+                    notify(f"Translate target → [{translate_lang}]", "info")
+                    full_redraw[0] = True
+
+                elif _mk == 'pdf8' or (isinstance(_mk, str) and _mk == '8'):
+                    # ── Generate PDF from JPGs in pdf_dir ─────────────────
+                    import glob as _gl, datetime as _dt
+
+                    _jpgs = sorted(_gl.glob(os.path.join(pdf_dir, "*.jpg")) +
+                                   _gl.glob(os.path.join(pdf_dir, "*.JPG")))
+                    logger.info(f"PDF generate start: dir={pdf_dir} mode={pdf_mode_sel} "
+                                f"files={len(_jpgs)}")
+
+                    if not _jpgs:
+                        notify(f"No JPG files in {pdf_dir}", "warning")
+                        logger.warning(f"PDF generate: no JPG files in {pdf_dir}")
+                    elif not shutil.which("convert"):
+                        notify("ImageMagick 'convert' not installed", "error")
+                        logger.error("PDF generate: ImageMagick 'convert' not found in PATH")
+                    elif not shutil.which("gs"):
+                        notify("Ghostscript 'gs' not installed", "error")
+                        logger.error("PDF generate: Ghostscript 'gs' not found in PATH")
+                    else:
+                        _today    = _dt.date.today().strftime("%Y-%m-%d")
+                        _pdf_name = f"{_today}_{os.path.basename(pdf_dir.rstrip('/'))}_print.pdf"
+                        _pdf_out  = os.path.join(pdf_dir, _pdf_name)
+                        _pm       = PDF_MODES[pdf_mode_sel]
+                        _page_fmt, _cw, _ch, _font_sz, _target_dpi = _pm[2], _pm[3], _pm[4], _pm[5], _pm[6]
+                        _no_scale = (_page_fmt == "NoScale")
+                        logger.info(f"PDF output: {_pdf_out}  page={_page_fmt} "
+                                    f"canvas={_cw}x{_ch} dpi={_target_dpi} noscale={_no_scale}")
+
+                        _ML, _MR, _MT, _MB = 150, 50, 50, 150
+                        _IAX = _ML; _IAY = _MT
+                        _IAW = _cw - _ML - _MR if not _no_scale else 0
+                        _IAH = _ch - _MT - _MB if not _no_scale else 0
+
+                        notify(f"Generating PDF ({len(_jpgs)} pages)…", "info")
+                        _draw()
+
+                        _tmp_dir = os.path.join(pdf_dir, "_pdf_tmp")
+                        os.makedirs(_tmp_dir, exist_ok=True)
+                        _tmp_pages = []
+                        _failed    = []
+
+                        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                        sys.stdout.flush()
+
+                        for _i, _jpg in enumerate(_jpgs, 1):
+                            _fn  = os.path.basename(_jpg)
+                            # temp filename: sanitize chars that break filesystem or tools
+                            _fn_safe = _fn.replace('"', '_').replace("'", '_')
+                            _tp      = os.path.join(_tmp_dir, f"{_fn_safe[:-4]}_print.pdf")
+                            # label on page: same clean name
+                            _label   = f"{_fn_safe[:-4]} #{_i}"
+
+                            # progress bar in status row
+                            _bar = "█" * int(_i / len(_jpgs) * 15) + "░" * (15 - int(_i / len(_jpgs) * 15))
+                            _prog_txt = f"⚙ PDF {_i}/{len(_jpgs)} [{_bar}] {_fn}"
+                            try:
+                                term_w2, term_h2 = shutil.get_terminal_size()
+                            except:
+                                term_w2, term_h2 = 80, 24
+                            _H2 = max(20, min(30, term_h2 - 2))
+                            _W2 = max(60, min(120, term_w2 - 2))
+                            # pad content to fill the row, add right border ║
+                            _inner = f" 🔔 \033[96m{_prog_txt}\033[0m"
+                            _pad_w = _W2 - 1 - len(f" 🔔 {_prog_txt}")
+                            sys.stdout.write(
+                                f"\033[{_H2-3};1H"
+                                f"║{_inner}{' ' * max(0, _pad_w)}║\033[K"
+                            )
+                            sys.stdout.flush()
+                            sys.stdout.flush()
+
+                            if _no_scale:
+                                _cmd = [
+                                    "convert", _jpg,
+                                    "-pointsize", str(_font_sz), "-fill", "black",
+                                    "-gravity", "SouthEast", "-box", "white",
+                                    "-annotate", "+10+10", _label,
+                                    "-compress", "JPEG", "-quality", "75",
+                                    _tp
+                                ]
+                            else:
+                                try:
+                                    _ident = subprocess.check_output(
+                                        ["identify", "-format", "%w %h", _jpg],
+                                        stderr=subprocess.DEVNULL).decode().strip().split()
+                                    _ow, _oh = int(_ident[0]), int(_ident[1])
+                                except Exception as _ie:
+                                    _ow, _oh = _IAW, _IAH
+                                    logger.warning(f"identify failed {_fn}: {_ie} – fallback {_ow}x{_oh}")
+
+                                _sw = _IAW / _ow; _sh = _IAH / _oh
+                                _sf = min(_sw, _sh)
+                                _sw2 = int(_ow * _sf); _sh2 = int(_oh * _sf)
+                                _ix  = _IAX + (_IAW - _sw2) // 2
+                                _iy  = _IAY + (_IAH - _sh2) // 2
+                                _ly  = max(0, _MB - 10 - _font_sz)
+
+                                _cmd = [
+                                    "convert",
+                                    "-size", f"{_cw}x{_ch}", "xc:white",
+                                    "(", _jpg, "-resize", f"{_sw2}x{_sh2}",
+                                    "-unsharp", "1.0x0.5+0.5+0", ")",
+                                    "-gravity", "NorthWest",
+                                    "-geometry", f"+{_ix}+{_iy}", "-composite",
+                                    "-pointsize", str(_font_sz),
+                                    "-fill", "black", "-gravity", "SouthEast",
+                                    "-box", "white",
+                                    "-annotate", f"+{_MR}+{_ly}", _label,
+                                    "-density", str(_target_dpi),
+                                    "-compress", "JPEG", "-quality", "75",
+                                    _tp
+                                ]
+
+                            _r = subprocess.run(_cmd, stderr=subprocess.PIPE)
+                            if _r.returncode != 0:
+                                _err = _r.stderr.decode(errors='replace').strip()
+                                logger.error(f"convert FAILED [{_i}] {_fn}: {_err}")
+                                _failed.append(_fn)
+                                # continue – don't abort the whole batch on one bad file
+                            else:
+                                logger.info(f"convert OK [{_i}/{len(_jpgs)}] {_fn}")
+                                _tmp_pages.append(_tp)
+
+                        if _tmp_pages:
+                            # ImageMagick policy.xml blocks PDF→PDF merge via 'convert',
+                            # so we use pdfunite (poppler) or gs instead.
+                            _merged   = False
+                            _merge_err = ""
+
+                            # ── pdfunite (poppler-utils) ──────────────────
+                            if shutil.which("pdfunite"):
+                                _pu = ["pdfunite"] + _tmp_pages + [_pdf_out]
+                                logger.info(f"PDF merge: pdfunite {len(_tmp_pages)} pages")
+                                _gr = subprocess.run(_pu, stderr=subprocess.PIPE)
+                                if _gr.returncode == 0:
+                                    _merged = True
+                                    logger.info("pdfunite: OK")
+                                else:
+                                    _merge_err = _gr.stderr.decode(errors='replace').strip()
+                                    logger.warning(f"pdfunite FAILED: {_merge_err}")
+
+                            # ── ghostscript – same flags as create_pdf_from_jpgs_imagemagick.sh
+                            if not _merged and shutil.which("gs"):
+                                _gs = ["gs", "-dBATCH", "-dNOPAUSE", "-q",
+                                       "-sDEVICE=pdfwrite",
+                                       f"-sOutputFile={_pdf_out}"] + _tmp_pages
+                                logger.info(f"PDF merge: gs {len(_tmp_pages)} pages")
+                                _gr = subprocess.run(_gs, stderr=subprocess.PIPE)
+                                if _gr.returncode == 0:
+                                    _merged = True
+                                    logger.info("gs: OK")
+                                else:
+                                    _merge_err = _gr.stderr.decode(errors='replace').strip()
+                                    logger.error(f"gs FAILED: {_merge_err}")
+
+                            if not _merged and not shutil.which("pdfunite") and not shutil.which("gs"):
+                                logger.error("PDF merge: no tool available. "
+                                             "Install poppler-tools: sudo zypper install poppler-tools")
+                                notify("Install poppler-tools for PDF merge (see log)", "error")
+
+                            if _merged:
+                                try:
+                                    _pdf_sz   = os.path.getsize(_pdf_out)
+                                    _pdf_sz_s = (f"{_pdf_sz/1024:.0f}K" if _pdf_sz < 1024*1024
+                                                 else f"{_pdf_sz/1024/1024:.1f}M")
+                                except Exception:
+                                    _pdf_sz_s = "?"
+                                _fail_info = f"  ⚠{len(_failed)} skipped" if _failed else ""
+                                logger.info(f"PDF ready: {_pdf_out} size={_pdf_sz_s} pages={len(_tmp_pages)}")
+                                if _failed:
+                                    logger.warning(f"Skipped: {', '.join(_failed)}")
+                                notify(f"PDF ✓ {_pdf_name}  {_pdf_sz_s}  ({len(_tmp_pages)}p){_fail_info}", "success")
+                                try:
+                                    subprocess.Popen(['xdg-open', pdf_dir],
+                                                     stdout=subprocess.DEVNULL,
+                                                     stderr=subprocess.DEVNULL)
+                                except Exception as _xe:
+                                    logger.warning(f"xdg-open: {_xe}")
+                            elif _merge_err:
+                                if "security policy" in _merge_err or "IsCoderAuthorized" in _merge_err:
+                                    logger.error("PDF merge blocked by ImageMagick policy.xml – "
+                                                 "install poppler-tools: sudo zypper install poppler-tools")
+                                    notify("PDF blocked by ImageMagick policy – install poppler-tools", "error")
+                                else:
+                                    notify("PDF merge failed (see log)", "error")
+                        else:
+                            logger.error("PDF: no pages converted")
+                            notify("PDF: all pages failed (see log)", "error")
+
+                        # cleanup temp
+                        try:
+                            import shutil as _sh2
+                            _sh2.rmtree(_tmp_dir, ignore_errors=True)
+                            logger.debug(f"PDF tmp dir removed: {_tmp_dir}")
+                        except Exception as _ce:
+                            logger.warning(f"PDF tmp cleanup error: {_ce}")
+
+                        sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                        sys.stdout.flush()
+                        full_redraw[0] = True
 
                 elif _mk == Key.F1:
                     self._show_scanner_help(); full_redraw[0] = True
@@ -7432,7 +7842,7 @@ class PTZMasterApp:
                     running = False
 
         finally:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[2J\033[H')
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[2J\033[H')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
 
@@ -8331,12 +8741,23 @@ class PTZMasterApp:
         self._wait_click_or_key()
 
     def _batch_menu(self):
-        """Batch operations - ARMORED TUI v1.3 with advanced select & mouse behavior."""
-        import signal
-        import shutil
-        import platform
-        import glob
-        import time
+        """Batch operations – redesigned TUI v2.0.
+        Layout:
+          ╔══...══╗
+          ║  title  ║
+          ╠══...══╣
+          ║  hw info ║  x2
+          ╠══...══╣
+          ║  N) ▶ item ║   (scrollable)
+          ...
+          ║  (empty)   ║
+          ╠══[↑][↓] Navigate = [ ENTER ] execute ═...═╣
+          ║  <current item / Enter: #:N>                ║
+          ║  🔔 Log: ...                                ║
+          ╚══...══[ ptz-master vX ]═(ESC/Q)═╝
+        Mouse: [↑] [↓] [ ENTER ] (ESC/Q) Log: + click on item.
+        """
+        import signal, shutil, time
 
         items = [
             "🔄 Sync all cameras (network)",
@@ -8347,241 +8768,313 @@ class PTZMasterApp:
             "🔎 Find moved cameras (by MAC)",
             "🎯 Detect camera types",
             "💾 Save window layout",
-            "♻️  Restore saved session",
+            "♻  Restore saved session",
             "✖  Cancel",
         ]
+        N = len(items)
 
         mouse_off()
         fd = sys.stdin.fileno()
         old_term = termios.tcgetattr(fd)
         resized = [True]
-        old_winch = signal.signal(signal.SIGWINCH, lambda s,f: resized.__setitem__(0, True))
+        old_winch = signal.signal(signal.SIGWINCH,
+                                  lambda s, f: resized.__setitem__(0, True))
 
+        # ── hardware info (cached once) ────────────────────────────────────
         def _get_hw_info():
             host = "Unknown Host"
-            for p in ['/sys/devices/virtual/dmi/id/product_name','/sys/devices/virtual/dmi/id/product_version','/sys/devices/virtual/dmi/id/board_name','/sys/devices/virtual/dmi/id/sys_vendor']:
+            for p in ['/sys/devices/virtual/dmi/id/product_name',
+                      '/sys/devices/virtual/dmi/id/board_name',
+                      '/sys/devices/virtual/dmi/id/sys_vendor']:
                 try:
                     with open(p) as f:
-                        h=f.read().strip()
-                        if h and h.lower() not in ('to be filled by o.e.m.','default string','unknown') and len(h)>3:
-                            host=h; break
+                        h = f.read().strip()
+                        if h and h.lower() not in ('to be filled by o.e.m.',
+                                                   'default string', 'unknown') and len(h) > 3:
+                            host = h; break
                 except: pass
-            os_name="Linux"
+            os_name = "Linux"
             try:
                 with open('/etc/os-release') as f:
                     for l in f:
-                        if l.startswith('PRETTY_NAME='): os_name=l.split('=')[1].strip('"'); break
+                        if l.startswith('PRETTY_NAME='):
+                            os_name = l.split('=', 1)[1].strip().strip('"'); break
             except: pass
-            cpu="Unknown CPU"
+            cpu = "Unknown CPU"
             try:
                 with open('/proc/cpuinfo') as f:
                     for l in f:
-                        if l.startswith('model name'): cpu=l.split(':')[1].strip(); break
+                        if l.startswith('model name'):
+                            cpu = l.split(':', 1)[1].strip(); break
             except: pass
-            temp="N/A"
+            temp = "N/A"
             try:
-                import glob as g
-                for tz in g.glob('/sys/class/thermal/thermal_zone*'):
+                import glob as _g
+                for tz in _g.glob('/sys/class/thermal/thermal_zone*'):
                     with open(f"{tz}/type") as f:
                         if 'x86_pkg' in f.read() or 'coretemp' in f.read():
-                            with open(f"{tz}/temp") as tf: temp=f"+{int(tf.read())/1000:.1f}°C"; break
+                            with open(f"{tz}/temp") as tf:
+                                temp = f"+{int(tf.read())/1000:.1f}°C"; break
             except: pass
-            ram="N/A"
+            ram = "N/A"
             try:
                 with open('/proc/meminfo') as f:
-                    m={};
+                    m = {}
                     for l in f:
-                        if ':' in l: k,v=l.split(':',1); m[k.strip()]=int(v.strip().split()[0])
-                    total=m.get('MemTotal',1); avail=m.get('MemAvailable',0); used=total-avail
-                    ram=f"{used/1024/1024:.1f}GB/{total/1024/1024:.1f}GB"
+                        if ':' in l:
+                            k, v = l.split(':', 1)
+                            m[k.strip()] = int(v.strip().split()[0])
+                    tot = m.get('MemTotal', 1); avail = m.get('MemAvailable', 0)
+                    ram = f"{(tot-avail)/1024/1024:.1f}GB/{tot/1024/1024:.1f}GB"
             except: pass
-            import platform as pl
-            return f"🖥  {host} 🐍 Python {pl.python_version()}  [🐧 {os_name}]", f"🔲 {cpu} 🔥{temp} 📏RAM {ram}"
+            import platform as _pl
+            return (f"🖥  {host} 🐍 Python {_pl.python_version()}  [🐧 {os_name}]",
+                    f"🔲 {cpu} 🔥{temp} 📏RAM {ram}")
 
-        sel = 0
+        _hw = _get_hw_info()
+
+        # ── footer geometry constants ──────────────────────────────────────
+        _vtag_plain = f"[ ptz-master v{VERSION} ]"
+        _escq_plain = "(ESC/Q)"
+        _foot_mid   = f"═{_vtag_plain}═"
+        _foot_right = f"═{_escq_plain}═╝"
+
+        # ── state ─────────────────────────────────────────────────────────
+        sel           = 0
         scroll_offset = 0
-        num_buf = ""
-        last_digit = 0
-        status = f"Log: {LOG_FILE}"
-        idx = -1
+        num_buf       = ""
+        last_digit    = 0.0
+        idx           = -1
         DIGIT_TIMEOUT = 0.6
+        zones: dict   = {}   # action → (row, col_s, col_e)
 
+        # ── draw ──────────────────────────────────────────────────────────
+        def _draw():
+            nonlocal scroll_offset, zones
+            zones = {}
+            try:    tw, th = shutil.get_terminal_size((80, 24))
+            except: tw, th = 80, 24
+            bw = min(78, tw)
+            iw = bw - 2
+            buf = ['\033[2J\033[H']
+
+            # rows 1-6: outer frame + title + hw-info
+            buf.append(f"\033[1;1H{GRN}╔{'═'*(bw-2)}╗{RST}")
+            _t = " ⚙  Batch Operations "
+            draw_slot(buf, 2, 1, bw,
+                      f"{GRN}║{YLW}{_t.center(iw)}{RST}", "", f"{GRN}║{RST}")
+            buf.append(f"\033[3;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
+            draw_slot(buf, 4, 1, bw,
+                      f"{GRN}║ {CYN}{_hw[0][:iw-2]}{RST}", "", f"{GRN}║{RST}")
+            draw_slot(buf, 5, 1, bw,
+                      f"{GRN}║ {CYN}{_hw[1][:iw-2]}{RST}", "", f"{GRN}║{RST}")
+            buf.append(f"\033[6;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
+
+            # item rows: 7 … th-5
+            ITEM_ROW0 = 7
+            max_vis   = max(1, th - 5 - ITEM_ROW0)
+            max_off   = max(0, N - max_vis)
+            if sel < scroll_offset:              scroll_offset = sel
+            elif sel >= scroll_offset + max_vis: scroll_offset = sel - max_vis + 1
+            scroll_offset = max(0, min(scroll_offset, max_off))
+
+            num_w = len(str(N))   # 1 or 2 digit width
+            row = ITEM_ROW0
+            for i in range(scroll_offset, min(scroll_offset + max_vis, N)):
+                active  = (i == sel)
+                marker  = f"{GRN}▶{RST}" if active else " "
+                nstr    = f"{i+1:{num_w}})"
+                txt     = items[i]
+                if active:
+                    content = f" {nstr} {marker} \033[48;5;234m{GRN}{txt}{RST}"
+                else:
+                    content = f" {nstr} {marker} {txt}"
+                draw_slot(buf, row, 1, bw,
+                          f"{GRN}║{RST}{pad(content, iw)}", "", f"{GRN}║{RST}")
+                row += 1
+            while row <= th - 5:
+                draw_slot(buf, row, 1, bw, f"{GRN}║", "", f"{GRN}║{RST}")
+                row += 1
+
+            # nav separator  ╠══[↑][↓] Navigate = [ ENTER ] execute ═...═╣
+            NAV_ROW = th - 4
+            _nav_plain   = "[↑][↓] Navigate = [ ENTER ] execute "
+            _fill_nav    = max(0, bw - 2 - 2 - len(_nav_plain))
+            # 1-indexed cols inside the separator line (╠ at 1, ═ at 2, ═ at 3):
+            _up_cs,  _up_ce   = 4, 6      # [↑]
+            _dn_cs,  _dn_ce   = 7, 9      # [↓]
+            _ent_cs, _ent_ce  = 25, 31    # [ ENTER ]
+            nav_sep = (
+                f"{GRN}╠══{RST}"
+                f"{YLW}[↑]{RST}{YLW}[↓]{RST}"
+                f"{DIM} Navigate = {RST}"
+                f"{YLW}[ ENTER ]{RST}"
+                f"{DIM} execute {RST}"
+                f"{GRN}{'═'*_fill_nav}╣{RST}"
+            )
+            buf.append(f"\033[{NAV_ROW};1H{nav_sep}")
+            zones[Key.UP]   = (NAV_ROW, _up_cs,  _up_ce)
+            zones[Key.DOWN] = (NAV_ROW, _dn_cs,  _dn_ce)
+            zones['\r']     = (NAV_ROW, _ent_cs, _ent_ce)
+
+            # status row (current item or digit-input feedback)
+            STAT_ROW = th - 3
+            if num_buf:
+                stat_txt = f" Enter: #{num_buf}"
+            else:
+                stat_txt = f" {items[sel]}"
+            draw_slot(buf, STAT_ROW, 1, bw,
+                      f"{GRN}║{RST}{pad(stat_txt, iw)}", "", f"{GRN}║{RST}")
+
+            # log row
+            LOG_ROW = th - 2
+            log_txt = f" 🔔 {LOG_FILE}"
+            draw_slot(buf, LOG_ROW, 1, bw,
+                      f"{GRN}║{RST}{pad(log_txt, iw)}", "", f"{GRN}║{RST}")
+            zones['l'] = (LOG_ROW, 5, iw)   # click → open log dir
+
+            # footer ╚═...═[ ptz-master vX ]═(ESC/Q)═╝
+            FOOT_ROW  = th - 1
+            _ffill    = max(0, bw - 1 - len(_foot_mid) - len(_foot_right))
+            _escq_col = 1 + _ffill + len(_foot_mid) + 2
+            buf.append(
+                f"\033[{FOOT_ROW};1H"
+                f"{GRN}╚{'═'*_ffill}{RST}"
+                f"{CYN}{_foot_mid}{RST}"
+                f"{GRN}═{RST}{YLW}{_escq_plain}{RST}{GRN}═╝{RST}"
+            )
+            zones['q'] = (FOOT_ROW, _escq_col, _escq_col + len(_escq_plain) - 1)
+
+            sys.stdout.write("".join(buf))
+            sys.stdout.flush()
+            return ITEM_ROW0, max_vis
+
+        def _hit(row, col):
+            for k, (zr, cs, ce) in zones.items():
+                if row == zr and cs <= col <= ce:
+                    return k
+            return None
+
+        # ── main loop ─────────────────────────────────────────────────────
+        ITEM_ROW0, max_vis = 7, 10   # updated each _draw()
         try:
             tty.setraw(fd)
             sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h')
             sys.stdout.flush()
-
-            def _draw():
-                nonlocal scroll_offset
-                try: tw, th = shutil.get_terminal_size((80, 24))
-                except: tw, th = 80, 24
-                bw = min(78, tw)
-                buf = []
-                buf.append('\033[2J\033[H')
-
-                buf.append(f"\033[1;1H{GRN}╔{'═'*(bw-2)}╗{RST}")
-                title = " ⚙️  Batch Operations "
-                draw_slot(buf, 2, 1, bw, f"{GRN}║{YLW}{title.center(bw-2)}{RST}", "", f"{GRN}║{RST}")
-                buf.append(f"\033[3;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
-
-                hw1, hw2 = _get_hw_info()
-                draw_slot(buf, 4, 1, bw, f"{GRN}║ {CYN}{hw1[:bw-4]}{RST}", "", f"{GRN}║{RST}")
-                draw_slot(buf, 5, 1, bw, f"{GRN}║ {CYN}{hw2[:bw-4]}{RST}", "", f"{GRN}║{RST}")
-                buf.append(f"\033[6;1H{GRN}╠{'═'*(bw-2)}╣{RST}")
-
-                max_vis = max(1, th - 10)
-                max_off = max(0, len(items) - max_vis)
-                if sel < scroll_offset: scroll_offset = sel
-                elif sel >= scroll_offset + max_vis: scroll_offset = sel - max_vis + 1
-                scroll_offset = max(0, min(scroll_offset, max_off))
-
-                row = 7
-                iw = bw - 2
-                for i in range(scroll_offset, min(scroll_offset + max_vis, len(items))):
-                    active = (i == sel)
-                    marker = f"{GRN}▶{RST}" if active else " "
-                    txt = items[i]
-                    if active:
-                        content = f" {marker} {GRN}{txt}{RST}"
-                        padded = pad(content, iw - 1)
-                        draw_slot(buf, row, 1, bw, f"{GRN}║\033[48;5;234m{padded}\033[0m", "", f"{GRN}║{RST}")
-                    else:
-                        draw_slot(buf, row, 1, bw, f"{GRN}║{pad(f' {marker} {txt}', iw)}", "", f"{GRN}║{RST}")
-                    row += 1
-
-                while row < th - 3:
-                    draw_slot(buf, row, 1, bw, f"{GRN}║", "", f"{GRN}║{RST}")
-                    row += 1
-
-                buf.append(f"\033[{th-3};1H{GRN}╠{'═'*(bw-2)}╣{RST}")
-
-                # Zastosowanie odpowiedniego formatowania paska notyfikacji
-                log_line = f" 🔔 {status}"
-                draw_slot(buf, th - 2, 1, bw, f"{GRN}║{pad(log_line, iw)}{RST}", "", f"{GRN}║{RST}")
-
-                left = "[↑][↓] Navigate  ENTER execute"
-                right = f"{CYN}ptz-master v{VERSION}{RST} {YLW}(ESC/Q){RST}"
-                mid = max(0, iw - ansilen(left) - 1 - ansilen(f"ptz-master v{VERSION} (ESC/Q)") - 2)
-                footer = f" {YLW}{left}{RST}{' '*mid}{right} "
-                draw_slot(buf, th - 1, 1, bw, f"{GRN}║{footer}", "", f"{GRN}║{RST}")
-
-                buf.append(f"\033[{th};1H{GRN}╚{'═'*(bw-2)}╝{RST}")
-                sys.stdout.write("".join(buf))
-                sys.stdout.flush()
+            ITEM_ROW0, max_vis = _draw()
 
             while True:
-                # Fetch dimensions at the start of each iteration so bw is available globally in the loop
-                try: tw, th = shutil.get_terminal_size((80, 24))
-                except: tw, th = 80, 24
-                bw = min(78, tw) # <--- Definicja bw tutaj naprawia NameError
-
                 if resized[0]:
-                    _draw()
+                    ITEM_ROW0, max_vis = _draw()
                     resized[0] = False
 
-                # Wait for number input to complete
+                # digit timeout → confirm jump
                 if num_buf and time.time() - last_digit >= DIGIT_TIMEOUT:
                     try:
                         n = int(num_buf) - 1
-                        if 0 <= n < len(items):
-                            sel = n
-                            status = f"Selected: {items[sel]}"
-                            resized[0] = True
-                    except:
-                        pass
+                        if 0 <= n < N: sel = n
+                    except: pass
                     num_buf = ""
+                    ITEM_ROW0, max_vis = _draw()
+                    continue
 
                 key = get_key(timeout=0.1)
                 if key == Key.TIMEOUT:
                     continue
 
-                if key in (Key.ESC, 'q', 'Q'):
-                    idx = -1
-                    break
+                # ── mouse ─────────────────────────────────────────────────
+                if isinstance(key, MouseEvent):
+                    if key.release: continue
+                    action = _hit(key.row, key.col)
+                    if action == '\r':
+                        if num_buf:
+                            try:
+                                n = int(num_buf) - 1
+                                if 0 <= n < N: sel = n
+                            except: pass
+                            num_buf = ""; ITEM_ROW0, max_vis = _draw(); continue
+                        idx = sel; break
+                    elif action == 'q':
+                        idx = -1; break
+                    elif action == Key.UP:
+                        num_buf = ""; sel = max(0, sel - 1)
+                        ITEM_ROW0, max_vis = _draw()
+                    elif action == Key.DOWN:
+                        num_buf = ""; sel = min(N - 1, sel + 1)
+                        ITEM_ROW0, max_vis = _draw()
+                    elif action == 'l':
+                        try:
+                            import subprocess as _sp
+                            _sp.Popen(['xdg-open', os.path.dirname(LOG_FILE)],
+                                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                        except: pass
+                    else:
+                        item_row = key.row - ITEM_ROW0
+                        if 0 <= item_row < max_vis:
+                            clicked = scroll_offset + item_row
+                            if 0 <= clicked < N:
+                                if clicked == sel:
+                                    idx = sel; break      # second click → execute
+                                sel = clicked
+                                ITEM_ROW0, max_vis = _draw()
+                    continue
 
-                if isinstance(key, MouseEvent) and not key.release:
-                    max_vis = max(1, th - 10)
-
-                    # --- STOPKA: klik w [↑][↓] ENTER i ESC/Q ---
-                    if key.row == th - 1:
-                        # pozycje liczone od 1 (bo draw_slot zaczyna w kolumnie 1)
-                        # "║ [↑][↓] Navigate ENTER execute"
-                        if 2 <= key.col <= 4: # [↑]
-                            sel = (sel - 1) % len(items)
-                            status = f"Selected: {items[sel]}"
-                            resized[0] = True
-                        elif 5 <= key.col <= 7: # [↓]
-                            sel = (sel + 1) % len(items)
-                            status = f"Selected: {items[sel]}"
-                            resized[0] = True
-                        elif 20 <= key.col <= 25: # ENTER
-                            idx = sel
-                            break
-                        elif key.col >= bw - 15: # ESC/Q po prawej
-                            idx = -1
-                            break
-                        continue
-
-                    # --- LIST: click on position ---
-                    if 7 <= key.row < 7 + max_vis:
-                        clicked = scroll_offset + (key.row - 7)
-                        if 0 <= clicked < len(items):
-                            if clicked == sel and key.btn == 0:
-                                idx = sel # second click = execute
-                                break
-                            sel = clicked # first click = select
-                            status = f"Selected: {items[sel]}"
-                            resized[0] = True
-                        continue
-
-                # Mouse wheel handling
+                # ── scroll wheel ──────────────────────────────────────────
                 if key == Key.MOUSE_SCROLL_UP:
-                    sel = (sel - 1) % len(items)
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
-                elif key == Key.MOUSE_SCROLL_DOWN:
-                    sel = (sel + 1) % len(items)
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
+                    num_buf = ""; sel = max(0, sel - 1)
+                    ITEM_ROW0, max_vis = _draw(); continue
+                if key == Key.MOUSE_SCROLL_DOWN:
+                    num_buf = ""; sel = min(N - 1, sel + 1)
+                    ITEM_ROW0, max_vis = _draw(); continue
 
-                # Arrow keys and function key handling
+                # ── keyboard ──────────────────────────────────────────────
+                if key in ('q', 'Q', '\x1b'):
+                    idx = -1; break
+                elif key in ('\r', '\n', Key.ENTER, ' '):
+                    if num_buf:
+                        try:
+                            n = int(num_buf) - 1
+                            if 0 <= n < N: sel = n
+                        except: pass
+                        num_buf = ""; ITEM_ROW0, max_vis = _draw(); continue
+                    idx = sel; break
                 elif key == Key.UP:
-                    sel = (sel - 1) % len(items)
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
+                    num_buf = ""; sel = max(0, sel - 1)
+                    ITEM_ROW0, max_vis = _draw()
                 elif key == Key.DOWN:
-                    sel = (sel + 1) % len(items)
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
+                    num_buf = ""; sel = min(N - 1, sel + 1)
+                    ITEM_ROW0, max_vis = _draw()
+                elif key == Key.PAGE_UP:
+                    num_buf = ""; sel = max(0, sel - max_vis)
+                    ITEM_ROW0, max_vis = _draw()
+                elif key == Key.PAGE_DOWN:
+                    num_buf = ""; sel = min(N - 1, sel + max_vis)
+                    ITEM_ROW0, max_vis = _draw()
                 elif key == Key.HOME:
-                    sel = 0
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
+                    num_buf = ""; sel = 0; ITEM_ROW0, max_vis = _draw()
                 elif key == Key.END:
-                    sel = len(items) - 1
-                    status = f"Selected: {items[sel]}"
-                    resized[0] = True
-
-                # Potwierdzenie wyboru (Enter)
-                elif key in (Key.ENTER, '\r', '\n', ' '):
-                    idx = sel
-                    break
-
-                # Select by typing a number (appears next to Enter: #:)
+                    num_buf = ""; sel = N - 1; ITEM_ROW0, max_vis = _draw()
                 elif isinstance(key, str) and key.isdigit():
                     num_buf += key
                     last_digit = time.time()
-                    status = f"Enter: #:{num_buf}"
-                    resized[0] = True
+                    try:
+                        t = int(num_buf) - 1
+                        if 0 <= t < N: sel = t
+                    except: pass
+                    ITEM_ROW0, max_vis = _draw()
+
         finally:
-            try: sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l'); sys.stdout.flush()
+            try:
+                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l')
+                sys.stdout.flush()
             except: pass
             try: termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
             except: pass
             try: signal.signal(signal.SIGWINCH, old_winch)
             except: pass
 
-        if idx == -1 or idx == len(items) - 1: return
+        if idx < 0 or idx == N - 1:   # ESC/Q or "✖  Cancel"
+            return
 
         # Sekcja wykonawcza wybranych opcji - reszta kodu pozostaje bez zmian
         if idx == 0:
