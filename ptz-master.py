@@ -577,7 +577,7 @@ class Camera:
         self.scan_format  = "jpg"         # jpg | png | pdf | tiff
         self.scan_quality = 75
         self.scan_resize  = "1240x1754"   # WxH po konwersji
-        self.scan_desc    = ""            # opis do nazwy pliku
+        self.scan_desc    = ""            # description appended to filename
         self.scan_dest    = SCAN_DIR      # katalog docelowy
         self.scan_viewer  = "mpv"         # viewer app: mpv|gwenview|xdg-open|eog|feh
 
@@ -812,7 +812,7 @@ def check_dependencies() -> None:
             'fed': 'sudo dnf install iputils',
         },
         'ip': {
-            'desc': 'Wykrywanie kamer (MAC→IP)',
+            'desc': 'Camera discovery (MAC→IP)',
             'deb': 'sudo apt install iproute2',
             'arc': 'sudo pacman -S iproute2',
             'sus': 'sudo zypper install iproute2',
@@ -871,7 +871,7 @@ def check_dependencies() -> None:
         and not shutil.which(c)
     ]
 
-    # Nic nie brakuje — cicho
+    # Nothing missing – silently skip
     if not missing_critical and not missing_optional:
         return
 
@@ -889,7 +889,7 @@ def check_dependencies() -> None:
         # Special case: xdotool as representative of the window-tool group
         if cmd == 'xdotool' and _geom_missing:
             print(f"\n  {YLW}▸ mpv window positioning tools{RST}"
-                  f"  {DIM}(brak xdotool / wmctrl / kdotool){RST}")
+                  f"  {DIM}(no xdotool / wmctrl / kdotool){RST}")
             print(f"    {C_DEB}Debian/Ubuntu : sudo apt install xdotool{RST}")
             print(f"    {C_ARC}Arch/CachyOS  : sudo pacman -S xdotool  {DIM}lub{RST}{C_ARC}  yay -S kdotool{RST}")
             print(f"    {C_SUS}openSUSE      : sudo zypper install xdotool  {DIM}lub{RST}{C_SUS}  kdotool (AUR/pip){RST}")
@@ -1177,7 +1177,7 @@ def _extract_clip(filepath: str, start: float, end: float,
                   crf: int = 23, extra_vf: str = None) -> bool:
     """Extract a video clip with current image filters applied (ffmpeg in background)."""
     if not filepath or not os.path.isfile(filepath):
-        logger.error(f"_extract_clip: plik nie istnieje: {filepath!r}")
+        logger.error(f"_extract_clip: file not found: {filepath!r}")
         return False
     if start >= end:
         logger.error(f"_extract_clip: start={start} >= end={end}")
@@ -3421,7 +3421,7 @@ class PlayerWatchdog:
                     if not self._stop.is_set():
                         self._restart()
                 elif self.eof_stops:
-                    # Normalny koniec pliku (EOF) — nie restartuj, zatrzymaj watchdog
+                    # Normal EOF – do not restart, stop watchdog
                     logger.info(f"Watchdog: {self.cam.name} EOF — stop (no restart)")
                     self.stop()
                 else:
@@ -4536,7 +4536,7 @@ class UI:
             res_display  = f" [{prof.res}]"
         l4     = f" 📺 {BLU}{display_name[:20]}{RST}{res_display}{preset_info}"
         # Fixed right-frame position — token fitted to available space
-        _COL_RIGHT = LW + W + 3   # kolumna prawej ramki (LW=19, W=58 → 80)
+        _COL_RIGHT = LW + W + 3   # right border column (LW=19, W=58 → 80)
         _tok_raw   = prof.token if prof.token else prof.name
         t_info     = f" {YLW}(t){RST} Token: {BLU}{_tok_raw[:13]}{RST} "
         rlines.append(("normal", f"│{pad(l4, W - ansilen(t_info))}{t_info}\033[{_COL_RIGHT}G│"))
@@ -4603,7 +4603,7 @@ class UI:
         _pan_y  = getattr(cam, "pan_y", 0.0)
         _pan_s  = f"{GRN}1.0x{RST}"
         _xy_s   = f"x:{_pan_x:+.2f} y:{_pan_y:+.2f}"
-        _COL79  = FW + 2  # prawa │ absolutna (FW=78 → col 80)
+        _COL79  = FW + 2  # right │ absolute (FW=78 → col 80)
         _C34 = 50  # centre │ — absolute column 50
         sys.stdout.write(f"│    {dsU}    │ Progress: {p_view}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
@@ -7115,7 +7115,7 @@ class PTZMasterApp:
             session_logs.append(f"[{ts}] {msg}")
             if len(session_logs) > 50:
                 session_logs.pop(0)
-                # Ulepszenie: zapobieganie przeskakiwaniu logów podczas przewijania
+                # Prevent log jump when scrolling near boundary
                 nonlocal log_scroll
                 if log_scroll > 0:
                     log_scroll = max(0, log_scroll - 1)
@@ -7150,6 +7150,50 @@ class PTZMasterApp:
         pdf_current_file = ""
         pdf_total_files = 0
 
+        # ── D&D queue state ───────────────────────────────────────────────
+        dnd_queue      : list  = []     # collected image paths (jpg/png/tif)
+        dnd_paste_mode : bool  = False
+        dnd_paste_buf  : str   = ""
+        dnd_paste_time : float = 0.0
+
+        IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.tif', '.tiff',
+                      '.JPG', '.JPEG', '.PNG', '.TIF', '.TIFF')
+
+        def _process_dnd(raw: str) -> None:
+            """Parse pasted/dragged paths, filter images, add to dnd_queue."""
+            import shlex as _shlex
+            raw = raw.strip()
+            if not raw:
+                return
+            try:
+                tokens = _shlex.split(raw, posix=False)
+            except ValueError:
+                fixed = raw + ('"' if raw.count('"') % 2 else '')
+                try:
+                    tokens = _shlex.split(fixed, posix=False)
+                except ValueError:
+                    tokens = raw.split()
+
+            added = 0; skipped = 0
+            for tok in tokens:
+                p = tok.strip().strip("\'\"")
+                p = os.path.expanduser(p)
+                if os.path.isfile(p) and p.lower().endswith(
+                        ('.jpg', '.jpeg', '.png', '.tif', '.tiff')):
+                    if p not in dnd_queue:
+                        dnd_queue.append(p)
+                        added += 1
+                    else:
+                        skipped += 1
+                elif os.path.isfile(p):
+                    skipped += 1
+
+            if added:
+                _slog(f"D&D +{added} file{'s' if added!=1 else ''}"
+                      f" → queue: {len(dnd_queue)}")
+            elif skipped:
+                _slog(f"D&D: no image files recognised (skipped {skipped})")
+
         def _get_next_number():
             if override_num is not None:
                 return override_num
@@ -7183,14 +7227,14 @@ class PTZMasterApp:
         def _draw():
             nonlocal log_scroll
             if not _EMOJI_CACHE:
-                # Ulepszenie: dodano wszystkie ikony TUI skanera do kalibracji
+                # Added all scanner TUI icons to emoji-width calibration table
                 calibrate_emojis(["🖨","⚙","🧠","💽","🔔","█","░","🔩","🛠","📝","📂","📜","▶","✓","✗"])
             buf = ['\033[2J\033[H']
             full_redraw[0] = False
             try:   term_w, term_h = shutil.get_terminal_size()
             except: term_w, term_h = 80, 24
             W = max(60, min(120, term_w - 2))
-            # Zmniejszono minimalną wysokość TUI z 24 na 22, co daje 21 wierszy interfejsu
+            # Min TUI height lowered from 24 to 22 (gives 21 usable rows)
             H = max(22, term_h - 1)
             iw = W - 2   # inner width
 
@@ -7211,7 +7255,7 @@ class PTZMasterApp:
                 plain = f"[ {label} ]"
                 vis   = ansilen(plain) + 5   # ╠════[ ... ]
                 fills = max(0, W - vis + 1)  # ════...════╣  (+2 to match full width W+2)
-                C_VIOLET = "\033[95m"  # fioletowy dla tytułów sekcji
+                C_VIOLET = "\033[95m"  # violet for section titles
                 colored = f"[ {C_VIOLET}{label}{C_RST} ]"
                 return f"╠════{colored}{'═'*fills}╣"
 
@@ -7339,18 +7383,46 @@ class PTZMasterApp:
             _dir_short = pdf_dir if len(pdf_dir) <= _dir_avail else "…" + pdf_dir[-(_dir_avail-1):]
 
             _left_part = f" {C_KEY}[D]{C_RST} Dir: {C_CYN}{_dir_short}{C_RST}"
-            # Obliczamy ile spacji potrzeba, aby wypchnąć _right_part do samej prawej ramki
+            # Compute spaces needed to right-align _right_part against the border
             _spaces = max(0, W - ansilen(_left_part) - _right_len)
 
             _dir_line = f"{_left_part}{' ' * _spaces}{_right_part}"
             draw_slot(buf, 16, 1, W+2, f"║{_dir_line}", "", "║")
 
-            # ── ROW 17: ╠═════[ 📜 Session Logs ]══════╣ ─────────────────
-            buf.append(f"\033[17;1H{_sep('📜 Session Logs')}")
+            # ── ROW 17: D&D queue ─────────────────────────────────────────
+            # ── D&D row: right-align action buttons against border ──────
+            _dnd_J_part  = f"{C_KEY}[J]{C_RST}→PDF"
+            _dnd_Z_part  = f"{C_KEY}[Z]{C_RST} clear"
+            _dnd_right   = f"  {_dnd_J_part}  {_dnd_Z_part}"   # "  [J]→PDF  [Z] clear"
+            _dnd_right_w = ansilen(_dnd_right)                  # measure without ANSI codes
 
-            # ── LOG ROWS: 18 … H-3 ───────────────────────────────────────
-            LOG_ROW0  = 18
-            # Ulepszenie: Zmieniono H - 4 na H - 3, co domyka ramkę z logami
+            if dnd_paste_mode:
+                _dnd_preview = dnd_paste_buf[-(max(0, iw - 26)):]
+                _dnd_left  = f" {C_YLW}🖼  D&D:{C_RST} {C_CYN}pasting…{C_RST} {C_DIM}{_dnd_preview}{C_RST}"
+                _dnd_left  += f"  {C_KEY}[ESC]{C_RST} cancel"
+                _dnd_row   = _dnd_left
+            elif dnd_queue:
+                _last       = os.path.basename(dnd_queue[-1])
+                _cnt        = f"{len(dnd_queue)} file{'s' if len(dnd_queue)!=1 else ''}"
+                _dnd_left   = f" {C_YLW}🖼  D&D:{C_RST} {C_GRN}{_cnt}{C_RST}  {C_DIM_CYN}{_last}{C_RST}"
+                # Truncate filename so right buttons always fit
+                _left_avail = W - _dnd_right_w - 1
+                while ansilen(_dnd_left) > _left_avail and len(_last) > 6:
+                    _last    = _last[:-4] + "…"
+                    _dnd_left = f" {C_YLW}🖼  D&D:{C_RST} {C_GRN}{_cnt}{C_RST}  {C_DIM_CYN}{_last}{C_RST}"
+                _spaces     = max(0, W - ansilen(_dnd_left) - _dnd_right_w)
+                _dnd_row    = f"{_dnd_left}{' ' * _spaces}{_dnd_right}"
+            else:
+                _dnd_row = (f" {C_YLW}🖼  D&D:{C_RST} {C_DIM}drag image files here"
+                            f" or paste paths → ENTER{C_RST}")
+            draw_slot(buf, 17, 1, W+2, f"║{_dnd_row}", "", "║")
+
+            # ── ROW 18: ╠═════[ 📜 Session Logs ]══════╣ ─────────────────
+            buf.append(f"\033[18;1H{_sep('📜 Session Logs')}")
+
+            # ── LOG ROWS: 19 … H-3 ───────────────────────────────────────
+            LOG_ROW0  = 19
+            # Logs start at row 19 (D&D row now occupies row 17)
             LOG_ROWEND = H - 3
             log_vis   = max(1, LOG_ROWEND - LOG_ROW0)
 
@@ -7434,12 +7506,26 @@ class PTZMasterApp:
             _bp['pdf6'] = (12, 53, W)
             # PDF ops rows 14-16
             _bp['pdf8'] = (15,  2, W)
-            # Dynamiczne przypisanie koordynatów na podstawie zmierzonej szerokości przycisku
+            # Dynamic hitbox coordinates based on measured button width
             _bp['pdfD'] = (16,  2, W - _right_len + 1)
             _bp['pdfO'] = (16, W - _right_len + 2, W + 1)
             # (s) Show in status row H-3 (visible only after scan_phase==3)
             if scan_phase == 3 and last_scanned_file and scan_ok[0]:
                 _bp['s_stat'] = (H-3, W-14, W)
+            # D&D row 17 hitboxes
+            if dnd_queue:
+                # Dynamic hitboxes: measure rendered widths of each button
+                # _dnd_right = "  [J]→PDF  [Z] clear" pinned to right border
+                _J_plain = "  [J]→PDF"                # plain-text width of J section
+                _Z_plain = "  [Z] clear"               # plain-text width of Z section
+                _dnd_J_cs = W - len(_J_plain) - len(_Z_plain) + 2   # [J] col start
+                _dnd_J_ce = W - len(_Z_plain) + 1                    # [J] col end
+                _dnd_Z_cs = W - len(_Z_plain) + 2                    # [Z] col start
+                _dnd_Z_ce = W + 1                                     # [Z] col end (border)
+                _bp['dndJ'] = (17, _dnd_J_cs, _dnd_J_ce)
+                _bp['dndZ'] = (17, _dnd_Z_cs, _dnd_Z_ce)
+            else:
+                _bp.pop('dndJ', None); _bp.pop('dndZ', None)
             # session log scroll (click top half = scroll up, bottom half = down)
             _log_mid = LOG_ROW0 + log_vis // 2
             _bp['log_up']   = (LOG_ROW0, 2, W)   # first log row click = scroll up
@@ -7474,6 +7560,41 @@ class PTZMasterApp:
                 key = get_key(0.25)
                 _mk = key
 
+                # ── D&D paste mode ────────────────────────────────────────
+                if dnd_paste_mode:
+                    if key == Key.ESC:
+                        dnd_paste_mode = False; dnd_paste_buf = ""
+                        _slog("D&D: cancelled"); need_draw = True; continue
+                    elif key == Key.ENTER:
+                        _process_dnd(dnd_paste_buf)
+                        dnd_paste_mode = False; dnd_paste_buf = ""
+                        need_draw = True; continue
+                    elif key == Key.BACKSPACE:
+                        dnd_paste_buf = dnd_paste_buf[:-1]
+                        dnd_paste_time = time.time(); need_draw = True; continue
+                    elif isinstance(key, str) and key not in (
+                            Key.TIMEOUT, Key.F1, Key.SPACE):
+                        dnd_paste_buf += key
+                        dnd_paste_time = time.time(); need_draw = True; continue
+                    elif key == Key.TIMEOUT and dnd_paste_buf:
+                        # auto-flush after 0.45s silence
+                        if time.time() - dnd_paste_time > 0.45:
+                            _process_dnd(dnd_paste_buf)
+                            dnd_paste_mode = False; dnd_paste_buf = ""
+                            need_draw = True
+                    continue
+
+                # ── D&D burst detection (drag of files = large paste chunk) ─
+                if isinstance(key, str) and key not in (Key.TIMEOUT, Key.ENTER,
+                        Key.ESC, Key.BACKSPACE, Key.SPACE, Key.TAB):
+                    # Multi-char burst containing a path → direct D&D
+                    if len(key) > 3 and '/' in key:
+                        _process_dnd(key); need_draw = True; continue
+                    # Single '/' starts manual paste mode
+                    if key == '/':
+                        dnd_paste_mode = True; dnd_paste_buf = '/'
+                        dnd_paste_time = time.time(); need_draw = True; continue
+
                 # session log scroll via mouse wheel
                 if key == Key.MOUSE_SCROLL_UP:
                     log_scroll = min(log_scroll + 1, max(0, len(session_logs) - 1))
@@ -7491,6 +7612,7 @@ class PTZMasterApp:
                             if k == 'ESC': running = False
                             elif k == 'F1': _mk = Key.F1
                             elif k == 's_stat': _mk = 's'  # status-row (s) Show → same action as key 's'
+                            elif k in ('dndJ', 'dndZ'): _mk = k
                             else: _mk = k
                             mouse_hit = True; break
 
@@ -7649,13 +7771,13 @@ class PTZMasterApp:
                     # Execute scan in a separate thread
                     threading.Thread(target=scan_task, daemon=True).start()
 
-                    # UI Refresh loop z obsługą przerwania (ESC/q)
+                    # UI refresh loop with interrupt handling (ESC/q)
                     while not scan_done.is_set():
                         _draw()
-                        # Ulepszenie: nasłuchiwanie klawiszy bez blokowania, aby móc przerwać akcję
+                        # Non-blocking key polling so the user can interrupt the action
                         key_check = get_key(timeout=0.2)
                         if key_check in ('\x1b', 'q', 'Q'):
-                            _slog("Przerwano operację przez użytkownika...")
+                            _slog("Operation interrupted by user…")
                             break
 
                     # Restore mouse support
@@ -7743,6 +7865,130 @@ class PTZMasterApp:
                     translate_lang = TRANSLATE_LANGS[(_li + 1) % len(TRANSLATE_LANGS)]
                     notify(f"Translate target → [{translate_lang}]", "info")
                     full_redraw[0] = True
+
+                elif _mk in ('dndZ', 'z', 'Z') and dnd_queue:
+                    # [Z] – clear D&D queue
+                    dnd_queue.clear()
+                    _slog("D&D: kolejka wyczyszczona")
+                    need_draw = True
+
+                elif _mk in ('dndJ', 'j', 'J'):
+                    # [J] – generate PDF from D&D queue
+                    if not dnd_queue:
+                        notify("D&D queue empty – drop files onto the terminal", "warning")
+                    else:
+                        import datetime as _dt
+                        _jpgs = list(dnd_queue)   # use D&D queue as source
+                        _dnd_dir = os.path.dirname(_jpgs[0])
+                        _today   = _dt.date.today().strftime("%Y-%m-%d")
+                        _pdf_name = f"{_today}_dnd_print.pdf"
+                        _pdf_out  = os.path.join(_dnd_dir, _pdf_name)
+                        notify(f"D&D → PDF ({len(_jpgs)} pages)…", "info")
+                        _draw()
+                        _pm  = PDF_MODES[pdf_mode_sel]
+                        _page_fmt, _cw, _ch, _font_sz, _target_dpi = _pm[2], _pm[3], _pm[4], _pm[5], _pm[6]
+                        _no_scale = (_page_fmt == "NoScale")
+                        _ML, _MR, _MT, _MB = 150, 50, 50, 150
+                        _IAX = _ML; _IAY = _MT
+                        _IAW = _cw - _ML - _MR if not _no_scale else 0
+                        _IAH = _ch - _MT - _MB if not _no_scale else 0
+                        _tmp_dir   = os.path.join(_dnd_dir, "_pdf_tmp_dnd")
+                        os.makedirs(_tmp_dir, exist_ok=True)
+                        _tmp_pages = []; _failed = []
+                        pdf_phase = 1; pdf_total_files = len(_jpgs); pdf_pct = 0
+                        _slog(f"D&D PDF start: {len(_jpgs)} files, mode [{pdf_mode_sel}]")
+                        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
+                        sys.stdout.flush()
+                        for _i, _jpg in enumerate(_jpgs, 1):
+                            _fn      = os.path.basename(_jpg)
+                            _fn_safe = _fn.replace('"','_').replace("'",'_')
+                            _ext     = os.path.splitext(_fn_safe)[1]
+                            _tp      = os.path.join(_tmp_dir, f"{_fn_safe[:-len(_ext)]}_dnd.pdf")
+                            _label   = f"{_fn_safe[:-len(_ext)]} #{_i}"
+                            pdf_current_file = _fn; pdf_pct = int(_i / len(_jpgs) * 100)
+                            _draw()
+                            if _no_scale:
+                                _cmd = ["convert", _jpg,
+                                        "-pointsize", str(_font_sz), "-fill", "black",
+                                        "-gravity", "SouthEast", "-box", "white",
+                                        "-annotate", "+10+10", _label,
+                                        "-compress", "JPEG", "-quality", "75", _tp]
+                            else:
+                                try:
+                                    _ident = subprocess.check_output(
+                                        ["identify", "-format", "%w %h", _jpg],
+                                        stderr=subprocess.DEVNULL).decode().strip().split()
+                                    _ow, _oh = int(_ident[0]), int(_ident[1])
+                                except Exception:
+                                    _ow, _oh = _IAW, _IAH
+                                _sw = _IAW / _ow; _sh = _IAH / _oh; _sf = min(_sw, _sh)
+                                _sw2 = int(_ow * _sf); _sh2 = int(_oh * _sf)
+                                _ix  = _IAX + (_IAW - _sw2) // 2
+                                _iy  = _IAY + (_IAH - _sh2) // 2
+                                _ly  = max(0, _MB - 10 - _font_sz)
+                                _cmd = ["convert",
+                                        "-size", f"{_cw}x{_ch}", "xc:white",
+                                        "(", _jpg, "-resize", f"{_sw2}x{_sh2}",
+                                        "-unsharp", "1.0x0.5+0.5+0", ")",
+                                        "-gravity", "NorthWest",
+                                        "-geometry", f"+{_ix}+{_iy}", "-composite",
+                                        "-pointsize", str(_font_sz),
+                                        "-fill", "black", "-gravity", "SouthEast",
+                                        "-box", "white",
+                                        "-annotate", f"+{_MR}+{_ly}", _label,
+                                        "-density", str(_target_dpi),
+                                        "-compress", "JPEG", "-quality", "75", _tp]
+                            _r = subprocess.run(_cmd, stderr=subprocess.PIPE)
+                            if _r.returncode != 0:
+                                _failed.append(_fn)
+                            else:
+                                _tmp_pages.append(_tp)
+                        sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+                        sys.stdout.flush()
+                        if _tmp_pages:
+                            _merged = False; _merge_err = ""
+                            if shutil.which("pdfunite"):
+                                _gr = subprocess.run(["pdfunite"] + _tmp_pages + [_pdf_out],
+                                                     stderr=subprocess.PIPE)
+                                if _gr.returncode == 0:
+                                    _merged = True
+                                else:
+                                    _merge_err = _gr.stderr.decode(errors='replace').strip()
+                            if not _merged and shutil.which("gs"):
+                                _gr = subprocess.run(["gs", "-dBATCH", "-dNOPAUSE", "-q",
+                                                      "-sDEVICE=pdfwrite",
+                                                      f"-sOutputFile={_pdf_out}"] + _tmp_pages,
+                                                     stderr=subprocess.PIPE)
+                                if _gr.returncode == 0:
+                                    _merged = True
+                                else:
+                                    _merge_err = _gr.stderr.decode(errors='replace').strip()
+                            try:
+                                import shutil as _sh2; _sh2.rmtree(_tmp_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+                            if _merged:
+                                _sz = os.path.getsize(_pdf_out)
+                                _szs = f"{_sz/1024:.0f}K" if _sz < 1024*1024 else f"{_sz/1024/1024:.1f}M"
+                                _fail_info = f"  ⚠{len(_failed)} skipped" if _failed else ""
+                                _slog(f"✓ D&D PDF: {_pdf_name}  {_szs}  ({len(_tmp_pages)}s){_fail_info}")
+                                notify(f"D&D PDF ✓  {_pdf_name}  {_szs}  ({len(_tmp_pages)}s){_fail_info}", "success")
+                                pdf_phase = 2; pdf_pct = 100; _draw()
+                                _env2 = dict(os.environ)
+                                if not _env2.get("DISPLAY"): _env2["DISPLAY"] = ":0"
+                                try:
+                                    subprocess.Popen(['xdg-open', _dnd_dir],
+                                                     stdout=subprocess.DEVNULL,
+                                                     stderr=subprocess.DEVNULL,
+                                                     env=_env2, start_new_session=True)
+                                except Exception:
+                                    pass
+                                dnd_queue.clear()   # auto-clear after successful PDF
+                            else:
+                                notify(f"D&D PDF merge failed: {_merge_err[:60]}", "error")
+                        else:
+                            notify("D&D PDF: all pages failed (see log)", "error")
+                    need_draw = True
 
                 elif _mk == 'pdf8' or (isinstance(_mk, str) and _mk == '8'):
                     # ── Generate PDF from JPGs in pdf_dir ─────────────────
@@ -8793,7 +9039,7 @@ class PTZMasterApp:
                                 if len(parts) >= 2:
                                     nx, ny = int(parts[0]), int(parts[1])
                                     cam.layout = WindowLayout(x=nx, y=ny, w=w, h=h)
-                                    print(f"    {GRN}✓{RST} Zapisano {nx},{ny} {w}x{h}")
+                                    print(f"    {GRN}✓{RST} Saved {nx},{ny} {w}x{h}")
                                     saved += 1
                         except (ValueError, EOFError):
                             pass
@@ -11908,7 +12154,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                     else:
                         ui_mode_file = "PAN"
                     last_msg = "Mode: PAN"
-                # [Z🎥] PTZ – tylko w trybie CAMERA, kolumny ok. 65-69
+                # [Z🎥] PTZ – CAMERA mode only, approx cols 65-69
                 elif 65 <= c <= 69 and cam_mode:
                     ui_mode = "PTZ"
                     last_msg = "Mode: PTZ"
