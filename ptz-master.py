@@ -154,7 +154,8 @@ def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
 # ARMORED TUI v1.3 - slot drawing
 # =============================================================================
 
-_EMOJI_CACHE = {}
+_EMOJI_CACHE      = {}
+_EMOJI_CACHE_LOCK = __import__("threading").Lock()  # guards concurrent r/w
 
 def _measure_emoji(ch: str) -> int:
     # Guard: termios/tty only available on Unix TTY environments
@@ -185,7 +186,9 @@ def _measure_emoji(ch: str) -> int:
 def calibrate_emojis(emoji_list):
     for e in set(emoji_list):
         if e not in _EMOJI_CACHE:
-            _EMOJI_CACHE[e] = _measure_emoji(e)
+            with _EMOJI_CACHE_LOCK:
+                if e not in _EMOJI_CACHE:   # double-checked locking
+                    _EMOJI_CACHE[e] = _measure_emoji(e)
 
 def cut_by_width(s: str, width: int) -> str:
     import re
@@ -200,7 +203,8 @@ def cut_by_width(s: str, width: int) -> str:
             i = m.end()
             continue
         ch = s[i]
-        cw = _EMOJI_CACHE.get(ch, 2 if ord(ch) > 127 else 1)
+        with _EMOJI_CACHE_LOCK:
+            cw = _EMOJI_CACHE.get(ch, 2 if ord(ch) > 127 else 1)
         if w + cw > width:
             break
         out += ch
@@ -1243,8 +1247,10 @@ def ansilen(s: str) -> int:
     total = 0
     for c in clean:
         # 1) use measured emoji width if available (fixes 🔩, 🛠, 📜 etc.)
-        if c in _EMOJI_CACHE:
-            total += _EMOJI_CACHE[c]
+        with _EMOJI_CACHE_LOCK:
+            cw = _EMOJI_CACHE.get(c)
+        if cw is not None:
+            total += cw
             continue
         cp = ord(c)
         # Emoji and symbols (most occupy 2 columns)
@@ -1619,7 +1625,7 @@ def select_menu(items: list, selected: int = 0,
     _escq_plain  = "(ESC/Q)"
     # footer: ╚═{fill}═{vtag}═{escq}═╝  total width = W+2
     _foot_right  = f"═{_escq_plain}═╝"            # e.g. "═(ESC/Q)═╝"  10 chars
-    _foot_mid    = f"═{_vtag_plain}═"              # e.g. "═[ ptz-master v9.0.80 ]═"
+    _foot_mid    = f"═{_vtag_plain}═"              # e.g. "═[ ptz-master v9.0.90 ]═"
     _foot_fill   = max(0, W + 2 - 1 - len(_foot_mid) - len(_foot_right))
     # column (1-indexed) where (ESC/Q) starts in the footer line:
     _escq_col    = 1 + _foot_fill + len(_foot_mid) + 2  # ╚(1) + fill + mid + ═(1) + 1-idx
@@ -3265,9 +3271,14 @@ class MpvController:
                             return obj
                     except Exception:
                         pass
+        except FileNotFoundError:
+            logger.debug(f"IPC socket not found: {self.socket_path} – mpv not running yet")
+        except ConnectionRefusedError:
+            logger.debug(f"IPC connection refused: {self.socket_path} – mpv starting up")
+        except OSError as e:
+            logger.debug(f"IPC OS error {self.socket_path}: {e}")
         except Exception as e:
             logger.info(f"IPC ✗ {command}: {e}")
-        logger.info(f"IPC ← None (no response found) for {command}")
         return None
 
     def set_property(self, prop: str, value) -> bool:
@@ -3799,8 +3810,8 @@ class Player:
                                          global_mute=global_mute)
             elif cam.type == CameraType.SCANNER:
                 # HERE: Correct tuple unpacking (Fix 1)
-                _res = Player._play_scanner(cam, skip_focus=skip_focus)
-                return _res[0] if isinstance(_res, tuple) else _res
+                _ok, _msg = Player._play_scanner(cam, skip_focus=skip_focus)
+                return _ok
             else:
                 return Player._play_rtsp(cam, profile, player_cmd, layout,
                                          skip_focus=skip_focus, global_mute=global_mute)
@@ -3995,12 +4006,27 @@ class Player:
             f'--speed={cam.image_params.get("speed", cam.file_speed):.2f}',
         ]
         if _is_audio_only:
-            # Oscyloskop / wizualizacja audio przez lavfi
+            # Audio visualiser via FFmpeg lavfi — 4 modes cycled with [V]
+            _VIS_MODES = [
+                "showcqt",       # 0: CQT spectrum (musical scale, most beautiful)
+                "showwaves",     # 1: waveform oscilloscope
+                "avectorscope",  # 2: stereo Lissajous vectorscope
+                "showspectrum",  # 3: waterfall spectrogram
+            ]
+            _vis_idx  = getattr(cam, "_vis_mode_idx", 0) % len(_VIS_MODES)
+            _vis_mode = _VIS_MODES[_vis_idx]
             _vis_size = f"{layout.w}x{layout.h}"
+            _lavfi = {
+                "showcqt"      : f"[aid1]asplit[ao][a];[a]showcqt=s={_vis_size}:count=1:csp=bt709:bar_g=2:sono_g=7[vo]",
+                "showwaves"    : f"[aid1]asplit[ao][a];[a]showwaves=s={_vis_size}:mode=line:colors=0x00ff88[vo]",
+                "avectorscope" : f"[aid1]asplit[ao][a];[a]avectorscope=s={_vis_size}:zoom=3:rc=2:gc=200:bc=0:rf=1:gf=8:bf=7[vo]",
+                "showspectrum" : f"[aid1]asplit[ao][a];[a]showspectrum=s={_vis_size}:mode=combined:color=rainbow:scale=log[vo]",
+            }[_vis_mode]
             args += [
-                f'--lavfi-complex=[aid1]asplit=2[ao][a1];[a1]avectorscope=s={_vis_size}:zoom=1.5:rc=0:gc=200:bc=0:rf=1:gf=8:bf=7[vo]',
+                f'--lavfi-complex={_lavfi}',
                 '--no-audio-display',
             ]
+            logger.info(f"Audio vis mode [{_vis_idx}]: {_vis_mode}")
         # Apply image_params directly in the mpv command — no IPC wait needed
         ip = cam.image_params
         if ip.get("brightness", 0) != 0: args.append(f'--brightness={int(ip["brightness"])}')
@@ -4656,7 +4682,12 @@ class UI:
         _mode_col = DIM if _cmode == "PTZ" else YLW
         _mode_tag = f" {_mode_col}[{_cmode.lower()}]{RST}"
 
-        sys.stdout.write(f"│    {dsD}    │{_mode_tag}                {_xy_s}")
+        # x: pinned to col 34, y: pinned to col 42 — matches hitboxes in _handle_mouse_click
+        _X_COL = 34
+        _Y_COL = 42
+        sys.stdout.write(f"│    {dsD}    │{_mode_tag}")
+        sys.stdout.write(f"\033[{_X_COL}G{_xy_col_x}x:{_pan_x:+.2f}{RST}")
+        sys.stdout.write(f"\033[{_Y_COL}G{_xy_col_y}y:{_pan_y:+.2f}{RST}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
         sys.stdout.write(f"\033[{_COL79}G│\n")
 
@@ -5007,8 +5038,17 @@ class PTZMasterApp:
             new_settings[3] |= (termios.ECHO | termios.ICANON)
             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
 
-            # 4. Position cursor on row 18 and clear the line before the prompt
-            sys.stdout.write(f'\033[18;1H\033[2K{YLW}│ {prompt_text}{RST}')
+            # 4. Position cursor on row 18, clear line, draw prompt inside frame
+            # Border │ stays white (RST), prompt text yellow, closing │ right-aligned
+            FW = 78   # frame width (same as main TUI)
+            _prompt_plain = f'| {prompt_text}'  # plain len, no ANSI
+            _input_col    = len(_prompt_plain) + 1  # column where user types
+            # Draw: white │, yellow prompt, fill spaces, │ pinned to col FW+2=80
+            sys.stdout.write(f'\033[18;1H\033[2K')
+            sys.stdout.write(f'{RST}│ {YLW}{prompt_text}{RST}')
+            sys.stdout.write(f'\033[18;{FW + 2}H│')  # closing │ always at col 80
+            # Place cursor at input start position inside frame
+            sys.stdout.write(f'\033[18;{_input_col}H')
             sys.stdout.flush()
 
             # 5. Safe data retrieval
@@ -5055,7 +5095,7 @@ class PTZMasterApp:
                     new_zv = 0.0
                 ctrl.set_property('video-zoom', new_zv)
                 if cam:
-                    cam.zoom_level = 2 ** new_zv
+                    cam._mpv_zoom = 2 ** new_zv  # PAN mode: store in _mpv_zoom → renders at col 44
                 notify(f"Digital zoom set to {2**new_zv:.2f}x", "info")
         except (ValueError, EOFError):
             notify("Invalid number", "error")
@@ -5370,15 +5410,20 @@ class PTZMasterApp:
                 return
 
             # --- Pan coordinates editing (click on "x:+… y:+…") ---
-            # These appear on the right panel area, starting around column 51.
-            # We'll detect clicks on "x:" and "y:" substrings.
-            if 51 <= c <= 58:   # approximate area of "x:+0.00"
+            # Row 14 layout: "│    ▼    │ [pan]                x:+0.00 y:+0.00"
+            #   col 11: │  col 12: mode_tag (6 plain) + 16 spaces → col 34: x:
+            #   "x:+0.00" = 7 chars → col 34-40 ; "y:+0.00" = 7 chars → col 42-48
+            # (space separator at col 41)
+            _XY_ROW = 14
+            _X_COL_START = 34;  _X_COL_END = 40
+            _Y_COL_START = 42;  _Y_COL_END = 48
+            if r == _XY_ROW and _X_COL_START <= c <= _X_COL_END:
                 self._mouse_off()
                 self._edit_pan_x()
                 self._mouse_on()
                 self.ui.draw()
                 return
-            if 59 <= c <= 66:   # approximate area of "y:+0.00"
+            if r == _XY_ROW and _Y_COL_START <= c <= _Y_COL_END:
                 self._mouse_off()
                 self._edit_pan_y()
                 self._mouse_on()
@@ -10622,16 +10667,13 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             ("A", "AB-loop start / stop (file mode)"),
             ("R / A", "Extract clip (when AB-loop active)"),
             ("T", "Screenshot"),
+            ("V", "Cycle audio visualiser (audio files only)  showcqt / showwaves / avectorscope / showspectrum"),
         ]
         display_tui_help("🎬 PLAYER CONTROLS", content)
 
     def _edit_pan_x(): pass
     def _edit_pan_y(): pass
-    def _zoom_toggle():
-        # Toggle zoom between 0 (no zoom) and last non-zero value (or ZOOM_STEP if was 0)
-        # Uses nonlocal – zoom_val / zoom_mode are defined later in the function body;
-        # this stub is replaced after those variables are bound at runtime.
-        pass   # real body injected below after zoom_val is available
+    # _zoom_toggle real definition is below (after zoom_val / zoom_mode are declared)
     def _edit_zoom(): pass
     import select as _sel
     import signal as _sig
@@ -10721,6 +10763,11 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     ptz_progress = 0.0          # movement progress (0..1)
     ptz_direction = ""          # optional direction to display
     is_file_cam   = (cam is not None and cam.type == CameraType.FILE)
+    _AUDIO_EXTS   = {'.mp3','.flac','.ogg','.opus','.m4a','.aac','.wav','.wma','.ape','.mka'}
+    _fp_ext       = os.path.splitext(cam.file_path if cam and hasattr(cam,"file_path") else "")[1].lower()
+    _is_audio_only = _fp_ext in _AUDIO_EXTS and not cam_mode
+    _VIS_MODES    = ["showcqt", "showwaves", "avectorscope", "showspectrum"]
+    _vis_idx      = getattr(cam, "_vis_mode_idx", 0) if cam else 0
     last_step_dir = None
     _ip    = cam.image_params if hasattr(cam, 'image_params') else {}
     speed  = _ip.get("speed",  1.0)
@@ -11012,9 +11059,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         _zoom_apply()
         last_msg = "🔍 Zoom → 1.0x"
 
-    # Fix: real _zoom_toggle – replaces pass-stub defined earlier in the outer scope.
     # Toggles mpv zoom between 1× and one ZOOM_STEP.
-    def _zoom_toggle():  # noqa: F811
+    def _zoom_toggle():
         nonlocal zoom_val, zoom_mode, last_msg
         if zoom_val != 0.0:
             zoom_val = 0.0
@@ -12592,6 +12638,21 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
             elif ch == 'X': _save_image_params()
             elif ch in ('i', 'I'): _zoom_in()
             elif ch in ('o', 'O'): _zoom_out()
+            elif ch in ('v', 'V') and _is_audio_only:
+                # Cycle audio visualiser and restart mpv
+                _vis_idx = (_vis_idx + 1) % len(_VIS_MODES)
+                if cam: cam._vis_mode_idx = _vis_idx
+                _vname = _VIS_MODES[_vis_idx]
+                last_msg = f"🎵 Vis → {_vname} [{_vis_idx+1}/{len(_VIS_MODES)}]  (mpv restarting…)"
+                _draw()
+                # Kill current mpv — watchdog/autoplay will restart with new filter
+                if prof and prof.pid:
+                    try: ProcessManager.kill(prof.pid)
+                    except Exception: pass
+                result = "next"
+                # Re-launch immediately via goto current index
+                result = ("goto", current_idx)
+                break
             elif ch in ('t', 'T'): _screenshot()
             elif ch in ('k', 'K'):
                 name = _ask_save_name()
