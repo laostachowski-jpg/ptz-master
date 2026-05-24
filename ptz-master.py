@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.80"
+VERSION = "9.0.90"
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -4608,29 +4608,57 @@ class UI:
         dsU = _ds('U'); dsD = _ds('D'); dsL = _ds('L'); dsR = _ds('R')
         dsC = _ds('C')
         dsZP = dir_sym_raw['Z+']; dsZM = dir_sym_raw['Z-']
-        _zoom_s = f"{GRN}{cam.zoom_level:.1f}x{RST}" if hasattr(cam, "zoom_level") else f"{GRN}1.0x{RST}"
-        _pan_x  = getattr(cam, "pan_x", 0.0)
-        _pan_y  = getattr(cam, "pan_y", 0.0)
-        _pan_s  = f"{GRN}1.0x{RST}"
-        _xy_s   = f"x:{_pan_x:+.2f} y:{_pan_y:+.2f}"
+        # ── [Z]oom value: PTZ optical zoom ──────────────────────────────────
+        _ptz_zoom = cam.zoom_level if hasattr(cam, "zoom_level") else 1.0
+        _zoom_s = f"{GRN}{_ptz_zoom:.1f}x{RST}"
+
+        # ── [P]an value: mpv digital zoom (video-zoom exponent → multiplier) ─
+        # cam.zoom_level is updated by _do_move PAN branch: cam.zoom_level = 2**zv
+        # In PTZ mode cam.zoom_level = PTZ zoom; in PAN mode = mpv zoom.
+        # Keep separate: read mpv zoom from cam attribute set by PAN branch.
+        _mpv_zoom = getattr(cam, "_mpv_zoom", 1.0)   # set below, default 1.0x
+        # Recompute from stored pan_x/y & zoom for display:
+        _pan_x  = getattr(cam, "pan_x",  0.0)
+        _pan_y  = getattr(cam, "pan_y",  0.0)
+        # _mpv_zoom is stored as 2**zv when _do_move PAN Z+/Z- fires
+        # fallback: 1.0x = neutral
+        _pan_s  = f"{GRN}{_mpv_zoom:.1f}x{RST}"
+
+        # ── x/y colour: white if neutral (0.00), red if modified ────────────
+        _xy_col_x = RED if abs(_pan_x) >= 0.005 else RST
+        _xy_col_y = RED if abs(_pan_y) >= 0.005 else RST
+        _xy_s   = (f"{_xy_col_x}x:{_pan_x:+.2f}{RST} "
+                   f"{_xy_col_y}y:{_pan_y:+.2f}{RST}")
+
         _COL79  = FW + 2  # right │ absolute (FW=78 → col 80)
         _C34 = 50  # centre │ — absolute column 50
+
+        # ── Row 12: progress ─────────────────────────────────────────────────
         sys.stdout.write(f"│    {dsU}    │ Progress: {p_view}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(m/l){RST} Dur  : {GRN}{cam.duration:4.1f}s{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
-        sys.stdout.write(f"│  {dsL} {dsC} {dsR}  │ {YLW}[Z]{RST}oom{YLW}[+][-]{RST}  {_zoom_s} {YLW}[P]{RST}an{YLW}[+][-]{RST}  {_pan_s}")
+
+        # ── Row 13: [Z]oom / [P]an — each value pinned to fixed column ───────
+        # Zoom value at col 26-30, Pan value at col 44-48
+        # Using absolute cursor positioning so language/emoji width never shifts them
+        _Z_COL = 26   # column where zoom value starts
+        _P_COL = 44   # column where pan  value starts
+        sys.stdout.write(f"│  {dsL} {dsC} {dsR}  │ {YLW}[Z]{RST}oom{YLW}[+][-]{RST}")
+        sys.stdout.write(f"\033[{_Z_COL}G{_zoom_s}")
+        sys.stdout.write(f"  {YLW}[P]{RST}an{YLW}[+][-]{RST}")
+        sys.stdout.write(f"\033[{_P_COL}G{_pan_s}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(s/f){RST} Speed: {GRN}{cam.speed:3.1f}{RST}")
         sys.stdout.write(f"\033[{_COL79}G│\n")
 
-        ### CHANGE: mode indicator [ptz]/[pan] on same row as ▼, before coordinates
+        # ── Row 14: mode tag + x/y coordinates ───────────────────────────────
         _cur_cam  = self.current_camera
         _cmode    = getattr(_cur_cam, "_ctrl_mode", "PTZ") if _cur_cam else "PTZ"
-        _mode_tag = f" {DIM}[{_cmode.lower()}]{RST}"
+        _mode_col = DIM if _cmode == "PTZ" else YLW
+        _mode_tag = f" {_mode_col}[{_cmode.lower()}]{RST}"
 
-        sys.stdout.write(f"│    {dsD}    │{_mode_tag}                {DIM}{_xy_s}{RST}")
+        sys.stdout.write(f"│    {dsD}    │{_mode_tag}                {_xy_s}")
         sys.stdout.write(f"\033[{_C34}G│ {YLW}(0){RST} Reset {YLW}F4{RST} Recall {YLW}F5{RST} Save")
         sys.stdout.write(f"\033[{_COL79}G│\n")
-        # Koniec ZMIANA
 
         cam_nav      = f"({self.current_idx + 1}/{total})"
         _gm = self.config.global_mute
@@ -5233,9 +5261,9 @@ class PTZMasterApp:
                     _ct.set_property('video-pan-y', _py)
                     _ct.set_property('video-zoom',  _zv)
                     if cam:
-                        cam.pan_x = _px
-                        cam.pan_y = _py
-                        cam.zoom_level = 2 ** _zv   # convert exponent to multiplier
+                        cam.pan_x    = _px
+                        cam.pan_y    = _py
+                        cam._mpv_zoom = 2 ** _zv   # mpv digital zoom multiplier
                 else:
                     notify('mpv not playing – start with (p)', 'warning')
             else:
@@ -5279,54 +5307,38 @@ class PTZMasterApp:
                     self.ui.draw()
                 return
 
-            # --- Optical PTZ zoom (Zoom + - buttons) ---
-            if 19 <= c <= 21:  # Zoom +
-                _do_move(0.0, 0.0, 1.0, 'Z+')
+            # --- [Z]oom [+][-] : PTZ optical zoom only (disabled in PAN mode) ---
+            if 19 <= c <= 21:  # Zoom [+]
+                if _cmode == 'PTZ':
+                    _do_move(0.0, 0.0, 1.0, 'Z+')
+                else:
+                    notify('[Z]oom[+][-] is PTZ only – in PAN mode use [P]an[+][-]', 'warning')
                 self.ui.draw()
                 return
-            if 22 <= c <= 24:  # Zoom -
-                _do_move(0.0, 0.0, -1.0, 'Z-')
+            if 22 <= c <= 24:  # Zoom [-]
+                if _cmode == 'PTZ':
+                    _do_move(0.0, 0.0, -1.0, 'Z-')
+                else:
+                    notify('[Z]oom[+][-] is PTZ only – in PAN mode use [P]an[+][-]', 'warning')
                 self.ui.draw()
                 return
 
-            # --- Digital PAN zoom (Pan + - buttons) ---
-            if 37 <= c <= 39:  # Pan [+]
-                if cam and getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN':
-                    _prof = self.ui.current_profile
-                    _pid = _prof.pid if _prof else None
-                    _ipc = _prof.ipc_path if _prof else None
-                    if _pid and ProcessManager.is_running(_pid) and _ipc:
-                        ctrl = MpvController(_ipc)
-                        zv = float(ctrl.get_property('video-zoom') or 0)
-                        new_zv = min(3.0, zv + 0.1)
-                        ctrl.set_property('video-zoom', new_zv)
-                        if cam:
-                            cam.zoom_level = 2 ** new_zv
-                        notify(f'Video-zoom {2**new_zv:.1f}x', 'info')
-                    else:
-                        notify('mpv not playing – start with (p)', 'warning')
+            # --- [P]an [+][-] : mpv video-zoom only (disabled in PTZ mode) ---
+            # Arrows handle pan-x/y in PAN mode via _do_move → tag U/D/L/R
+            # [P][+][-] handles the digital ZOOM level for mpv
+            if 37 <= c <= 39:  # Pan [+]  →  mpv video-zoom in
+                if _cmode == 'PAN':
+                    _do_move(0.0, 0.0, 1.0, 'Z+')   # reuses PAN branch Z+ tag
                 else:
-                    notify('Switch to PAN mode (press Z)', 'warning')
+                    notify('[P]an[+][-] is PAN mode only – switch with (Z)', 'warning')
                 self.ui.draw()
                 return
 
-            if 40 <= c <= 42:  # Pan [-]
-                if cam and getattr(cam, '_ctrl_mode', 'PTZ') == 'PAN':
-                    _prof = self.ui.current_profile
-                    _pid = _prof.pid if _prof else None
-                    _ipc = _prof.ipc_path if _prof else None
-                    if _pid and ProcessManager.is_running(_pid) and _ipc:
-                        ctrl = MpvController(_ipc)
-                        zv = float(ctrl.get_property('video-zoom') or 0)
-                        new_zv = max(-3.0, zv - 0.1)
-                        ctrl.set_property('video-zoom', new_zv)
-                        if cam:
-                            cam.zoom_level = 2 ** new_zv
-                        notify(f'Video-zoom {2**new_zv:.1f}x', 'info')
-                    else:
-                        notify('mpv not playing – start with (p)', 'warning')
+            if 40 <= c <= 42:  # Pan [-]  →  mpv video-zoom out
+                if _cmode == 'PAN':
+                    _do_move(0.0, 0.0, -1.0, 'Z-')  # reuses PAN branch Z- tag
                 else:
-                    notify('Switch to PAN mode (press Z)', 'warning')
+                    notify('[P]an[+][-] is PAN mode only – switch with (Z)', 'warning')
                 self.ui.draw()
                 return
 
@@ -11759,8 +11771,8 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                zoom_str = f"{DIM}{2.0**zoom_val:.1f}x{RST}"
             else:
                 zoom_str = f"{RED}{2.0**zoom_val:.1f}x{RST}"
-            pan_x_col = RED if pan_x != 0 else DIM
-            pan_y_col = RED if pan_y != 0 else DIM
+            pan_x_col = RED if abs(pan_x) >= 0.005 else RST
+            pan_y_col = RED if abs(pan_y) >= 0.005 else RST
             pan_str = f"{pan_x_col}x:{pan_x:+.2f}{RST} {pan_y_col}y:{pan_y:+.2f}{RST}"
             right_dashes = "────────────" if not cam_mode else "───────"
             line1 = f"{border_color}┌───────────{RST}{header_str}{border_color}{right_dashes}┐{RST}"
