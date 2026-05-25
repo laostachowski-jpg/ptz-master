@@ -3978,7 +3978,8 @@ class Player:
     def _play_file(cam: Camera, layout: WindowLayout,
                    _watchdog_restart: bool = False,
                    skip_focus: bool = False,
-                   global_mute: bool = False) -> bool:
+                   global_mute: bool = False,
+                   vis_mode_idx: int = 0) -> bool:
         if not cam.file_path or not os.path.isfile(cam.file_path):
             notify(f"FILE: file not found: {cam.file_path}", "error")
             return False
@@ -4013,15 +4014,39 @@ class Player:
                 "avectorscope",  # 2: stereo Lissajous vectorscope
                 "showspectrum",  # 3: waterfall spectrogram
             ]
-            _vis_idx  = getattr(cam, "_vis_mode_idx", 0) % len(_VIS_MODES)
+            _vis_idx  = vis_mode_idx % len(_VIS_MODES)
             _vis_mode = _VIS_MODES[_vis_idx]
             _vis_size = f"{layout.w}x{layout.h}"
-            _lavfi = {
-                "showcqt"      : f"[aid1]asplit[ao][a];[a]showcqt=s={_vis_size}:count=1:csp=bt709:bar_g=2:sono_g=7[vo]",
-                "showwaves"    : f"[aid1]asplit[ao][a];[a]showwaves=s={_vis_size}:mode=line:colors=0x00ff88[vo]",
-                "avectorscope" : f"[aid1]asplit[ao][a];[a]avectorscope=s={_vis_size}:zoom=3:rc=2:gc=200:bc=0:rf=1:gf=8:bf=7[vo]",
-                "showspectrum" : f"[aid1]asplit[ao][a];[a]showspectrum=s={_vis_size}:mode=combined:color=rainbow:scale=log[vo]",
-            }[_vis_mode]
+            # Build lavfi filter string per visualiser mode
+            _sq = _vis_size  # shorthand
+            _lavfi_map = {
+                # showcqt: musical CQT — colorful bars + waterfall, dual channel
+                # tc/sc dropped: not supported in older FFmpeg builds
+                "showcqt": (
+                    "[aid1]asplit[ao][a];"
+                    "[a]showcqt=s=" + _sq + ":count=2"
+                    ":bar_g=3:sono_g=4:bar_t=0.5:csp=bt709[vo]"
+                ),
+                # showwaves: dual stereo lines, green L / cyan R, sqrt scale
+                "showwaves": (
+                    "[aid1]asplit[ao][a];"
+                    "[a]showwaves=s=" + _sq + ":mode=cline"
+                    ":colors=0x00ff88|0x00ccff:scale=sqrt[vo]"
+                ),
+                # avectorscope: Lissajous with bright green glow, line draw
+                "avectorscope": (
+                    "[aid1]asplit[ao][a];"
+                    "[a]avectorscope=s=" + _sq + ":zoom=3"
+                    ":rc=2:gc=255:bc=128:rf=1:gf=8:bf=7:draw=line[vo]"
+                ),
+                # showspectrum: rainbow waterfall, log scale, high saturation
+                "showspectrum": (
+                    "[aid1]asplit[ao][a];"
+                    "[a]showspectrum=s=" + _sq + ":mode=combined"
+                    ":color=rainbow:scale=log:saturation=8:gain=4[vo]"
+                ),
+            }
+            _lavfi = _lavfi_map[_vis_mode]
             args += [
                 f'--lavfi-complex={_lavfi}',
                 '--no-audio-display',
@@ -10490,7 +10515,8 @@ class PlayerModeApp:
         self.idx        = start_idx
         self._cam       = None
         self._prof      = None
-        self.loop_mode  = loop_mode  # DODANE
+        self.loop_mode    = loop_mode
+        self._vis_mode_idx = 0         # audio visualiser mode — persists across _load()
         atexit.register(self.cleanup)
         Terminal.capture_window_id()
 
@@ -10538,7 +10564,8 @@ class PlayerModeApp:
         self._cam, self._prof = self._make_cam_prof(path)
         layout = self.config.layout.get("mpv_default") or WindowLayout(0, 0, 640, 360)
         Player._play_file(self._cam, layout,
-                          global_mute=self.config.global_mute)
+                          global_mute=self.config.global_mute,
+                          vis_mode_idx=self._vis_mode_idx)
 
     def _save_as_camera(self, name: str):
         path = self.files[self.idx]
@@ -10595,10 +10622,15 @@ class PlayerModeApp:
                 save_as_camera_fn=self._save_as_camera,
                 config_mgr=self.config_mgr,
                 loop_mode=self.loop_mode,
+                vis_mode_idx=self._vis_mode_idx,
             )
 
             # persist loop state changed inside player
             self.loop_mode = loop_mode_new
+            # persist vis mode across file changes
+            if isinstance(loop_mode_new, tuple):
+                pass  # handled below
+            self._vis_mode_idx = getattr(cam, "_vis_mode_idx", self._vis_mode_idx)
 
             if isinstance(result, tuple) and result[0] == "goto":
                 self._load(result[1])
@@ -10632,7 +10664,7 @@ class PlayerModeApp:
 def _mpv_control_screen_player(cam, prof, files, current_idx,
                                 save_as_camera_fn=None, config_mgr=None,
                                 loop_mode=False, cam_mode=False,
-                                all_cameras=None):
+                                all_cameras=None, vis_mode_idx=0):
     """
     Uniwersalny ekran sterowania mpv.
     - cam_mode=True  → tryb kamer: SELECT / PAN / PTZ
@@ -10767,7 +10799,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
     _fp_ext       = os.path.splitext(cam.file_path if cam and hasattr(cam,"file_path") else "")[1].lower()
     _is_audio_only = _fp_ext in _AUDIO_EXTS and not cam_mode
     _VIS_MODES    = ["showcqt", "showwaves", "avectorscope", "showspectrum"]
-    _vis_idx      = getattr(cam, "_vis_mode_idx", 0) if cam else 0
+    _vis_idx      = vis_mode_idx  # passed from PlayerModeApp, persists across loads
     last_step_dir = None
     _ip    = cam.image_params if hasattr(cam, 'image_params') else {}
     speed  = _ip.get("speed",  1.0)
