@@ -1522,6 +1522,9 @@ class KeyReader:
                 if not raw:
                     return Key.TIMEOUT
                 ch = raw.decode('utf-8', errors='replace')
+            except InterruptedError:
+                # SIGWINCH or other signal interrupted the read — not an error
+                return Key.TIMEOUT
             except Exception:
                 return Key.TIMEOUT
 
@@ -3320,8 +3323,17 @@ class MpvController:
 
     @staticmethod
     def socket_path_for(cam_name: str, pid: int) -> str:
+        import hashlib as _hl
         safe = cam_name.replace(' ', '_').replace('/', '_')
-        return f"/tmp/mpv-{safe}-{pid}"
+        # Unix socket path hard limit: 107 chars on Linux.
+        # "/tmp/mpv-" (9) + pid (7) + "-" (1) = 17 reserved → 90 for name.
+        # If name is longer, use first 32 chars + 8-char hash to stay unique.
+        if len(safe) > 60:
+            _hash = _hl.md5(safe.encode()).hexdigest()[:8]
+            safe  = safe[:32] + "_" + _hash
+        path = f"/tmp/mpv-{safe}-{pid}"
+        assert len(path) <= 107, f"IPC path too long: {len(path)} chars"
+        return path
 
 
 class PlayerWatchdog:
@@ -3825,7 +3837,8 @@ class Player:
                       progress_callback=None,
                       file_number: int = None,
                       date_fmt: int = 0,
-                      num_pad: int = 3) -> tuple:
+                      num_pad: int = 3,
+                      proc_ref: list = None) -> tuple:  # proc_ref=[None] receives Popen obj
         """v9.0.52: Stable scan handling with safety fixes."""
         if not shutil.which('scanimage'):
             return False, "scanimage not found"
@@ -3901,6 +3914,8 @@ class Player:
                 start_new_session=True,
                 universal_newlines=True, bufsize=1
             )
+            if proc_ref is not None:
+                proc_ref[0] = proc  # expose to caller for interrupt/kill
 
             # Progress loop
             while proc.poll() is None:
@@ -4842,6 +4857,13 @@ class PTZMasterApp:
         except Exception:
             pass
 
+        # Save original terminal state — restored in cleanup() even on crash
+        self._original_termios = None
+        if _UNIX_TTY:
+            try:
+                self._original_termios = termios.tcgetattr(sys.stdin.fileno())
+            except Exception:
+                pass
         atexit.register(self.cleanup)
 
     def notify(self, msg: str, type: str = "info"):
@@ -4860,8 +4882,18 @@ class PTZMasterApp:
 
     def cleanup(self, save_session: bool = False):
         logger.info("Cleaning up before exit...")
-        sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m')
-        sys.stdout.flush()
+        try:
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        # Guaranteed terminal reset — runs even after uncaught exceptions
+        if _UNIX_TTY and getattr(self, "_original_termios", None):
+            try:
+                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                                  self._original_termios)
+            except Exception as e:
+                logger.debug(f"Cleanup termios restore error: {e}")
 
         if save_session:
             logger.info("Saving session state...")
@@ -7843,15 +7875,17 @@ class PTZMasterApp:
                         if scan_phase != 2: scan_phase = 2
                         scan_pct = pct
 
+                    _scan_proc_ref = [None]  # mutable ref so scan_task can store proc
+
                     def scan_task():
                         try:
-                            # IMPORTANT: Player._play_scanner returns (success_bool, file_path)
                             ok, msg = Player._play_scanner(
                                 cam,
                                 progress_callback=update_progress,
                                 file_number=_get_next_number(),
                                 date_fmt=date_format,
-                                num_pad=num_padding
+                                num_pad=num_padding,
+                                proc_ref=_scan_proc_ref,
                             )
                             scan_result[0] = ok
                             scan_result[1] = msg
@@ -7867,10 +7901,17 @@ class PTZMasterApp:
                     # UI refresh loop with interrupt handling (ESC/q)
                     while not scan_done.is_set():
                         _draw()
-                        # Non-blocking key polling so the user can interrupt the action
                         key_check = get_key(timeout=0.2)
                         if key_check in ('\x1b', 'q', 'Q'):
                             _slog("Operation interrupted by user…")
+                            # Kill scanimage process to release USB hardware
+                            _proc = _scan_proc_ref[0]
+                            if _proc and _proc.poll() is None:
+                                try:
+                                    _proc.kill()
+                                    logger.info("scanimage killed by user interrupt")
+                                except Exception:
+                                    pass
                             break
 
                     # Restore mouse support
