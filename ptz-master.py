@@ -4371,7 +4371,7 @@ def display_tui_help(title_text, help_content):
             except: term_w, term_h = 80, 24
 
             box_w = min(78, term_w)
-            buf = ['\033[2J\033[H']
+            buf = ['\033[H']   # cursor home only — alt-screen handles clean redraws
 
             buf.append(f"\033[1;1H{GRN}╔{'═'*(box_w-2)}╗{RST}")
             title_centered = f" {title_text} "
@@ -7360,7 +7360,7 @@ class PTZMasterApp:
             except: term_w, term_h = 80, 24
             W = max(60, min(120, term_w - 2))
             # Min TUI height lowered from 24 to 22 (gives 21 usable rows)
-            H = max(22, term_h - 1)
+            H = max(22, term_h)   # use full terminal height; footer at H-1
             iw = W - 2   # inner width
 
             import datetime as _dt
@@ -7671,7 +7671,8 @@ class PTZMasterApp:
         _notif_deadline = 0.0
         try:
             tty.setcbreak(fd)
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
+            # Enter alternate screen — keeps scroll history clean
+            sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
 
             while running:
@@ -8331,7 +8332,8 @@ class PTZMasterApp:
                     running = False
 
         finally:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[2J\033[H')
+            # Exit alternate screen, restore cursor, disable mouse
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
 
