@@ -1317,7 +1317,8 @@ def mouse_off():
         pass
 
 def mouse_on():
-    sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+    # Re-enable mouse and hide cursor (cursor may have been shown by submenus)
+    sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h\033[?25l')
     sys.stdout.flush()
 
 def print_progress_bar(iteration: int, total: int, prefix: str = '', 
@@ -4400,25 +4401,26 @@ def display_tui_help(title_text, help_content):
                 draw_slot(buf, row, 1, box_w, f"{GRN}║{pad(content, inside_w)}", "", f"{GRN}║{RST}")
                 row += 1
 
-            while row < term_h - 2:
+            while row < term_h - 3:
                 draw_slot(buf, row, 1, box_w, f"{GRN}║", "", f"{GRN}║{RST}")
                 row += 1
 
-            sep_row = term_h - 2
+            sep_row = term_h - 3  # separator above log row
             scroll_txt = "[ [↑][↓] Pg (Up)/(Dn) ]"
             pad_len = max(0, box_w - 2 - 2 - len(scroll_txt))
             buf.append(f"\033[{sep_row};1H{GRN}╠══{YLW}{scroll_txt}{GRN}{'═'*pad_len}╣{RST}")
 
-            log_row = term_h - 1
+            log_row = term_h - 2  # log row above footer
             log_text = f" Log: {LOG_FILE}"
             draw_slot(buf, log_row, 1, box_w, f"{GRN}║ {CYN}{pad(log_text, box_w-3)}{RST}", "", f"{GRN}║{RST}")
 
-            bottom_row = term_h
+            bottom_row = term_h - 1  # stay off last row to prevent scroll
             right_part = f"{CYN}[ ptz-master v{VERSION} ]{GRN}═{YLW}(ESC/Q){GRN}═╝{RST}"
             left_dashes = max(0, box_w - 2 - len(f"[ ptz-master v{VERSION} ]=(ESC/Q)="))
             buf.append(f"\033[{bottom_row};1H{GRN}╚{'═'*left_dashes}{right_part}{RST}")
 
-            sys.stdout.write("".join(buf) + "\033[?25l")
+            # Position cursor at top-left after draw — never below footer
+            sys.stdout.write("".join(buf) + "\033[1;1H\033[?25l")
             sys.stdout.flush()
 
             btn_start = box_w - len("(ESC/Q)=")
@@ -4464,7 +4466,7 @@ def display_tui_help(title_text, help_content):
 
     finally:
         try:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?1049l\033[2J\033[H\033[?25h')
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l')
             sys.stdout.flush()
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
             signal.signal(signal.SIGWINCH, old_winch)
@@ -4498,7 +4500,8 @@ class UI:
         return cam.profiles[idx]
     
     def draw(self):
-        sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
+        # Full clear inside alt-screen (no history scroll) + hide cursor
+        sys.stdout.write('\033[2J\033[H\033[?25l'); sys.stdout.flush()
         cam = self.current_camera
 
         if not cam:
@@ -4883,7 +4886,8 @@ class PTZMasterApp:
     def cleanup(self, save_session: bool = False):
         logger.info("Cleaning up before exit...")
         try:
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[0m')
+            # Disable mouse, show cursor, exit alt-screen, reset colours
+            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l\033[0m')
             sys.stdout.flush()
         except Exception:
             pass
@@ -5871,7 +5875,9 @@ class PTZMasterApp:
             return new_val
     
     def run(self):
-        sys.stdout.write("\033[?25l")
+        # Enter alt-screen immediately to keep terminal history clean
+        sys.stdout.write("\033[?1049h\033[?25l")
+        sys.stdout.flush()
         Terminal.capture_window_id()
         Terminal.setup_layout(self.config)
         
@@ -5905,15 +5911,22 @@ class PTZMasterApp:
         sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
         sys.stdout.flush()
 
+        # SIGWINCH: redraw immediately on terminal resize
+        import signal as _sig
+        _needs_redraw = [False]
+        _old_winch = _sig.signal(_sig.SIGWINCH,
+                                  lambda s, f: _needs_redraw.__setitem__(0, True))
+
         _last_status = ""
         try:
             while True:
                 key = get_key(timeout=0.3)
 
-                # Redraw when status changed by background thread (auto-check, discovery)
+                # Redraw on resize or status change
                 if key == Key.TIMEOUT:
                     _cur_status = getattr(self.ui, '_scan_status', '')
-                    if _cur_status != _last_status:
+                    if _needs_redraw[0] or _cur_status != _last_status:
+                        _needs_redraw[0] = False
                         _last_status = _cur_status
                         self.ui.draw()
                     continue
@@ -6328,7 +6341,9 @@ class PTZMasterApp:
 
             return False
         finally:
-            # Always restore mouse on exit (even after an error)
+            # Restore SIGWINCH handler and mouse on exit
+            try: _sig.signal(_sig.SIGWINCH, _old_winch)
+            except Exception: pass
             self._mouse_on()
     
     def _sync_profiles(self):
@@ -7360,7 +7375,7 @@ class PTZMasterApp:
             except: term_w, term_h = 80, 24
             W = max(60, min(120, term_w - 2))
             # Min TUI height lowered from 24 to 22 (gives 21 usable rows)
-            H = max(22, term_h)   # use full terminal height; footer at H-1
+            H = max(22, term_h - 1)  # last usable row; term_h is reserved as scroll buffer
             iw = W - 2   # inner width
 
             import datetime as _dt
@@ -7546,10 +7561,10 @@ class PTZMasterApp:
             buf.append(f"\033[18;1H{_sep('📜 Session Logs')}")
 
             # ── LOG ROWS: 19 … H-3 ───────────────────────────────────────
-            LOG_ROW0  = 19
-            # Logs start at row 19 (D&D row now occupies row 17)
-            LOG_ROWEND = H - 3
-            log_vis   = max(1, LOG_ROWEND - LOG_ROW0)
+            LOG_ROW0   = 19
+            # H-1: footer, H-2: sys_stats, H-3: status/notification, H-4: last log row
+            LOG_ROWEND = H - 4
+            log_vis    = max(1, LOG_ROWEND - LOG_ROW0 + 1)
 
             # clamp scroll
             max_scroll = max(0, len(session_logs) - log_vis)
