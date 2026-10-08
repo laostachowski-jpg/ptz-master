@@ -223,7 +223,12 @@ def draw_slot(buf: list, row: int, col: int, width: int, text: str, color: str =
         buf.append(f"\033[{row};{col+width-1}H{color}{right_edge}\033[0m\033[K")
 
 def tui_sys_stats():
-    """CPU/RAM/DISK bar with threshold colours - works everywhere"""
+    """CPU/RAM/DISK bar — cached, updated at most every 2 s to avoid blocking."""
+    import time as _t
+    _c = tui_sys_stats._cache
+    if _t.time() - _c['ts'] < 2.0:
+        return _c['val']
+    _c['ts'] = _t.time()
     # --- CPU ---
     try:
         cpu_str = get_cpu_usage()
@@ -267,9 +272,13 @@ def tui_sys_stats():
     ram_col = RED if ram_pct > 80 else (YLW if ram_pct > 60 else GRN)
     dsk_col = RED if disk_use > 90 else (YLW if disk_use > 75 else GRN)
 
-    return (f"CPU: ⚙ {cpu_col}{cpu_n:3d}% {bar(cpu_n)}{RST} "
-            f"RAM: 🧠 {ram_col}{ram_pct:2d}% {bar(ram_pct)}{RST} "
-            f"DISK: 💽 {dsk_col}{disk_use:2d}% {bar(disk_use)}{RST}")
+    _result = (f"CPU: ⚙ {cpu_col}{cpu_n:3d}% {bar(cpu_n)}{RST} "
+               f"RAM: 🧠 {ram_col}{ram_pct:2d}% {bar(ram_pct)}{RST} "
+               f"DISK: 💽 {dsk_col}{disk_use:2d}% {bar(disk_use)}{RST}")
+    _c['val'] = _result
+    return _result
+
+tui_sys_stats._cache = {'ts': 0.0, 'val': ''}
 
 # =============================================================================
 # ARGUMENT PARSING
@@ -2119,10 +2128,67 @@ class NetworkUtils:
         return "UNKNOWN"
     
     @staticmethod
-    def get_ip_from_mac(mac: str) -> Optional[str]:
+    def get_ip_from_mac(mac: str, refresh_arp: bool = True) -> Optional[str]:
+        """Find current IP for a given MAC address.
+        
+        refresh_arp=True: ping-refresh ARP neighbours first so stale entries
+        don't mask a moved camera. Uses arping if available (more reliable),
+        falls back to broadcast ping to populate the kernel ARP table.
+        """
         if not mac or mac == "UNKNOWN" or not shutil.which('ip'):
             return None
-        
+
+        if refresh_arp:
+            # arping is the gold standard — sends ARP request directly
+            if shutil.which('arping'):
+                try:
+                    # Detect all active subnets
+                    out = subprocess.check_output(
+                        ["ip", "-4", "addr", "show"],
+                        stderr=subprocess.DEVNULL, timeout=3,
+                        universal_newlines=True
+                    )
+                    for _line in out.splitlines():
+                        if "inet " in _line and "scope global" in _line:
+                            _iface = None
+                            # Get interface name from next token after "scope global"
+                            _parts = _line.strip().split()
+                            _ip = _parts[1].split("/")[0] if len(_parts) >= 2 else ""
+                            if _ip and not _ip.startswith("127."):
+                                subprocess.run(
+                                    ["arping", "-c", "1", "-f",
+                                     "-I", "any", mac],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=2
+                                )
+                                break
+                except Exception:
+                    pass
+            else:
+                # Fallback: ping all /24 broadcast addresses to populate ARP
+                try:
+                    out = subprocess.check_output(
+                        ["ip", "-4", "addr", "show"],
+                        stderr=subprocess.DEVNULL, timeout=3,
+                        universal_newlines=True
+                    )
+                    for _line in out.splitlines():
+                        if "inet " in _line and "scope global" in _line:
+                            _p = _line.strip().split()
+                            _ip = _p[1].split("/")[0] if len(_p) >= 2 else ""
+                            if _ip and not _ip.startswith("127."):
+                                _bc = ".".join(_ip.split(".")[:3]) + ".255"
+                                subprocess.run(
+                                    ["ping", "-c", "1", "-b",
+                                     "-W", "1", _bc],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=2
+                                )
+                except Exception:
+                    pass
+
         try:
             out = subprocess.check_output(
                 ["ip", "neigh", "show"],
@@ -2139,7 +2205,7 @@ class NetworkUtils:
                         return ip
         except Exception as e:
             logger.debug(f"Error getting IP for MAC {mac}: {e}")
-        
+
         return None
 
     @staticmethod
@@ -5100,17 +5166,23 @@ class PTZMasterApp:
             termios.tcsetattr(fd, termios.TCSADRAIN, new_settings)
 
             # 4. Position cursor on row 18, clear line, draw prompt inside frame
-            # Border │ stays white (RST), prompt text yellow, closing │ right-aligned
             FW = 78   # frame width (same as main TUI)
-            _prompt_plain = f'| {prompt_text}'  # plain len, no ANSI
-            _input_col    = len(_prompt_plain) + 1  # column where user types
-            # Draw: white │, yellow prompt, fill spaces, │ pinned to col FW+2=80
+            _prompt_plain  = f'| {prompt_text}'
+            _input_col     = len(_prompt_plain) + 1
+            # max chars user can type before hitting closing │
+            _input_max     = max(4, FW - _input_col - 1)
             sys.stdout.write(f'\033[18;1H\033[2K')
             sys.stdout.write(f'{RST}│ {YLW}{prompt_text}{RST}')
-            sys.stdout.write(f'\033[18;{FW + 2}H│')  # closing │ always at col 80
-            # Place cursor at input start position inside frame
+            sys.stdout.write(f'\033[18;{FW + 2}H│')
             sys.stdout.write(f'\033[18;{_input_col}H')
             sys.stdout.flush()
+
+            # Limit input width so it never spills past closing │
+            import readline as _rl
+            try:
+                _rl.set_pre_input_hook(None)
+            except Exception:
+                pass
 
             # 5. Safe data retrieval
             try:
@@ -6838,9 +6910,21 @@ class PTZMasterApp:
                 cam.ports.onvif = new_port_int
         
         if cam.ip != old_ip:
-            cam.mac = "UNKNOWN"
-            notify("IP changed - MAC reset", "info")
-        
+            # Ping new IP to populate ARP, then read MAC immediately
+            try:
+                subprocess.run(["ping", "-c", "1", "-W", "1", cam.ip],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=2)
+            except Exception:
+                pass
+            new_mac = NetworkUtils.get_mac_from_ip(cam.ip)
+            if new_mac and new_mac != "UNKNOWN":
+                cam.mac = new_mac
+                notify(f"IP changed → MAC: {new_mac[:17]}", "info")
+            else:
+                cam.mac = "UNKNOWN"
+                notify("IP changed – MAC not detected (camera offline?)", "warning")
+
         self._sync_network(cam)
     
     def _uri_menu(self):
@@ -7244,7 +7328,7 @@ class PTZMasterApp:
         num_padding = 3  # -1=NO, 1=1d, 2=2d, 3=3d
         date_format = 0
         # ── Session Logs ──────────────────────────────────────────────────
-        session_logs: list = []    # list of str, max 50 entries
+        session_logs: list = []    # list of str, capped at 200 entries
         log_scroll   = 0           # 0 = newest at bottom
 
         def _slog(msg: str):
@@ -7252,7 +7336,7 @@ class PTZMasterApp:
             import datetime as _dt
             ts  = _dt.datetime.now().strftime("%H:%M:%S")
             session_logs.append(f"[{ts}] {msg}")
-            if len(session_logs) > 50:
+            if len(session_logs) > 200:
                 session_logs.pop(0)
                 # Prevent log jump when scrolling near boundary
                 nonlocal log_scroll
@@ -7304,14 +7388,25 @@ class PTZMasterApp:
             raw = raw.strip()
             if not raw:
                 return
-            try:
-                tokens = _shlex.split(raw, posix=False)
-            except ValueError:
-                fixed = raw + ('"' if raw.count('"') % 2 else '')
+            # Strategy: try shlex first (handles quoted paths),
+            # then fall back to splitting on \n or \x00 (null-separated D&D),
+            # then split on spaces only if no valid file found yet.
+            tokens = []
+            # Try null-separated first (some file managers use this)
+            if '\x00' in raw:
+                tokens = [t for t in raw.split('\x00') if t.strip()]
+            elif '\n' in raw:
+                tokens = [t.strip() for t in raw.splitlines() if t.strip()]
+            else:
                 try:
-                    tokens = _shlex.split(fixed, posix=False)
+                    tokens = _shlex.split(raw, posix=True)
                 except ValueError:
-                    tokens = raw.split()
+                    # unbalanced quotes — try to fix then fall back to raw split
+                    try:
+                        tokens = _shlex.split(raw + '"', posix=True)
+                    except ValueError:
+                        # last resort: split on spaces, check each as file path
+                        tokens = raw.split()
 
             added = 0; skipped = 0
             for tok in tokens:
@@ -9719,11 +9814,32 @@ class PTZMasterApp:
 
         self.ui._scan_status = ''
 
+        # Before ARP lookup: ping all known camera IPs in parallel
+        # to ensure their ARP entries are fresh
+        _known_ips = [
+            cam.ip for cam in self.config.cameras
+            if cam.type not in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER)
+            and cam.ip
+        ]
+        if _known_ips and shutil.which("ping"):
+            import concurrent.futures as _cf
+            def _ping(ip):
+                try:
+                    subprocess.run(["ping", "-c", "1", "-W", "1", ip],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, timeout=2)
+                except Exception:
+                    pass
+            with _cf.ThreadPoolExecutor(max_workers=20) as _ex:
+                list(_ex.map(_ping, _known_ips))
+            logger.debug(f"Auto-check: pinged {len(_known_ips)} known IPs to refresh ARP")
+
         changes = []
         for cam in self.config.cameras:
             if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER) or cam.mac in ("UNKNOWN", "V4L2", "FILE", "SCANNER", ""):
                 continue
-            new_ip = NetworkUtils.get_ip_from_mac(cam.mac)
+            # refresh_arp=False: we already pinged above, no need to repeat
+            new_ip = NetworkUtils.get_ip_from_mac(cam.mac, refresh_arp=False)
             if new_ip and new_ip != cam.ip:
                 logger.info(f"Auto-check: {cam.name} moved {cam.ip} → {new_ip}")
                 changes.append((cam, cam.ip, new_ip))
