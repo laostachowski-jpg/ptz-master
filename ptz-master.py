@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.98"   # [v9.0.98 SVER] + S14 real deep sync in F3 batch
+VERSION = "9.0.103"   # [v9.0.103 SVER] + S22 scrollable ONVIF diagnostics viewer
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -119,35 +119,7 @@ DIM  = Colors.DIM
 # =============================================================================
 TUI_WIDTH = 78  # all screens now share the same width
 
-def get_ram_percent() -> int:
-    """Return RAM usage as a percentage (0-100)"""
-    try:
-        with open('/proc/meminfo') as f:
-            mem = {}
-            for line in f:
-                if ':' in line:
-                    k, v = line.split(':', 1)
-                    mem[k.strip()] = int(v.strip().split()[0])
-            total = mem.get('MemTotal', 1)
-            avail = mem.get('MemAvailable', 0)
-            return int(100 * (1 - avail / max(total, 1)))
-    except Exception:
-        return 0
-
-def tui_header(title_left: str, width: int = TUI_WIDTH) -> str:
-    """Header with (F1 Help) on the right - shared across all screens"""
-    max_title = width - 12
-    title = title_left[:max_title]
-    return f"{title:<{max_title}} (F1 Help)"
-
-def tui_footer_line() -> str:
-    """Footer with version and ESC/Q - shared"""
-    return f"[ ptz-master v {VERSION} ]═(ESC/Q)"
-
-def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
-    """Status line with 🔔 notification - shared"""
-    clean_msg = msg[:width-4]
-    return f"🔔 {clean_msg}"
+# [v9.0.99 S16-tui-helpers] removed unused: get_ram_percent, tui_header, tui_footer_line, tui_status_line
 
 
 # =============================================================================
@@ -157,9 +129,12 @@ def tui_status_line(msg: str = "OK", width: int = TUI_WIDTH) -> str:
 _EMOJI_CACHE      = {}
 _EMOJI_CACHE_LOCK = __import__("threading").Lock()  # guards concurrent r/w
 
+_DSR_BROKEN = False   # [v9.0.102 S20-emoji] set once the terminal fails to answer ESC[6n
+
 def _measure_emoji(ch: str) -> int:
+    global _DSR_BROKEN
     # Guard: termios/tty only available on Unix TTY environments
-    if not _UNIX_TTY:
+    if not _UNIX_TTY or _DSR_BROKEN:
         return 2 if ord(ch) > 127 else 1
     try:
         fd = sys.stdin.fileno()
@@ -169,9 +144,20 @@ def _measure_emoji(ch: str) -> int:
         sys.stdout.write(ch)
         sys.stdout.write("\033[6n")
         sys.stdout.flush()
+        # [v9.0.102 S20-emoji] read the reply with a deadline: a terminal that never answers ESC[6n
+        # used to hang the whole program here. After one timeout we stop asking (default widths).
         resp = ""
+        deadline = time.time() + 1.5
         while not resp.endswith("R"):
-            resp += sys.stdin.read(1)
+            left = deadline - time.time()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                _DSR_BROKEN = True
+                return 2 if ord(ch) > 127 else 1
+            chunk = os.read(fd, 64)
+            if not chunk:
+                _DSR_BROKEN = True
+                return 2 if ord(ch) > 127 else 1
+            resp += chunk.decode("latin-1")
         col = int(resp.split(";")[1][:-1])
         return max(1, col - 1)
     except Exception:
@@ -981,18 +967,7 @@ class Camera:
         "gamma": 0, "hue": 0, "volume": 100, "mute": False, "speed": 1.0
     }
 
-    def get_mpv_filters(params: dict) -> List[str]:
-        """Convert image parameters to mpv video-filter flags."""
-        filters = []
-        # mpv uses the 'eq' video filter for brightness, contrast, etc.
-        eq = []
-        if params.get("brightness", 0) != 0: eq.append(f"brightness={params['brightness']/100}")
-        if params.get("contrast", 0) != 0: eq.append(f"contrast={1 + params['contrast']/100}")
-        if params.get("saturation", 0) != 0: eq.append(f"saturation={1 + params['saturation']/100}")
-
-        if eq:
-            filters.append(f"--vf-add=eq={':'.join(eq)}")
-        return filters
+    # [v9.0.99 S16-get_mpv_filters] removed unused Camera.get_mpv_filters
 
     def __init__(self, name: str = "New Camera", ip: str = "192.168.1.10",
                  mac: str = "UNKNOWN", ports: Optional[CameraPorts] = None,
@@ -1638,15 +1613,22 @@ def get_free_space_percent(path: str = "/") -> int:
 
 def _is_keyframe_aligned(filepath: str, time_sec: float) -> bool:
     """Check whether the timestamp is aligned to a keyframe."""
+    # [v9.0.102 S19-kf] ffprobe has no -ss option ("Option not found", exit 1), so this used to return
+    # False always and the lossless copy path of _extract_clip never ran. -read_intervals T%+#1 seeks to
+    # the keyframe at/before T and shows one frame: aligned = that frame is a keyframe sitting at T
+    # (within half a frame).
     try:
         result = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-select_streams', 'v:0',
-             '-show_frames', '-read_intervals', '%+1',
-             '-of', 'compact=p=0', '-i', filepath,
-             '-ss', str(time_sec)],
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-read_intervals', f'{time_sec:.3f}%+#1',
+             '-show_entries', 'frame=key_frame,pts_time', '-of', 'json', '-i', filepath],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5
         )
-        return b'key_frame=1' in result.stdout
+        frames = json.loads(result.stdout or b'{}').get('frames', [])
+        if not frames:
+            return False
+        return (frames[0].get('key_frame') == 1 and
+                abs(float(frames[0].get('pts_time', 'nan')) - time_sec) <= 0.02)
     except Exception:
         return False
 
@@ -1684,13 +1666,15 @@ def _extract_clip(filepath: str, start: float, end: float,
         vcodec = "copy"
     else:
         vcodec = "libx264"
+    # [v9.0.102 S19-clip] -ss BEFORE -i: fast input seek (frame-accurate when re-encoding) instead of
+    # decoding the file from the start; with input seeking the timeline restarts at 0, so -t (duration)
+    # replaces -to.
+    _dur = f"{end - start:.3f}"
     if vcodec == "copy":
-        cmd = ["ffmpeg", "-y", "-i", filepath,
-               "-ss", str(start), "-to", str(end),
-               "-c", "copy", output_name]
+        cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", filepath,
+               "-t", _dur, "-c", "copy", output_name]
     else:
-        cmd = ["ffmpeg", "-y", "-i", filepath,
-               "-ss", str(start), "-to", str(end)]
+        cmd = ["ffmpeg", "-y", "-ss", f"{start:.3f}", "-i", filepath, "-t", _dur]
         if filter_str:
             cmd += ["-vf", filter_str]
         cmd += ["-c:v", vcodec, "-preset", "fast", "-crf", str(crf),
@@ -1953,6 +1937,10 @@ class MouseEvent:
 class KeyReader:
     _ESC_SEQUENCES = {
         '[A': Key.UP, '[B': Key.DOWN, '[C': Key.RIGHT, '[D': Key.LEFT,
+        # [v9.0.101 S18-ss3] application cursor-key mode (DECCKM) sends ESC O x instead of ESC [ x;
+        # without these, such arrows were silently turned into Key.ESC
+        'OA': Key.UP, 'OB': Key.DOWN, 'OC': Key.RIGHT, 'OD': Key.LEFT,
+        'OH': Key.HOME, 'OF': Key.END,
         '[1~': Key.HOME, '[H': Key.HOME,
         '[4~': Key.END, '[F': Key.END,
         '[2~': Key.INSERT,
@@ -1976,17 +1964,7 @@ class KeyReader:
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
     
-    @classmethod
-    def _read_byte(cls, timeout: Optional[float] = None) -> Optional[str]:
-        fd = sys.stdin.fileno()
-        if timeout is not None:
-            ready, _, _ = select.select([fd], [], [], timeout)
-            if not ready:
-                return None
-        try:
-            return os.read(fd, 1).decode('utf-8', errors='replace')
-        except OSError:
-            return None
+    # [v9.0.99 S16-read_byte] removed unused KeyReader._read_byte
     
     @classmethod
     def get_key(cls, timeout: float = -1) -> str:
@@ -2025,7 +2003,7 @@ class KeyReader:
                                 btn = int(p[0]); col = int(p[1]); row = int(p[2])
                                 release = seq.endswith('m')
                                 if btn & 64:
-                                    return Key.MOUSE_SCROLL_UP if (btn & 1) else Key.MOUSE_SCROLL_DOWN
+                                    return Key.MOUSE_SCROLL_DOWN if (btn & 1) else Key.MOUSE_SCROLL_UP  # [v9.0.103 S23-wheel] SGR: 64 = wheel up, 65 = wheel down
                                 return MouseEvent(btn, col, row, release)
                             except:
                                 pass
@@ -2042,12 +2020,17 @@ class KeyReader:
                         row = int(m_match.group(3))
                         release = m_match.group(4) == 'm'
                         if btn & 64:
-                            return Key.MOUSE_SCROLL_UP if (btn & 1) else Key.MOUSE_SCROLL_DOWN
+                            return Key.MOUSE_SCROLL_DOWN if (btn & 1) else Key.MOUSE_SCROLL_UP  # [v9.0.103 S23-wheel] SGR: 64 = wheel up, 65 = wheel down
                         return MouseEvent(btn, col, row, release)
 
                 s_code = ch[1:]
                 if s_code in cls._ESC_SEQUENCES:
                     return cls._ESC_SEQUENCES[s_code]
+                # [v9.0.101 S18-burst] several known sequences glued into one read (key repeat, slow
+                # link): act on the first one instead of turning the whole chunk into Key.ESC
+                _m = re.match(r'\x1b(\[[0-9;]*[~A-Za-z]|O[A-Za-z])', ch)
+                if _m and _m.group(1) in cls._ESC_SEQUENCES:
+                    return cls._ESC_SEQUENCES[_m.group(1)]
                 return Key.ESC
 
             if ch in ('\x0a', '\x0d'):
@@ -2327,7 +2310,7 @@ def select_menu(items: list, selected: int = 0,
                     if 0 <= idx < n: return idx
                 else:
                     return sel
-            elif key in ('q', 'Q', '\x1b'):
+            elif key in ('q', 'Q', '\x1b', Key.ESC):   # [v9.0.101 S18-esc-menu] Key.ESC is 'ESC', not '\x1b'
                 return -1
             elif extra_keys and isinstance(key, str) and key.lower() in extra_keys:
                 return (sel, key.lower())
@@ -3642,18 +3625,7 @@ class ONVIFClient:
         xml = self._send_onvif_request(url, envelope)
         return xml is not None
 
-    def goto_preset(self, token: str, preset_token: str) -> bool:
-        """Move the camera to a saved preset position."""
-        token = html.escape(token)
-        url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/PTZ"
-        body = f'''<tptz:GotoPreset xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
-            <tptz:ProfileToken>{token}</tptz:ProfileToken>
-            <tptz:PresetToken>{preset_token}</tptz:PresetToken>
-        </tptz:GotoPreset>'''
-
-        envelope = f'<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Header>{self._get_auth_header()}</s:Header><s:Body>{body}</s:Body></s:Envelope>'
-        xml = self._send_onvif_request(url, envelope)
-        return xml is not None
+    # [v9.0.99 S16-goto_preset] removed unused ONVIFClient.goto_preset
 
     def _get_video_source_tokens(self) -> list:
         url = f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/Media"
@@ -3677,23 +3649,7 @@ class ONVIFClient:
 
         return ["VideoSource_1", "VideoSourceToken_1", "000", "0", "1"]
 
-    def _imaging_endpoint(self) -> str:
-        candidates = [
-            f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/imaging",
-            f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/Imaging",
-            f"http://{self.cam.ip}:{self.cam.ports.onvif}/onvif/device_service",
-        ]
-        import socket as _socket
-        for url in candidates:
-            try:
-                host = self.cam.ip
-                port = self.cam.ports.onvif
-                with _socket.create_connection((host, port), timeout=1):
-                    pass
-                return url
-            except OSError:
-                pass
-        return ""
+    # [v9.0.99 S16-imaging_endpoint] removed unused ONVIFClient._imaging_endpoint
 
     def get_imaging_settings(self) -> dict:
         import socket as _socket
@@ -6019,13 +5975,7 @@ class PTZMasterApp:
         # Call the new UI method
         self.ui.update_status_line(msg, color)
 
-    def _on_mouse_click(self, x, y):
-        """Example click handler - corrected."""
-        # Assume you calculate the PTZ crosshair click here
-        # Zamiast: print(f"x:{px} y:{py}")
-        # Use:
-        px, py = 0.40, 0.05 # example values
-        self.notify(f"PTZ Click: x:{px:+.2f} y:{py:+.2f}")
+    # [v9.0.99 S16-on_mouse_click] removed unused PTZMasterApp._on_mouse_click
 
     def cleanup(self, save_session: bool = False):
         logger.info("Cleaning up before exit...")
@@ -9152,7 +9102,7 @@ class PTZMasterApp:
                     while not scan_done.is_set():
                         _draw()
                         key_check = get_key(timeout=0.2)
-                        if key_check in ('\x1b', 'q', 'Q'):
+                        if key_check in ('\x1b', Key.ESC, 'q', 'Q'):   # [v9.0.101 S18-esc-scan]
                             _slog("Operation interrupted by user…")
                             # Kill scanimage process to release USB hardware
                             _proc = _scan_proc_ref[0]
@@ -9848,6 +9798,7 @@ class PTZMasterApp:
             return
 
         added = 0
+        _out = {}      # [v9.0.100 S17-net] ip -> outcome, printed after the loop
         for cam_data in to_add:
             _mac = cam_data["mac"]
             _ip  = cam_data["ip"]
@@ -9856,17 +9807,26 @@ class PTZMasterApp:
             _dup_mac = (_mac not in ("", "UNKNOWN") and
                         any(c.mac == _mac for c in self.config.cameras))
             if _dup_ip:
-                print(f"  {YLW}Skipping {_ip} (IP already in list){RST}")
+                _ex = next(c for c in self.config.cameras if c.ip == _ip)
+                _out[_ip] = f"skipped: IP already in list as {_ex.name}"
+                logger.info(f"discovery: skip {_ip} - IP already in config as {_ex.name}")
                 continue
             if _dup_mac:
-                # Camera exists under a different IP — update instead of adding
+                # Camera exists under a different IP - update instead of adding
                 existing = next(c for c in self.config.cameras if c.mac == _mac)
                 if existing.ip != _ip:
                     old_ip = existing.ip
-                    NetworkUtils.resolve_ip(existing)  # aktualizuje IP i URI
-                    print(f"  {YLW}Updated {existing.name}: {old_ip} → {existing.ip}{RST}")
+                    try:
+                        NetworkUtils.resolve_ip(existing)  # aktualizuje IP i URI
+                    except Exception as e:
+                        logger.debug(f"discovery: resolve_ip {existing.name}: {e}")
+                    _out[_ip] = (f"NOT added: MAC belongs to {existing.name} "
+                                 f"(config IP {old_ip}" +
+                                 (f" -> {existing.ip})" if existing.ip != old_ip else ", unchanged)"))
+                    logger.info(f"discovery: skip {_ip} - MAC {_mac} already in config as "
+                                f"{existing.name} (IP {old_ip})")
                 else:
-                    print(f"  {YLW}Skipping {_ip} (MAC already in list){RST}")
+                    _out[_ip] = f"skipped: MAC already in list as {existing.name}"
                 continue
 
             ports = CameraPorts()
@@ -9898,8 +9858,18 @@ class PTZMasterApp:
 
         if added > 0:
             self.config_mgr.save()
-            print(f"\n{GRN}Added {added} cameras to config{RST}")
+        # [v9.0.100 S17-net-end] always show what happened to every selected camera
+        print(f"\n  Result: {added} of {len(to_add)} added")
+        for _cd in to_add:
+            _o = _out.get(_cd["ip"]) or ("added" if any(c.ip == _cd["ip"] for c in self.config.cameras)
+                                         else "NOT added (no reason recorded)")
+            print(f"  {_cd['ip']:<15} {_cd['mac']:<17}  {_o}")
+            logger.info(f"discovery: {_cd['ip']} {_cd['mac']} -> {_o}")
+        if added == len(to_add):
             time.sleep(2)
+        else:
+            print(f"\n{YLW}Press any key...{RST}")
+            self._wait_click_or_key()
     
     def _discover_v4l2(self):
         print_header("V4L2 DEVICE DISCOVERY")
@@ -10080,6 +10050,7 @@ class PTZMasterApp:
             return
 
         added = 0
+        _out = {}      # [v9.0.100 S17-nmap] ip -> outcome, printed after the loop
         for cam_data in to_add:
             _mac = cam_data["mac"]
             _ip  = cam_data["ip"]
@@ -10089,13 +10060,21 @@ class PTZMasterApp:
                 if _by_mac:
                     if _by_mac.ip != _ip:
                         _old_ip = _by_mac.ip
-                        NetworkUtils.resolve_ip(_by_mac)
-                        print(f"  {GRN}Updated {_by_mac.name}: {_old_ip} → {_by_mac.ip}{RST}")
+                        try:
+                            NetworkUtils.resolve_ip(_by_mac)
+                        except Exception as e:
+                            logger.debug(f"discovery: resolve_ip {_by_mac.name}: {e}")
+                        _out[_ip] = (f"NOT added: MAC belongs to {_by_mac.name} "
+                                     f"(config IP {_old_ip}" +
+                                     (f" -> {_by_mac.ip})" if _by_mac.ip != _old_ip else ", unchanged)"))
                     else:
-                        print(f"  {DIM}Skipping {_ip} — known camera (MAC){RST}")
+                        _out[_ip] = f"skipped: known camera (MAC) {_by_mac.name}"
+                    logger.info(f"discovery: skip {_ip} - MAC {_mac} already in config as {_by_mac.name}")
                     continue
-            if any(c.ip == _ip for c in self.config.cameras):
-                print(f"  {DIM}Skipping {_ip} — known camera (IP){RST}")
+            _by_ip = next((c for c in self.config.cameras if c.ip == _ip), None)
+            if _by_ip:
+                _out[_ip] = f"skipped: IP already in list as {_by_ip.name}"
+                logger.info(f"discovery: skip {_ip} - IP already in config as {_by_ip.name}")
                 continue
 
             ports = CameraPorts()
@@ -10126,20 +10105,20 @@ class PTZMasterApp:
 
         if added > 0:
             self.config_mgr.save()
-            print(f"\n{GRN}Added {added} cameras to config{RST}")
+        # [v9.0.100 S17-nmap-end] always show what happened to every selected camera
+        print(f"\n  Result: {added} of {len(to_add)} added")
+        for _cd in to_add:
+            _o = _out.get(_cd["ip"]) or ("added" if any(c.ip == _cd["ip"] for c in self.config.cameras)
+                                         else "NOT added (no reason recorded)")
+            print(f"  {_cd['ip']:<15} {_cd['mac']:<17}  {_o}")
+            logger.info(f"discovery: {_cd['ip']} {_cd['mac']} -> {_o}")
+        if added == len(to_add):
             time.sleep(2)
+        else:
+            print(f"\n{YLW}Press any key...{RST}")
+            self._wait_click_or_key()
     
-    def _save_session(self):
-        self._save_session_state()
-        self.config_mgr.save()
-        
-        print(f"\n{GRN}Session state saved!{RST}")
-        cam = self.ui.current_camera
-        if cam:
-            print(f"{WHT}Active camera: {self.ui.current_idx+1}. {cam.name}{RST}")
-        print(f"{WHT}Playing cameras: {len(self.config.session_state.playing_cameras) if self.config.session_state else 0}{RST}")
-        print(f"\n{YLW}Press any key...{RST}")
-        self._wait_click_or_key()
+    # [v9.0.99 S16-save_session] removed unused PTZMasterApp._save_session
     
     def _save_window_layout(self):
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
@@ -10782,7 +10761,7 @@ class PTZMasterApp:
                     ITEM_ROW0, max_vis = _draw(); continue
 
                 # ── keyboard ──────────────────────────────────────────────
-                if key in ('q', 'Q', '\x1b'):
+                if key in ('q', 'Q', '\x1b', Key.ESC):   # [v9.0.101 S18-esc-batch]
                     idx = -1; break
                 elif key in ('\r', '\n', Key.ENTER, ' '):
                     if num_buf:
@@ -11603,8 +11582,12 @@ class PTZMasterApp:
             for cam in found:
                 color_tag = "ONVIF" if cam["type"] == CameraType.ONVIF else cam["type"].value
                 port_s = str(cam["port"]) if cam["port"] else "N/A"
-                exists = any(c.ip == cam["ip"] for c in self.config.cameras)
-                tag = f"{GRN}E{RST}" if exists else f"{RED}N{RST}"
+                # [v9.0.100 S17-pick] E = same IP already in config, M = same MAC under another IP
+                # (the add loop skips these too), N = really new
+                _by_ip  = any(c.ip == cam["ip"] for c in self.config.cameras)
+                _by_mac = (cam["mac"] not in ("", "UNKNOWN") and
+                           any(c.mac == cam["mac"] for c in self.config.cameras))
+                tag = f"{GRN}E{RST}" if _by_ip else (f"{YLW}M{RST}" if _by_mac else f"{RED}N{RST}")
                 items.append(f"{cam['ip']:<15}  {port_s:<5}  {color_tag:<5} {tag} {cam['mac']}")
 
             items.append(f"── Add ALL {len(found)} cameras ──")
@@ -11840,7 +11823,7 @@ class PTZMasterApp:
                 elif key in ('\r', '\n', Key.ENTER):
                     cam.active_profile = sel
                     break
-                elif key in ('q', 'Q', '\x1b'):
+                elif key in ('q', 'Q', '\x1b', Key.ESC):   # [v9.0.101 S18-esc-imaging]
                     sel = cam.active_profile
                     break
         finally:
@@ -11849,6 +11832,8 @@ class PTZMasterApp:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
 
     def _show_imaging(self):
+        # [v9.0.103 S22-imaging] scrollable full-screen viewer (alt screen): arrows/PgUp/PgDn/wheel scroll,
+        # (s) or a click on the snapshot rows opens the snapshot, ESC/Q or a click on (ESC/Q) closes.
         cam = self.ui.current_camera
         if not cam:
             return
@@ -11859,11 +11844,14 @@ class PTZMasterApp:
             notify("Full diagnostics only for ONVIF cameras", "warning")
             return
 
+        import signal
+        import shutil
+        from urllib.parse import urlparse
+
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         W = 57
 
         client = ONVIFClient(cam)
-
         print(f"{CYN}Fetching device information...{RST}")
 
         device_info = self._get_device_info(cam, client)
@@ -11882,14 +11870,16 @@ class PTZMasterApp:
         presets_max = 128
         presets_color = GRN if presets_count > 0 else YLW
 
-        sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
+        # --- Budujemy wszystkie linie raportu dokładnie 1:1 jak w oryginale ---
+        lines = []
 
-        print(f"{YLW}╔{'═' * W}╗{RST}")
+        # 1. Device Specification
+        lines.append(f"{YLW}╔{'═' * W}╗{RST}")
         title = " 🔍 Device Specification "
         vis_len = ansilen(title)
         spaces = (W - vis_len) // 2
-        print(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
-        print(f"{YLW}╠{'═' * W}╣{RST}")
+        lines.append(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
+        lines.append(f"{YLW}╠{'═' * W}╣{RST}")
 
         fields = [
             ("Manufacturer", device_info.get('Manufacturer', 'N/A')),
@@ -11898,31 +11888,30 @@ class PTZMasterApp:
             ("Serial Number", device_info.get('SerialNumber', 'N/A')),
             ("Hardware ID", device_info.get('HardwareId', 'N/A')),
         ]
-
         max_label_len = max(len(label) for label, _ in fields)
-
         for label, value in fields:
             line = f" {label:<{max_label_len}} : {value}"
-            print(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
 
         ntp_status = f"{GRN}OK{RST}" if system_info.get('ntp', False) else f"{RED}NO{RST}"
         time_line = f" System Time   : {system_info.get('system_date', 'N/A')} (NTP: {ntp_status})"
-        print(f"{YLW}║{RST}{pad(time_line, W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{pad(time_line, W)}{YLW}║{RST}")
+        lines.append(f"{YLW}╚{'═' * W}╝{RST}")
+        lines.append("")
 
-        print(f"{YLW}╚{'═' * W}╝{RST}\n")
-
-        print(f"{YLW}╔{'═' * W}╗{RST}")
+        # 2. SERVICE REPORT
+        lines.append(f"{YLW}╔{'═' * W}╗{RST}")
         title = " 📕 SERVICE REPORT "
         vis_len = ansilen(title)
         spaces = (W - vis_len) // 2
-        print(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
-        print(f"{YLW}╠{'═' * W}╣{RST}")
+        lines.append(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
+        lines.append(f"{YLW}╠{'═' * W}╣{RST}")
 
         mac_display = camera_network.get('mac', cam.mac)
         if mac_display == "UNKNOWN":
             mac_display = "Unknown"
-        print(f"{YLW}║{RST}{pad(f' 🌐 http://{cam.ip}:{cam.ports.onvif} ? ({mac_display})', W)}{YLW}║{RST}")
-        print(f"{YLW}║{RST}{pad('', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{pad(f' 🌐 http://{cam.ip}:{cam.ports.onvif} ? ({mac_display})', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{pad('', W)}{YLW}║{RST}")
 
         service_items = [
             ('device',  '🔧', 'Device'),
@@ -11932,120 +11921,95 @@ class PTZMasterApp:
             ('events',  '🔔', 'Events'),
             ('devio',   '🔌', 'DevIO'),
         ]
-
         COL = 16
         END = W + 2
-
-        def svc_row(emoji: str, text: str, value: str, color: str) -> None:
-            print(f"{YLW}║{RST}  {emoji} {text}[{COL}G: {color}{value}{RST}[{END}G{YLW}║{RST}")
-
         for service, emoji, text in service_items:
             path = services.get(service, 'Not found')
             if path.startswith('http'):
-                from urllib.parse import urlparse
                 path = urlparse(path).path
             color = GRN if path != 'Not found' else RED
-            svc_row(emoji, text, path, color)
+            lines.append(f"{YLW}║{RST}  {emoji} {text}\033[{COL}G: {color}{path}{RST}\033[{END}G{YLW}║{RST}")
 
         snap_text = "Available" if snapshot_uri else "Not available"
         snap_color = GRN if snapshot_uri else RED
         presets_text = f"{presets_color}{presets_count}/{presets_max}{RST}"
+        lines.append(f"{YLW}║{RST}  📸 Snapshot\033[{COL}G: {snap_color}{snap_text}{RST}    │    🎯 Presets : {presets_text}\033[{END}G{YLW}║{RST}")
+        lines.append(f"{YLW}╚{'═' * W}╝{RST}")
+        lines.append("")
 
-        print(f"{YLW}║{RST}  📸 Snapshot[{COL}G: {snap_color}{snap_text}{RST}   │   🎯 Presets : {presets_text}[{END}G{YLW}║{RST}")
-
-        print(f"{YLW}╚{'═' * W}╝{RST}\n")
-
-        print(f"{YLW}╔{'═' * W}╗{RST}")
+        # 3. CAMERA NETWORK CONFIGURATION
+        lines.append(f"{YLW}╔{'═' * W}╗{RST}")
         title = " 🌐 CAMERA NETWORK CONFIGURATION "
         vis_len = ansilen(title)
         spaces = (W - vis_len) // 2
-        print(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
-        print(f"{YLW}╠{'═' * W}╣{RST}")
+        lines.append(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
+        lines.append(f"{YLW}╠{'═' * W}╣{RST}")
 
         dhcp_status = f"{GRN}YES{RST}" if camera_network.get('dhcp') == "YES" else f"{YLW}{camera_network.get('dhcp')}{RST}"
         ip_line = f" IP Address   : {camera_network['ip']} (DHCP: {dhcp_status})"
-        print(f"{YLW}║{RST}{pad(ip_line, W)}{YLW}║{RST}")
-
-        gateway_line = f" Gateway      : {camera_network['gateway']}"
-        dns_line = f" DNS          : {camera_network['dns']}"
-        print(f"{YLW}║{RST}{pad(gateway_line, W)}{YLW}║{RST}")
-        print(f"{YLW}║{RST}{pad(dns_line, W)}{YLW}║{RST}")
-
+        lines.append(f"{YLW}║{RST}{pad(ip_line, W)}{YLW}║{RST}")
+        gw_val = camera_network['gateway']
+        dns_val = camera_network['dns']
+        lines.append(f"{YLW}║{RST}{pad(f' Gateway      : {gw_val}', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{pad(f' DNS          : {dns_val}', W)}{YLW}║{RST}")
         if camera_network.get('mac', 'UNKNOWN') != "UNKNOWN":
-            mac_line = f" MAC          : {camera_network['mac']}"
-            print(f"{YLW}║{RST}{pad(mac_line, W)}{YLW}║{RST}")
+            mac_val = camera_network['mac']
+            lines.append(f"{YLW}║{RST}{pad(f' MAC          : {mac_val}', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}╚{'═' * W}╝{RST}")
+        lines.append("")
 
-        print(f"{YLW}╚{'═' * W}╝{RST}\n")
-
+        # 4. Profile Information
         if cam.profiles:
-            print(f"{YLW}╔{'═' * W}╗{RST}")
+            lines.append(f"{YLW}╔{'═' * W}╗{RST}")
             title = " 🔗 Profile Information "
             vis_len = ansilen(title)
             spaces = (W - vis_len) // 2
-            print(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
-            print(f"{YLW}╠{'═' * W}╣{RST}")
+            lines.append(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
+            lines.append(f"{YLW}╠{'═' * W}╣{RST}")
 
-            profile_labels = [
-                ("Token", "Token"),
-                ("Name", "Name"),
-                ("Resolution", "Resolution"),
-                ("Codec", "Codec"),
-            ]
-
+            profile_labels = [("Token", "Token"), ("Name", "Name"), ("Resolution", "Resolution"), ("Codec", "Codec")]
             max_profile_label = max(len(label) for _, label in profile_labels)
 
             for idx, prof in enumerate(cam.profiles, 1):
                 if idx > 1:
-                    print(f"{YLW}╠{'═' * W}╣{RST}")
+                    lines.append(f"{YLW}╠{'═' * W}╣{RST}")
+                lines.append(f"{YLW}║{RST}{pad(f' Profile {idx}:', W)}{YLW}║{RST}")
 
-                print(f"{YLW}║{RST}{pad(f' Profile {idx}:', W)}{YLW}║{RST}")
-
-                values = [
-                    (prof.token or "N/A"),
-                    (prof.name or "N/A"),
-                    (prof.res or "N/A"),
-                    (prof.codec or "N/A"),
-                ]
-
-                for (field_key, field_label), value in zip(profile_labels, values):
-                    line = f"  {field_label:<{max_profile_label}} : {value}"
-                    print(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
+                values = [prof.token or "N/A", prof.name or "N/A", prof.res or "N/A", prof.codec or "N/A"]
+                for (_, field_label), value in zip(profile_labels, values):
+                    lines.append(f"{YLW}║{RST}{pad(f'  {field_label:<{max_profile_label}} : {value}', W)}{YLW}║{RST}")
 
                 uri_label = "Stream URI"
-                print(f"{YLW}║{RST}{pad(f'  {uri_label:<{max_profile_label}} :', W)}{YLW}║{RST}")
-
+                lines.append(f"{YLW}║{RST}{pad(f'  {uri_label:<{max_profile_label}} :', W)}{YLW}║{RST}")
                 if prof.uri:
-                    uri = prof.uri
                     indent = "  "
                     max_line_len = W - len(indent) - 2
-                    remaining = uri
-
+                    remaining = prof.uri
                     while remaining:
                         if len(remaining) <= max_line_len:
-                            print(f"{YLW}║{RST}{pad(f'{indent}{remaining}', W)}{YLW}║{RST}")
+                            lines.append(f"{YLW}║{RST}{pad(f'{indent}{remaining}', W)}{YLW}║{RST}")
                             break
-                        else:
-                            split_pos = max_line_len
-                            for separator in ['/', '?', '&', '=']:
-                                pos = remaining.rfind(separator, 0, max_line_len)
-                                if pos > max_line_len * 0.3:
-                                    split_pos = pos + 1
-                                    break
-
-                            line = remaining[:split_pos]
-                            print(f"{YLW}║{RST}{pad(f'{indent}{line}', W)}{YLW}║{RST}")
-                            remaining = remaining[split_pos:]
+                        split_pos = max_line_len
+                        for separator in ['/', '?', '&', '=']:
+                            pos = remaining.rfind(separator, 0, max_line_len)
+                            if pos > max_line_len * 0.3:
+                                split_pos = pos + 1
+                                break
+                        lines.append(f"{YLW}║{RST}{pad(f'{indent}{remaining[:split_pos]}', W)}{YLW}║{RST}")
+                        remaining = remaining[split_pos:]
                 else:
-                    print(f"{YLW}║{RST}{pad('  none', W)}{YLW}║{RST}")
+                    lines.append(f"{YLW}║{RST}{pad('  none', W)}{YLW}║{RST}")
 
-            print(f"{YLW}╚{'═' * W}╝{RST}\n")
+            lines.append(f"{YLW}╚{'═' * W}╝{RST}")
+            lines.append("")
 
-        print(f"{YLW}╔{'═' * W}╗{RST}")
+        # 5. IMAGING SETTINGS
+        lines.append(f"{YLW}╔{'═' * W}╗{RST}")
         title = f" 🎨 IMAGING SETTINGS – {cam.name[:20]} "
         vis_len = ansilen(title)
         spaces = (W - vis_len) // 2
-        print(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
-        print(f"{YLW}╠{'═' * W}╣{RST}")
+        lines.append(f"{YLW}║{RST}{BLU}{' ' * spaces}{title}{' ' * (W - vis_len - spaces)}{RST}{YLW}║{RST}")
+        lines.append(f"{YLW}╠{'═' * W}╣{RST}")
 
         if settings:
             imaging_items = [
@@ -12054,60 +12018,165 @@ class PTZMasterApp:
                 ("🌈", "Saturation", settings.get("saturation", "N/A")),
                 ("🔪", "Sharpness",  settings.get("sharpness",  "N/A")),
             ]
-
             IMG_COL = 18
             IMG_END = W + 2
-
             for emoji, text, val in imaging_items:
                 val_str = str(val)
                 if val_str not in ["N/A", "0"] and (isinstance(val, (int, float)) and abs(float(val_str)) > 1000):
                     color = RED
                 else:
                     color = WHT
-                print(f"{YLW}║{RST}  {emoji} {text}[{IMG_COL}G: {color}{val_str}{RST}[{IMG_END}G{YLW}║{RST}")
+                lines.append(f"{YLW}║{RST}  {emoji} {text}\033[{IMG_COL}G: {color}{val_str}{RST}\033[{IMG_END}G{YLW}║{RST}")
         else:
-            print(f"{YLW}║{RST}{pad(f'  {RED}No imaging data or not supported{RST}', W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{pad(f'  {RED}No imaging data or not supported{RST}', W)}{YLW}║{RST}")
 
         if settings and 'vs_token' in settings:
-            print(f"{YLW}╠{'═' * W}╣{RST}")
+            lines.append(f"{YLW}╠{'═' * W}╣{RST}")
             vs_info = settings.get('vs_token', '?')
             ep_info = settings.get('endpoint', '?').replace(f"http://{cam.ip}:{cam.ports.onvif}", "")
             ns_info = settings.get('ns', '?')
-            line = f"  {DIM}VideoSource: {vs_info} | {ep_info} ({ns_info}){RST}"
-            print(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{pad(f'  {DIM}VideoSource: {vs_info} | {ep_info} ({ns_info}){RST}', W)}{YLW}║{RST}")
 
-        print(f"{YLW}╚{'═' * W}╝{RST}")
+        lines.append(f"{YLW}╚{'═' * W}╝{RST}")
 
-        print()
-        if snapshot_uri:
-            print(f"{GRN}📸 Snapshot available{RST}")
-            print(f"{CYN}   {snapshot_uri}{RST}")
-            print(f"\n{DIM}Press {RST}{YLW}(s){RST}{DIM} to open snapshot in browser, any key or {RST}{YLW}(Q){RST}{DIM} to quit{RST}")
+        # --- ARMORED TUI LOOP (identyczna mechanika jak w display_tui_help) ---
+        mouse_off()
+        fd = sys.stdin.fileno()
+        old_term = termios.tcgetattr(fd)
+        resized = [True]
 
-            sys.stdout.write('\033[?1000h\033[?1002h\033[?1006h')
+        def handle_winch(sig, frame):
+            resized[0] = True
+
+        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
+        scroll_offset = 0
+
+        try:
+            tty.setraw(fd)
+            sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
-            key = get_key()
-            sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l')
-            sys.stdout.flush()
 
-            open_snap = False
-            if isinstance(key, MouseEvent):
-                if not key.release and 7 <= key.col <= 9:
-                    open_snap = True
-            elif isinstance(key, str) and key.lower() == 's':
-                open_snap = True
+            def _draw_screen():
+                nonlocal scroll_offset
+                try:
+                    _, term_h = shutil.get_terminal_size((80, 24))
+                except Exception:
+                    term_h = 24
 
-            if open_snap:
-                print(f"{CYN}Opening snapshot...{RST}")
-                subprocess.Popen(
-                    ['xdg-open', snapshot_uri],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                time.sleep(1)
-        else:
-            print(f"{YLW}📸 Snapshot not available{RST}")
-            print(f"{CYN}Press any key to continue...{RST}")
-            self._wait_click_or_key()
+                # Rezerwujemy 4 wiersze na dolną ramkę snapshotu + stopkę (ESC/Q)
+                footer_h = 4 if snapshot_uri else 3
+                max_vis = max(1, term_h - footer_h - 1)
+                max_off = max(0, len(lines) - max_vis)
+                scroll_offset = max(0, min(scroll_offset, max_off))
+
+                buf = ['\033[H\033[J']
+                for r_idx, line_str in enumerate(lines[scroll_offset:scroll_offset + max_vis], 1):
+                    buf.append(f"\033[{r_idx};1H{line_str}")
+
+                # Dolna ramka przyklejona do dołu ekranu (jak w help)
+                box_top = term_h - footer_h
+                buf.append(f"\033[{box_top};1H{YLW}╔{'═' * W}╗{RST}")
+
+                snap_row = box_top + 1
+                if snapshot_uri:
+                    # keep the line inside the frame (" 📸 Snapshot: " takes 14 columns); a long URI with a
+                    # query string used to push the right border out and wrap
+                    _snap_show = snapshot_uri if len(snapshot_uri) <= W - 14 else snapshot_uri[:W - 15] + "…"
+                    snap_line = f" {GRN}📸 Snapshot:{RST} {CYN}{_snap_show}{RST}"
+                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{pad(snap_line, W)}{YLW}║{RST}")
+                    hint_row = snap_row + 1
+                    hint_line = f" Press {YLW}(s){RST} to open snapshot in browser"
+                    buf.append(f"\033[{hint_row};1H{YLW}║{RST}{pad(hint_line, W)}{YLW}║{RST}")
+                    bot_row = hint_row + 1
+                else:
+                    snap_line = f" {YLW}📸 Snapshot: Not available{RST}"
+                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{pad(snap_line, W)}{YLW}║{RST}")
+                    hint_row = -1
+                    bot_row = snap_row + 1
+
+                # Dolna krawędź: po lewej [↑/↓] (gdy przewijalne), po prawej wersja i (ESC/Q)
+                right_raw = f"[ ptz-master v{VERSION} ]=(ESC/Q)="
+                right_part = f"{CYN}[ ptz-master v{VERSION} ]{YLW}═{GRN}(ESC/Q){YLW}═╝{RST}"
+
+                if max_off > 0:
+                    left_raw = "═[ [↑][↓] ]"
+                    left_part = f"{YLW}╚═{GRN}[ [↑][↓] ]{YLW}"
+                    mid_dashes = max(0, W - len(left_raw) - len(right_raw))
+                    buf.append(f"\033[{bot_row};1H{left_part}{'═' * mid_dashes}{right_part}")
+                else:
+                    left_dashes = max(0, W - len(right_raw))
+                    buf.append(f"\033[{bot_row};1H{YLW}╚{'═' * left_dashes}{right_part}")
+
+                sys.stdout.write("".join(buf) + "\033[1;1H\033[?25l")
+                sys.stdout.flush()
+
+                btn_start = (W + 2) - len("(ESC/Q)=")
+                return snap_row, hint_row, bot_row, btn_start, W + 1, max_off
+
+            snap_r = hint_r = bot_r = btn_start = btn_end = max_off = 0
+
+            while True:
+                if resized[0]:
+                    snap_r, hint_r, bot_r, btn_start, btn_end, max_off = _draw_screen()
+                    resized[0] = False
+
+                key = get_key(timeout=0.2)
+                if key == Key.TIMEOUT:
+                    continue
+                if key in (Key.ESC, 'q', 'Q'):
+                    return
+
+                # Przewijanie (gdy okno terminala jest niższe niż cały raport)
+                if key == Key.UP and scroll_offset > 0:
+                    scroll_offset -= 1; resized[0] = True
+                elif key == Key.DOWN and scroll_offset < max_off:
+                    scroll_offset += 1; resized[0] = True
+                elif key == Key.PAGE_UP and scroll_offset > 0:
+                    scroll_offset = max(0, scroll_offset - 10); resized[0] = True
+                elif key == Key.PAGE_DOWN and scroll_offset < max_off:
+                    scroll_offset = min(max_off, scroll_offset + 10); resized[0] = True
+                elif key == Key.MOUSE_SCROLL_UP and scroll_offset > 0:
+                    scroll_offset = max(0, scroll_offset - 3); resized[0] = True
+                elif key == Key.MOUSE_SCROLL_DOWN and scroll_offset < max_off:
+                    scroll_offset = min(max_off, scroll_offset + 3); resized[0] = True
+
+                # Otwarcie snapshotu klawiszem (s) lub kliknięciem w wiersz snapshotu / (s)
+                elif (isinstance(key, str) and key.lower() == 's' and snapshot_uri) or (
+                    isinstance(key, MouseEvent) and not key.release and snapshot_uri and key.row in (snap_r, hint_r)
+                ):
+                    try:
+                        subprocess.Popen(
+                            ['xdg-open', snapshot_uri],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        )
+                        notify("Opening snapshot in browser...", "info")
+                    except OSError as e:      # xdg-open missing: do not drop out of the viewer
+                        logger.warning(f"xdg-open failed: {e}")
+                        notify("xdg-open not available - cannot open snapshot", "error")
+
+                # Kliknięcie myszą w dolną krawędź: [↑][↓] lub (ESC/Q)
+                elif isinstance(key, MouseEvent) and not key.release:
+                    if key.row == bot_r:
+                        if btn_start <= key.col <= btn_end:
+                            return
+                        elif max_off > 0 and 5 <= key.col <= 7 and scroll_offset > 0:
+                            scroll_offset = max(0, scroll_offset - 1); resized[0] = True
+                        elif max_off > 0 and 8 <= key.col <= 10 and scroll_offset < max_off:
+                            scroll_offset = min(max_off, scroll_offset + 1); resized[0] = True
+                    elif key.btn == 64 and scroll_offset > 0:
+                        scroll_offset = max(0, scroll_offset - 3); resized[0] = True
+                    elif key.btn == 65 and scroll_offset < max_off:
+                        scroll_offset = min(max_off, scroll_offset + 3); resized[0] = True
+
+        finally:
+            try:
+                sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l')
+                sys.stdout.flush()
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+                signal.signal(signal.SIGWINCH, old_winch)
+            except Exception:
+                pass
+            mouse_on()
 
 
 # =============================================================================
@@ -12617,9 +12686,7 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
         if not paused: auto_run = False
         last_msg = "⏸ PAUSED" if paused else "▶ PLAYING"
 
-    def _auto_toggle_dir():
-        nonlocal auto_dir; auto_dir = not auto_dir
-        last_msg = f"dir → {'►' if auto_dir else '◄'}"
+    # [v9.0.99 S16-auto_toggle_dir] removed unused nested _auto_toggle_dir
 
     def _auto_toggle_run():
         nonlocal auto_run, auto_accum
@@ -13934,15 +14001,16 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         _zoom_out()
                     elif 73 <= c <= 77:     # "1.0x" – edycja zoomu
                         _edit_zoom()
-                # Przyciski specyficzne dla trybu PTZ (tylko CAMERA)
+                # [v9.0.99 S15-zoom] PTZ mode = OPTICAL (motor) zoom of the camera, same
+                # _ptz_move_async path as pan/tilt. Digital (mpv) zoom stays in PAN mode.
                 elif cam_mode and ui_mode == "PTZ":
-                    if 58 <= c <= 62:       # [0🔍] – reset zoomu
-                        _zoom_zero()
-                    elif 66 <= c <= 68:     # [+]
-                        _zoom_in()
-                    elif 69 <= c <= 71:     # [-]
-                        _zoom_out()
-                    elif 73 <= c <= 76:     # "1.0x" – edycja zoomu
+                    if 58 <= c <= 62:       # [0🔍] - stop the zoom motor
+                        _ptz_move_async(0.0, 0.0, 0.0, "Z0")
+                    elif 66 <= c <= 68:     # [+] optical zoom in
+                        _ptz_move_async(0.0, 0.0, 1.0, "Z+")
+                    elif 69 <= c <= 71:     # [-] optical zoom out
+                        _ptz_move_async(0.0, 0.0, -1.0, "Z-")
+                    elif 73 <= c <= 76:     # "1.0x" - edit (digital) zoom value
                         _edit_zoom()
 
             elif r == 12 and 46 <= c <= 79:                             # ◄ ■ ► and pan info (PAN) / zoom controls
@@ -14019,24 +14087,9 @@ def _mpv_control_screen_player(cam, prof, files, current_idx,
                         if new_dur is not None:
                             cam.duration = new_dur
                             last_msg = f"Duration set to {cam.duration:.1f}s"
-                # Zoom controls – behaviour depends on current mode:
-                #   SELECT/PAN → operate on mpv (video-zoom / video-pan)
-                #   PTZ        → send zoom command to physical camera
-                elif cam_mode and ui_mode == "PTZ":
-                    # Fix: in PTZ mode mouse zoom buttons must drive the camera, not mpv
-                    if 55 <= c <= 59:       # [⇄] toggle zoom → stop / neutral
-                        _ptz_move_async(0.0, 0.0, 0.0, "Z0")
-                        last_msg = "🔍 PTZ Zoom stop"
-                    elif 60 <= c <= 64:     # [0🔍] reset zoom (absolute 0)
-                        _ptz_move_async(0.0, 0.0, 0.0, "Z0")
-                        last_msg = "🔍 PTZ Zoom reset"
-                    elif 66 <= c <= 68:     # [+] zoom in
-                        _ptz_move_async(0.0, 0.0, 1.0, "Z+")
-                        last_msg = "🔍 PTZ Zoom +"
-                    elif 69 <= c <= 71:     # [-] zoom out
-                        _ptz_move_async(0.0, 0.0, -1.0, "Z-")
-                        last_msg = "🔍 PTZ Zoom -"
-                    elif 73 <= c <= 76:     _edit_zoom()
+                # [v9.0.99 S15-zoom-dead] Removed: PTZ-mode zoom block that was shadowed by the
+                # Duration branch above (identical condition) and therefore never ran.
+                # PTZ optical zoom is handled in the row-11 branch.
                 elif 55 <= c <= 59:     _zoom_toggle()
                 elif 60 <= c <= 64:     _zoom_zero()
                 elif 66 <= c <= 68:     _zoom_in()
@@ -14824,6 +14877,22 @@ def main():
     logger.info(f"{'='*60}")
     logger.info(f"PTZ Master v{VERSION} starting – {time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"{'='*60}")
+
+    # [v9.0.102 S21-sig] SIGTERM/SIGHUP (kill, pkill, closing the terminal) skipped the atexit
+    # cleanup: the terminal stayed in raw mode with mouse reporting on and the mpv windows kept
+    # running. Run the registered cleanup, then exit. (Not sys.exit: a bare "except:" would eat it.)
+    import signal as _signal_mod
+    def _on_term_signal(signum, _frame):
+        logger.info(f"signal {signum} received - running cleanup")
+        try:
+            atexit._run_exitfuncs()
+        finally:
+            os._exit(128 + signum)
+    for _sig in (_signal_mod.SIGTERM, _signal_mod.SIGHUP):
+        try:
+            _signal_mod.signal(_sig, _on_term_signal)
+        except (ValueError, OSError):
+            pass
 
     # Check dependencies before starting — in every mode
     check_dependencies()
