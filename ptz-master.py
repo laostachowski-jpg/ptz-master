@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.103"   # [v9.0.103 SVER] + S22 scrollable ONVIF diagnostics viewer
+VERSION = "9.0.106"   # [v9.0.106 SVER] + S26 activity spinners
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1790,6 +1790,62 @@ def print_progress_bar(iteration: int, total: int, prefix: str = '',
     bar = fill * filled + '░' * (length - filled)
     sys.stdout.write(f'\r{prefix} |{bar}| {pct:.1f}% {suffix}'.ljust(80))
     sys.stdout.flush()
+
+# [v9.0.106 S26-helper] activity indicator for blocking work: spinner + elapsed time on one line
+_SPIN_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def run_with_spinner(label, fn, detail=None, final="ok"):
+    """Run fn() in a worker thread and animate '<spinner> label (detail)  3.2s' on the current line, so a long
+    blocking call does not look frozen. Returns fn()'s result and re-raises its exception.
+    final='ok' leaves '✓ label (3.2s)' (or '✗' on error); final='clear' erases the line so the caller can
+    print its own result. Only for functions that do not write to the terminal themselves.
+    Without a TTY it just calls fn()."""
+    if not sys.stdout.isatty():
+        return fn()
+    import threading
+    box = {}
+
+    def _work():
+        try:
+            box["r"] = fn()
+        except BaseException as e:        # handed back to the caller's thread below
+            box["e"] = e
+
+    th = threading.Thread(target=_work, daemon=True)
+    th.start()
+    t0 = time.time()
+    th.join(0.15)                         # quick calls finish before anything is drawn (no flicker)
+    frame, drawn = 0, False
+    try:
+        while th.is_alive():
+            try:
+                extra = (detail() or "") if detail else ""
+            except Exception:
+                extra = ""
+            try:
+                cols = shutil.get_terminal_size((80, 24)).columns
+            except Exception:
+                cols = 80
+            txt = (f"{CYN}{_SPIN_FRAMES[frame % len(_SPIN_FRAMES)]}{RST} {label}"
+                   + (f" {DIM}{extra}{RST}" if extra else "") + f"  {DIM}{time.time() - t0:4.1f}s{RST}")
+            sys.stdout.write("\r\033[K" + cut_by_width(txt, max(10, cols - 1)))
+            sys.stdout.flush()
+            drawn = True
+            frame += 1
+            th.join(0.1)
+    finally:
+        if drawn:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+    if final != "clear":
+        mark = f"{RED}✗{RST}" if "e" in box else f"{GRN}✓{RST}"
+        sys.stdout.write(f"{mark} {label}  {DIM}({time.time() - t0:.1f}s){RST}\n")
+        sys.stdout.flush()
+    if "e" in box:
+        raise box["e"]
+    return box.get("r")
+
 
 def format_progress_line(percent: float, width: int = 20, label: str = "", subnet: str = "") -> str:
     """Progress bar without ANSI codes — colours are added by draw()."""
@@ -6677,7 +6733,20 @@ class PTZMasterApp:
                     playing += 1
         
         current_cam_name = self.ui.current_camera.name if self.ui.current_camera else "None"
-        
+
+        # [v9.0.105 S25-timer-def] live countdown row: spinner + seconds left + shrinking bar
+        # (it used to be static text, so it looked frozen)
+        _TOTAL = 10.0
+        _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+        def _timer_row(remaining, frame):
+            secs = max(0, int(remaining + 0.999))
+            filled = max(0, min(20, int(round(remaining / _TOTAL * 20))))
+            col = GRN if secs > 5 else (YLW if secs > 3 else RED)
+            txt = (f" {col}{_SPIN[frame % len(_SPIN)]}{YLW} Auto-exit without saving in "
+                   f"{col}{secs:2d}s{YLW}  {col}{'█' * filled}{DIM}{'░' * (20 - filled)}{YLW}")
+            return f"{YLW}│{pad(txt, W)}│{RST}"
+
         print(f"{YLW}┌" + "─" * W + f"┐{RST}")
         print(f"{YLW}│{pad(' EXIT CONFIRMATION', W)}│{RST}")
         print(f"{YLW}├" + "─" * W + f"┤{RST}")
@@ -6689,7 +6758,7 @@ class PTZMasterApp:
         print(f"{YLW}│{pad('  [q] 🚪 Exit without saving', W)}│{RST}")
         print(f"{YLW}│{pad('  [c/ESC] 🔄 Cancel and return', W)}│{RST}")
         print(f"{YLW}├" + "─" * W + f"┤{RST}")
-        print(f"{YLW}│{pad(' ⏱️  Auto-exit without saving in 10s...', W)}│{RST}")
+        print(_timer_row(_TOTAL, 0))     # [v9.0.105 S25-timer-print]
         print(f"{YLW}└" + "─" * W + f"┘{RST}")
         
         fd = sys.stdin.fileno()
@@ -6705,14 +6774,19 @@ class PTZMasterApp:
             sys.stdout.flush()
 
             key = None
-            deadline = time.time() + 10
+            deadline = time.time() + _TOTAL
             time.sleep(0.2)  # short debounce
+            _frame = 0
             while key is None:
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
-                # get_key with 1s timeout — non-blocking, refreshes countdown
-                ch = get_key(min(remaining, 1.0))
+                # [v9.0.105 S25-timer-loop] repaint only the timer row (row 12) with the cursor saved/restored
+                # around it, then wait for a key for at most 0.12 s: animation + countdown without flicker
+                _frame += 1
+                sys.stdout.write(f"\x1b7\x1b[12;1H{_timer_row(remaining, _frame)}\x1b8")
+                sys.stdout.flush()
+                ch = get_key(min(remaining, 0.12))
                 if ch == Key.TIMEOUT:
                     continue
                 if isinstance(ch, MouseEvent):
@@ -9691,8 +9765,7 @@ class PTZMasterApp:
             time.sleep(3)
             return
 
-        print(f"  {CYN}Searching for scanners (scanimage -f)...{RST}")
-        scanners = PTZMasterApp._discover_scanners_usb()
+        scanners = run_with_spinner("Searching for scanners (scanimage -f)", PTZMasterApp._discover_scanners_usb)   # [v9.0.106 S26-scanner-search]
 
         if not scanners:
             print(f"  {YLW}No scanners found.{RST}")
@@ -9983,13 +10056,13 @@ class PTZMasterApp:
         self.ui.draw()
 
         try:
-            result = subprocess.run(
+            result = run_with_spinner(f"nmap host discovery on {subnet}", lambda: subprocess.run(
                 ["nmap", "-sn", "--open", "-T4", subnet],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 universal_newlines=True,
                 timeout=60
-            )
+            ))      # [v9.0.106 S26-nmap]
             output = result.stdout
         except subprocess.TimeoutExpired:
             self.ui.set_scan_status(f"{RED}nmap timed out{RST}")
@@ -10828,7 +10901,8 @@ class PTZMasterApp:
                 if cam.type == CameraType.V4L2:
                     status = f"{GRN}LOCAL{RST}"
                 else:
-                    ok = NetworkUtils.ping_host(cam.ip)
+                    ok = run_with_spinner(f"  {pad(cam.name[:25], 25)} | testing", lambda c=cam: NetworkUtils.ping_host(c.ip),
+                                          final="clear")      # [v9.0.106 S26-batch-test]
                     status = f"{GRN}OK{RST}" if ok else f"{RED}FAIL{RST}"
 
                 print(f"  {pad(cam.name[:25], 25)} | {status}")
@@ -11147,12 +11221,13 @@ class PTZMasterApp:
 
         # ---- 2. ping sweep
         for i, subnet in enumerate(subnets, 1):
-            print(f"  [{i}/{len(subnets)}] ping sweep {subnet}0/24 ...", end='', flush=True)
+            _lbl = f"[{i}/{len(subnets)}] ping sweep {subnet}0/24"      # [v9.0.106 S26-deep-sweep]
+            _t0 = time.time()
             try:
-                found = NetworkUtils.scan_subnet(subnet, max_workers=30)
-                print(f"  {len(found)} hosts")
+                found = run_with_spinner(_lbl, lambda s=subnet: NetworkUtils.scan_subnet(s, max_workers=30), final="clear")
+                print(f"  {GRN}✓{RST} {_lbl}  {DIM}{len(found)} hosts, {time.time() - _t0:.1f}s{RST}")
             except Exception as e:
-                print(f"  ERROR: {e}")
+                print(f"  {RED}✗{RST} {_lbl}  ERROR: {e}")
         print()
 
         # ---- 3. per-camera: resolve / learn / profiles / port
@@ -11163,68 +11238,86 @@ class PTZMasterApp:
                 results.append((cam.name, cam.ip, cam.ip, 'SKIP', 'local', str(len(cam.profiles)), '—'))
                 continue
 
-            old_ip = cam.ip
-            status = 'DEAD'
-            method = '—'
-            prof_cnt = 0
-            kept = False
-            rtsp = '—'
+            # [v9.0.106 S26-deep-cams] every camera is probed in a worker thread while the main thread shows a
+            # spinner with the camera name, the current step and the elapsed time (30-60 s used to be silent)
+            _step = [""]
 
-            # 3a. resolve_ip (serial -> find, MAC fallback)
-            try:
-                NetworkUtils.resolve_ip(cam, prefixes=subnets)
-            except Exception as e:
-                logger.debug(f"[S14] resolve {cam.name}: {e}")
-            new_ip = cam.ip
-            if new_ip != old_ip:
-                method = 'serial/MAC'
-            else:
-                # still verify current IP actually answers
-                if cam.ip and NetworkUtils.ping_host(cam.ip, timeout=1.0):
-                    method = 'in-place'
-
-            # 3b. identity learn (serial + MACs)
-            try:
-                if CameraIdentity.learn(cam, self.config.cameras):
-                    logger.info(f"[S14] {cam.name} identity refreshed")
-            except Exception as e:
-                logger.debug(f"[S14] learn {cam.name}: {e}")
-
-            # 3c. ONVIF get_profiles (only ONVIF/AUTO, and never under a running player)
-            _playing = any(p.pid and ProcessManager.is_running(p.pid) for p in cam.profiles)
-            if cam.type in (CameraType.ONVIF, CameraType.AUTO) and cam.ip:
-                if _playing:
-                    kept = True
-                    any_kept = True
-                else:
-                    try:
-                        client = ONVIFClient(cam)
-                        profs, _ = client.get_profiles()
-                        if profs:
-                            cam.profiles = profs
-                            cam.active_profile = 0
-                            prof_cnt = len(profs)
-                    except Exception as e:
-                        logger.debug(f"[S14] profiles {cam.name}: {e}")
-            prof_cnt = prof_cnt or len(cam.profiles)
-
-            # 3d. RTSP port check
-            if cam.ip:
-                for port in (cam.ports.rtsp, 554):
-                    if NetworkUtils.check_port(cam.ip, port, timeout=0.8):
-                        rtsp = f'open:{port}'
-                        break
-                else:
-                    rtsp = 'closed'
-
-            # status
-            if new_ip and NetworkUtils.ping_host(new_ip, timeout=1.0):
-                status = 'MOVED' if new_ip != old_ip else 'OK'
-            else:
+            def _probe(cam=cam):
+                nonlocal any_kept
+                old_ip = cam.ip
                 status = 'DEAD'
+                method = '—'
+                prof_cnt = 0
+                kept = False
+                rtsp = '—'
 
-            results.append((cam.name, old_ip, new_ip, status, method,
-                            f"{prof_cnt}{'*' if kept else ''}", rtsp))
+                # 3a. resolve_ip (serial -> find, MAC fallback)
+                _step[0] = "resolving IP"
+                try:
+                    NetworkUtils.resolve_ip(cam, prefixes=subnets)
+                except Exception as e:
+                    logger.debug(f"[S14] resolve {cam.name}: {e}")
+                new_ip = cam.ip
+                if new_ip != old_ip:
+                    method = 'serial/MAC'
+                else:
+                    # still verify current IP actually answers
+                    if cam.ip and NetworkUtils.ping_host(cam.ip, timeout=1.0):
+                        method = 'in-place'
+
+                # 3b. identity learn (serial + MACs)
+                _step[0] = "identity"
+                try:
+                    if CameraIdentity.learn(cam, self.config.cameras):
+                        logger.info(f"[S14] {cam.name} identity refreshed")
+                except Exception as e:
+                    logger.debug(f"[S14] learn {cam.name}: {e}")
+
+                # 3c. ONVIF get_profiles (only ONVIF/AUTO, and never under a running player)
+                _step[0] = "ONVIF profiles"
+                _playing = any(p.pid and ProcessManager.is_running(p.pid) for p in cam.profiles)
+                if cam.type in (CameraType.ONVIF, CameraType.AUTO) and cam.ip:
+                    if _playing:
+                        kept = True
+                        any_kept = True
+                    else:
+                        try:
+                            client = ONVIFClient(cam)
+                            profs, _ = client.get_profiles()
+                            if profs:
+                                cam.profiles = profs
+                                cam.active_profile = 0
+                                prof_cnt = len(profs)
+                        except Exception as e:
+                            logger.debug(f"[S14] profiles {cam.name}: {e}")
+                prof_cnt = prof_cnt or len(cam.profiles)
+
+                # 3d. RTSP port check
+                _step[0] = "RTSP port"
+                if cam.ip:
+                    for port in (cam.ports.rtsp, 554):
+                        if NetworkUtils.check_port(cam.ip, port, timeout=0.8):
+                            rtsp = f'open:{port}'
+                            break
+                    else:
+                        rtsp = 'closed'
+
+                # status
+                _step[0] = "ping"
+                if new_ip and NetworkUtils.ping_host(new_ip, timeout=1.0):
+                    status = 'MOVED' if new_ip != old_ip else 'OK'
+                else:
+                    status = 'DEAD'
+
+                return (cam.name, old_ip, new_ip, status, method,
+                        f"{prof_cnt}{'*' if kept else ''}", rtsp)
+
+            _t0 = time.time()
+            res = run_with_spinner(f"[{len(results) + 1}/{len(self.config.cameras)}] {cam.name}", _probe,
+                                   detail=lambda: _step[0], final="clear")
+            results.append(res)
+            _col = GRN if res[3] == 'OK' else (YLW if res[3] == 'MOVED' else RED)
+            print(f"  {_col}●{RST} {cam.name:<14} {_col}{res[3]:<6}{RST} {DIM}{time.time() - _t0:4.1f}s{RST}")
 
         # ---- 4. report
         _bar('─')
@@ -11295,8 +11388,7 @@ class PTZMasterApp:
         print(f"\n{CYN}Scanning networks...{RST}\n")
         
         for subnet in subnets:
-            print(f"  Scanning {subnet}0/24...")
-            NetworkUtils.scan_subnet(subnet, max_workers=30)
+            run_with_spinner(f"Scanning {subnet}0/24", lambda s=subnet: NetworkUtils.scan_subnet(s, max_workers=30))   # [v9.0.106 S26-moved-sweep]
         
         print(f"\n{GRN}ARP table populated{RST}\n")
         
@@ -11308,30 +11400,36 @@ class PTZMasterApp:
             if cam.type in (CameraType.V4L2, CameraType.FILE, CameraType.SCANNER):
                 continue
 
-            new_ip = None
-            by     = "?"
+            # [v9.0.106 S26-moved-cams] the identity / ARP / serial search can take seconds per camera and used
+            # to print nothing unless the IP had changed: show a spinner while it runs
+            def _probe(cam=cam):
+                new_ip = None
+                by     = "?"
 
-            # 1) identity search over every subnet the host knows about
-            if cam.serial:
-                try:
-                    new_ip = CameraIdentity.resolve(cam, prefixes=subnets)
-                    if new_ip and new_ip != cam.ip:
-                        by = "serial"
-                except Exception as e:
-                    logger.debug(f"find-moved: identity resolve failed for {cam.name}: {e}")
+                # 1) identity search over every subnet the host knows about
+                if cam.serial:
+                    try:
+                        new_ip = CameraIdentity.resolve(cam, prefixes=subnets)
+                        if new_ip and new_ip != cam.ip:
+                            by = "serial"
+                    except Exception as e:
+                        logger.debug(f"find-moved: identity resolve failed for {cam.name}: {e}")
 
-            # 2) MAC fallback, verified by serial when available
-            if new_ip is None and cam.mac not in (None, "", "UNKNOWN", "V4L2", "FILE", "SCANNER"):
-                mac_ip = NetworkUtils.get_ip_from_mac(cam.mac)
-                if mac_ip and mac_ip != cam.ip:
-                    if cam.serial:
-                        if CameraIdentity.matches(cam, mac_ip):
-                            new_ip, by = mac_ip, "MAC+serial"
+                # 2) MAC fallback, verified by serial when available
+                if new_ip is None and cam.mac not in (None, "", "UNKNOWN", "V4L2", "FILE", "SCANNER"):
+                    mac_ip = NetworkUtils.get_ip_from_mac(cam.mac)
+                    if mac_ip and mac_ip != cam.ip:
+                        if cam.serial:
+                            if CameraIdentity.matches(cam, mac_ip):
+                                new_ip, by = mac_ip, "MAC+serial"
+                            else:
+                                logger.warning(
+                                    f"find-moved: {cam.name} MAC-suggests {mac_ip} but serial mismatch - ignored")
                         else:
-                            logger.warning(
-                                f"find-moved: {cam.name} MAC-suggests {mac_ip} but serial mismatch - ignored")
-                    else:
-                        new_ip, by = mac_ip, "MAC (no serial)"
+                            new_ip, by = mac_ip, "MAC (no serial)"
+                return new_ip, by
+
+            new_ip, by = run_with_spinner(f"Checking {cam.name}", _probe, final="clear")
 
             if new_ip and new_ip != cam.ip:
                 print(f"  {pad(cam.name[:25], 25)} | {pad(cam.ip, 15)} | {GRN}{pad(new_ip, 15)}{RST} | {CYN}{by}{RST}")
@@ -11372,7 +11470,8 @@ class PTZMasterApp:
                 continue
             
             old_type = cam.type
-            new_type, _ = CameraDetector.detect(cam)
+            new_type, _ = run_with_spinner(f"  {pad(cam.name[:25], 25)} | detecting", lambda c=cam: CameraDetector.detect(c),
+                                           final="clear")      # [v9.0.106 S26-detect-types]
             cam.type = new_type
             
             color = {
@@ -11840,6 +11939,9 @@ class PTZMasterApp:
         if cam.type == CameraType.V4L2:
             self._show_imaging_v4l2(cam)
             return
+        if cam.type == CameraType.AUTO:
+            notify("TYPE=AUTO - use 'g' Sync or '?' to set", "warning")
+            return
         if cam.type != CameraType.ONVIF:
             notify("Full diagnostics only for ONVIF cameras", "warning")
             return
@@ -11851,20 +11953,35 @@ class PTZMasterApp:
         sys.stdout.write('\033[2J\033[H'); sys.stdout.flush()
         W = 57
 
+        # [v9.0.104 S24-imaging] the global pad() never truncates, so a long Manufacturer / Model / Firmware
+        # string pushed the right border out of the frame. Local variant: cut to the width, mark with "...".
+        def _pad(text, width):
+            visible = ansilen(text)
+            if visible <= width:
+                return text + " " * (width - visible)
+            return cut_by_width(text, max(1, width - 1)) + "\033[0m…"
+
         client = ONVIFClient(cam)
-        print(f"{CYN}Fetching device information...{RST}")
-
-        device_info = self._get_device_info(cam, client)
-        services = self._discover_services(cam, client)
-        system_info = self._get_system_info(cam, client)
-        camera_network = self._get_camera_network_info(cam, client)
-
-        snapshot_uri = ""
         prof = self.ui.current_profile
-        if prof and prof.token and prof.token != "None":
-            snapshot_uri = client.get_snapshot_uri(prof.token)
 
-        settings = client.get_imaging_settings()
+        # [v9.0.106 S26-imaging-fetch] six sequential ONVIF calls (up to ~3 s each on a slow camera) ran behind a
+        # static line; now they run in a worker thread while a spinner names the current step
+        _got = {"snapshot_uri": ""}
+        _step = [""]
+
+        def _fetch():
+            _step[0] = "device info"; _got["device_info"] = self._get_device_info(cam, client)
+            _step[0] = "services"; _got["services"] = self._discover_services(cam, client)
+            _step[0] = "system time"; _got["system_info"] = self._get_system_info(cam, client)
+            _step[0] = "network"; _got["camera_network"] = self._get_camera_network_info(cam, client)
+            if prof and prof.token and prof.token != "None":
+                _step[0] = "snapshot"; _got["snapshot_uri"] = client.get_snapshot_uri(prof.token)
+            _step[0] = "imaging"; _got["settings"] = client.get_imaging_settings()
+
+        run_with_spinner("Fetching device information", _fetch, detail=lambda: f"({_step[0]})", final="clear")
+        device_info, services = _got["device_info"], _got["services"]
+        system_info, camera_network = _got["system_info"], _got["camera_network"]
+        snapshot_uri, settings = _got["snapshot_uri"], _got["settings"]
 
         presets_count = len(cam.presets)
         presets_max = 128
@@ -11891,11 +12008,11 @@ class PTZMasterApp:
         max_label_len = max(len(label) for label, _ in fields)
         for label, value in fields:
             line = f" {label:<{max_label_len}} : {value}"
-            lines.append(f"{YLW}║{RST}{pad(line, W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{_pad(line, W)}{YLW}║{RST}")
 
         ntp_status = f"{GRN}OK{RST}" if system_info.get('ntp', False) else f"{RED}NO{RST}"
         time_line = f" System Time   : {system_info.get('system_date', 'N/A')} (NTP: {ntp_status})"
-        lines.append(f"{YLW}║{RST}{pad(time_line, W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad(time_line, W)}{YLW}║{RST}")
         lines.append(f"{YLW}╚{'═' * W}╝{RST}")
         lines.append("")
 
@@ -11910,8 +12027,8 @@ class PTZMasterApp:
         mac_display = camera_network.get('mac', cam.mac)
         if mac_display == "UNKNOWN":
             mac_display = "Unknown"
-        lines.append(f"{YLW}║{RST}{pad(f' 🌐 http://{cam.ip}:{cam.ports.onvif} ? ({mac_display})', W)}{YLW}║{RST}")
-        lines.append(f"{YLW}║{RST}{pad('', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad(f' 🌐 http://{cam.ip}:{cam.ports.onvif} ? ({mac_display})', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad('', W)}{YLW}║{RST}")
 
         service_items = [
             ('device',  '🔧', 'Device'),
@@ -11947,14 +12064,14 @@ class PTZMasterApp:
 
         dhcp_status = f"{GRN}YES{RST}" if camera_network.get('dhcp') == "YES" else f"{YLW}{camera_network.get('dhcp')}{RST}"
         ip_line = f" IP Address   : {camera_network['ip']} (DHCP: {dhcp_status})"
-        lines.append(f"{YLW}║{RST}{pad(ip_line, W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad(ip_line, W)}{YLW}║{RST}")
         gw_val = camera_network['gateway']
         dns_val = camera_network['dns']
-        lines.append(f"{YLW}║{RST}{pad(f' Gateway      : {gw_val}', W)}{YLW}║{RST}")
-        lines.append(f"{YLW}║{RST}{pad(f' DNS          : {dns_val}', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad(f' Gateway      : {gw_val}', W)}{YLW}║{RST}")
+        lines.append(f"{YLW}║{RST}{_pad(f' DNS          : {dns_val}', W)}{YLW}║{RST}")
         if camera_network.get('mac', 'UNKNOWN') != "UNKNOWN":
             mac_val = camera_network['mac']
-            lines.append(f"{YLW}║{RST}{pad(f' MAC          : {mac_val}', W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{_pad(f' MAC          : {mac_val}', W)}{YLW}║{RST}")
         lines.append(f"{YLW}╚{'═' * W}╝{RST}")
         lines.append("")
 
@@ -11973,21 +12090,21 @@ class PTZMasterApp:
             for idx, prof in enumerate(cam.profiles, 1):
                 if idx > 1:
                     lines.append(f"{YLW}╠{'═' * W}╣{RST}")
-                lines.append(f"{YLW}║{RST}{pad(f' Profile {idx}:', W)}{YLW}║{RST}")
+                lines.append(f"{YLW}║{RST}{_pad(f' Profile {idx}:', W)}{YLW}║{RST}")
 
                 values = [prof.token or "N/A", prof.name or "N/A", prof.res or "N/A", prof.codec or "N/A"]
                 for (_, field_label), value in zip(profile_labels, values):
-                    lines.append(f"{YLW}║{RST}{pad(f'  {field_label:<{max_profile_label}} : {value}', W)}{YLW}║{RST}")
+                    lines.append(f"{YLW}║{RST}{_pad(f'  {field_label:<{max_profile_label}} : {value}', W)}{YLW}║{RST}")
 
                 uri_label = "Stream URI"
-                lines.append(f"{YLW}║{RST}{pad(f'  {uri_label:<{max_profile_label}} :', W)}{YLW}║{RST}")
+                lines.append(f"{YLW}║{RST}{_pad(f'  {uri_label:<{max_profile_label}} :', W)}{YLW}║{RST}")
                 if prof.uri:
                     indent = "  "
                     max_line_len = W - len(indent) - 2
                     remaining = prof.uri
                     while remaining:
                         if len(remaining) <= max_line_len:
-                            lines.append(f"{YLW}║{RST}{pad(f'{indent}{remaining}', W)}{YLW}║{RST}")
+                            lines.append(f"{YLW}║{RST}{_pad(f'{indent}{remaining}', W)}{YLW}║{RST}")
                             break
                         split_pos = max_line_len
                         for separator in ['/', '?', '&', '=']:
@@ -11995,10 +12112,10 @@ class PTZMasterApp:
                             if pos > max_line_len * 0.3:
                                 split_pos = pos + 1
                                 break
-                        lines.append(f"{YLW}║{RST}{pad(f'{indent}{remaining[:split_pos]}', W)}{YLW}║{RST}")
+                        lines.append(f"{YLW}║{RST}{_pad(f'{indent}{remaining[:split_pos]}', W)}{YLW}║{RST}")
                         remaining = remaining[split_pos:]
                 else:
-                    lines.append(f"{YLW}║{RST}{pad('  none', W)}{YLW}║{RST}")
+                    lines.append(f"{YLW}║{RST}{_pad('  none', W)}{YLW}║{RST}")
 
             lines.append(f"{YLW}╚{'═' * W}╝{RST}")
             lines.append("")
@@ -12028,30 +12145,50 @@ class PTZMasterApp:
                     color = WHT
                 lines.append(f"{YLW}║{RST}  {emoji} {text}\033[{IMG_COL}G: {color}{val_str}{RST}\033[{IMG_END}G{YLW}║{RST}")
         else:
-            lines.append(f"{YLW}║{RST}{pad(f'  {RED}No imaging data or not supported{RST}', W)}{YLW}║{RST}")
+            lines.append(f"{YLW}║{RST}{_pad(f'  {RED}No imaging data or not supported{RST}', W)}{YLW}║{RST}")
 
         if settings and 'vs_token' in settings:
             lines.append(f"{YLW}╠{'═' * W}╣{RST}")
             vs_info = settings.get('vs_token', '?')
             ep_info = settings.get('endpoint', '?').replace(f"http://{cam.ip}:{cam.ports.onvif}", "")
             ns_info = settings.get('ns', '?')
-            lines.append(f"{YLW}║{RST}{pad(f'  {DIM}VideoSource: {vs_info} | {ep_info} ({ns_info}){RST}', W)}{YLW}║{RST}")
+            _vs = f'  {DIM}VideoSource: {vs_info} | {ep_info} ({ns_info}){RST}'
+            if ansilen(_vs) <= W:
+                lines.append(f"{YLW}║{RST}{_pad(_vs, W)}{YLW}║{RST}")
+            else:      # does not fit on one row: split instead of clipping
+                lines.append(f"{YLW}║{RST}{_pad(f'  {DIM}VideoSource: {vs_info}{RST}', W)}{YLW}║{RST}")
+                lines.append(f"{YLW}║{RST}{_pad(f'  {DIM}{ep_info} ({ns_info}){RST}', W)}{YLW}║{RST}")
 
         lines.append(f"{YLW}╚{'═' * W}╝{RST}")
 
         # --- ARMORED TUI LOOP (identyczna mechanika jak w display_tui_help) ---
         mouse_off()
         fd = sys.stdin.fileno()
-        old_term = termios.tcgetattr(fd)
+        old_term = None
+        old_winch = None
         resized = [True]
 
         def handle_winch(sig, frame):
             resized[0] = True
 
-        old_winch = signal.signal(signal.SIGWINCH, handle_winch)
         scroll_offset = 0
 
+        # notify() draws in the main UI and is invisible while the alternate screen is up. _flash() prints a
+        # short message on the last terminal row (never used by the frame) and the loop clears it after a while.
+        feedback = {'until': 0.0}
+
+        def _flash(msg, color=GRN, dur=1.5):
+            try:
+                _, th = shutil.get_terminal_size((80, 24))
+                sys.stdout.write(f"\033[{th};1H\033[K{color}{cut_by_width(msg, W + 2)}{RST}")
+                sys.stdout.flush()
+                feedback['until'] = time.time() + dur
+            except Exception:
+                pass
+
         try:
+            old_term = termios.tcgetattr(fd)      # inside try: a failure must not skip the cleanup below
+            old_winch = signal.signal(signal.SIGWINCH, handle_winch)
             tty.setraw(fd)
             sys.stdout.write('\033[?1049h\033[?1000h\033[?1002h\033[?1006h\033[?25l')
             sys.stdout.flush()
@@ -12065,6 +12202,11 @@ class PTZMasterApp:
 
                 # Rezerwujemy 4 wiersze na dolną ramkę snapshotu + stopkę (ESC/Q)
                 footer_h = 4 if snapshot_uri else 3
+                if term_h < footer_h + 3:
+                    # too small for the frame: a negative row would give a malformed escape sequence
+                    sys.stdout.write(f"\033[H\033[J{RED}Terminal too small - resize or press ESC/Q{RST}")
+                    sys.stdout.flush()
+                    return 0, -1, -1, 0, 0, 0
                 max_vis = max(1, term_h - footer_h - 1)
                 max_off = max(0, len(lines) - max_vis)
                 scroll_offset = max(0, min(scroll_offset, max_off))
@@ -12083,14 +12225,14 @@ class PTZMasterApp:
                     # query string used to push the right border out and wrap
                     _snap_show = snapshot_uri if len(snapshot_uri) <= W - 14 else snapshot_uri[:W - 15] + "…"
                     snap_line = f" {GRN}📸 Snapshot:{RST} {CYN}{_snap_show}{RST}"
-                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{pad(snap_line, W)}{YLW}║{RST}")
+                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{_pad(snap_line, W)}{YLW}║{RST}")
                     hint_row = snap_row + 1
                     hint_line = f" Press {YLW}(s){RST} to open snapshot in browser"
-                    buf.append(f"\033[{hint_row};1H{YLW}║{RST}{pad(hint_line, W)}{YLW}║{RST}")
+                    buf.append(f"\033[{hint_row};1H{YLW}║{RST}{_pad(hint_line, W)}{YLW}║{RST}")
                     bot_row = hint_row + 1
                 else:
                     snap_line = f" {YLW}📸 Snapshot: Not available{RST}"
-                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{pad(snap_line, W)}{YLW}║{RST}")
+                    buf.append(f"\033[{snap_row};1H{YLW}║{RST}{_pad(snap_line, W)}{YLW}║{RST}")
                     hint_row = -1
                     bot_row = snap_row + 1
 
@@ -12119,6 +12261,9 @@ class PTZMasterApp:
                 if resized[0]:
                     snap_r, hint_r, bot_r, btn_start, btn_end, max_off = _draw_screen()
                     resized[0] = False
+                if feedback['until'] and time.time() >= feedback['until']:
+                    feedback['until'] = 0.0
+                    resized[0] = True          # repaint = flash line gone
 
                 key = get_key(timeout=0.2)
                 if key == Key.TIMEOUT:
@@ -12149,10 +12294,10 @@ class PTZMasterApp:
                             ['xdg-open', snapshot_uri],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                         )
-                        notify("Opening snapshot in browser...", "info")
+                        _flash("Opening snapshot in browser…", GRN, 1.2)
                     except OSError as e:      # xdg-open missing: do not drop out of the viewer
                         logger.warning(f"xdg-open failed: {e}")
-                        notify("xdg-open not available - cannot open snapshot", "error")
+                        _flash("xdg-open not available - cannot open snapshot", RED, 2.0)
 
                 # Kliknięcie myszą w dolną krawędź: [↑][↓] lub (ESC/Q)
                 elif isinstance(key, MouseEvent) and not key.release:
@@ -12163,19 +12308,24 @@ class PTZMasterApp:
                             scroll_offset = max(0, scroll_offset - 1); resized[0] = True
                         elif max_off > 0 and 8 <= key.col <= 10 and scroll_offset < max_off:
                             scroll_offset = min(max_off, scroll_offset + 1); resized[0] = True
-                    elif key.btn == 64 and scroll_offset > 0:
-                        scroll_offset = max(0, scroll_offset - 3); resized[0] = True
-                    elif key.btn == 65 and scroll_offset < max_off:
-                        scroll_offset = min(max_off, scroll_offset + 3); resized[0] = True
+                    # (the wheel arrives as Key.MOUSE_SCROLL_* and is handled above)
 
         finally:
             try:
                 sys.stdout.write('\033[?1000l\033[?1002l\033[?1006l\033[?25h\033[?1049l')
                 sys.stdout.flush()
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-                signal.signal(signal.SIGWINCH, old_winch)
             except Exception:
                 pass
+            if old_term is not None:
+                try:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+                except Exception:
+                    pass
+            if old_winch is not None:
+                try:
+                    signal.signal(signal.SIGWINCH, old_winch)
+                except Exception:
+                    pass
             mouse_on()
 
 
