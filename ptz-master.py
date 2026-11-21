@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-VERSION = "9.0.106"   # [v9.0.106 SVER] + S26 activity spinners
+VERSION = "9.0.107"   # [v9.0.107 SVER] + S27 arp py3.6, S28 real CPU %
 __doc__ = f"""
 #--###========================================================###--#
 # 🎥  Name:         PTZ Master - Professional IP Camera Control
@@ -1590,14 +1590,53 @@ class Terminal:
         except Exception as e:
             logger.debug(f"Error positioning terminal: {e}")
 
+# [v9.0.107 S28-cpu] the "CPU" figure used to be the 1-minute load average divided by the core count, which lags by
+# minutes and is not a utilisation. A daemon thread now samples /proc/stat once a second, so the value is the real
+# recent load (all cores) and does not depend on how often the UI redraws.
+_CPU_STATE = {"pct": None, "thread": None}
+
+
+def _cpu_times():
+    """(idle, total) jiffies from the aggregate 'cpu' line of /proc/stat."""
+    with open('/proc/stat', 'r') as f:
+        parts = f.readline().split()
+    vals = [int(x) for x in parts[1:9]]          # user nice system idle iowait irq softirq steal
+    return vals[3] + vals[4], sum(vals)
+
+
+def _cpu_sampler():
+    prev = None
+    delay = 0.25                                  # first value after a quarter of a second, then every second
+    while True:
+        try:
+            cur = _cpu_times()
+            if prev is not None and cur[1] > prev[1]:
+                raw = 100.0 * (1.0 - float(cur[0] - prev[0]) / float(cur[1] - prev[1]))
+                old = _CPU_STATE["pct"]
+                _CPU_STATE["pct"] = raw if old is None else 0.7 * raw + 0.3 * old     # light smoothing, reacts in ~2-3 s
+            prev = cur
+        except Exception:
+            _CPU_STATE["pct"] = None              # no /proc/stat: get_cpu_usage() keeps using the load average
+            return
+        time.sleep(delay)
+        delay = 1.0
+
+
 def get_cpu_usage() -> str:
-    """Return CPU load as 1-min loadavg converted to % - stable, no delta."""
+    """Current CPU utilisation in % (all cores). Until the first sample is ready (and where /proc/stat is not
+    available) it falls back to the 1-minute load average expressed in %."""
     try:
-        with open('/proc/loadavg', 'r') as f:
-            load1 = float(f.read().split()[0])
-        cores = os.cpu_count() or 1
-        pct = int(min(100, max(0, load1 / cores * 100)))
-        return f"{pct}%"
+        if _CPU_STATE["thread"] is None:
+            import threading
+            t = threading.Thread(target=_cpu_sampler, name="cpu-sampler", daemon=True)
+            _CPU_STATE["thread"] = t
+            t.start()
+        pct = _CPU_STATE["pct"]
+        if pct is None:
+            with open('/proc/loadavg', 'r') as f:
+                load1 = float(f.read().split()[0])
+            pct = load1 / (os.cpu_count() or 1) * 100
+        return f"{int(min(100, max(0, round(pct))))}%"
     except Exception:
         return "0%"
 
@@ -2952,7 +2991,14 @@ class CameraIdentity:
         out: Dict[str, str] = {}
         try:
             if shutil.which('ip'):
-                txt = subprocess.run(['ip', '-4', 'neigh', 'show'], capture_output=True, text=True, timeout=3).stdout
+                # [v9.0.107 S27-arp] capture_output= / text= need Python 3.7: on 3.6 the TypeError was swallowed by the
+                # outer except, which also skipped the /proc/net/arp fallback below (ARP table always empty)
+                try:
+                    txt = subprocess.run(['ip', '-4', 'neigh', 'show'], stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, universal_newlines=True, timeout=3).stdout
+                except Exception as e:
+                    logger.debug(f"arp_table: ip neigh failed: {e}")
+                    txt = ""
                 for line in txt.splitlines():
                     p = line.split()
                     if 'lladdr' in p and p.index('lladdr') + 1 < len(p):
